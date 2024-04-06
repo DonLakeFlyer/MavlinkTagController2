@@ -1,0 +1,35 @@
+name: Mac Compile
+
+on:
+  push:
+    branches:
+      - 'master'
+  pull_request:
+    branches:
+    - '*'
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SOURCE_DIR: ${{ github.workspace }}
+
+jobs:
+    build:
+      runs-on: macos-latest
+        
+      steps:
+        - name: Checkout repo
+          uses: actions/checkout@v4
+          with:
+            submodules: recursive
+
+        - name: Install Dependencies
+          run:  |
+            brew install boost
+  
+        - name: Build
+          working-directory: ${{ github.workspace }}
+          run:  |
+                make

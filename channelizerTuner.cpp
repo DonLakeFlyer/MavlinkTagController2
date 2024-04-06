@@ -87,13 +87,13 @@ bool channelizerTuner(
 
         for (auto requestedFreqHz : cleanedFreqListHz) {
             // Adjust the requested frequency to be zero-based withing the available total bandwidth
-            int adjustedFreqHz = requestedFreqHz - (testCenterHz - halfBwHz);
+            int32_t adjustedFreqHz = requestedFreqHz - (testCenterHz - halfBwHz);
 
             // Find the frequency position within the channel bandwidth
             auto hzPositionWithinChannel = adjustedFreqHz % channelBwHz;
 
             // Find the distance from the center of the channel
-            auto distanceFromCenter = abs(hzPositionWithinChannel - halfChannelBwHz);
+            uint32_t distanceFromCenter = abs((int)hzPositionWithinChannel - (int)halfChannelBwHz);
 
             distanceFromCenters.push_back(distanceFromCenter);
 

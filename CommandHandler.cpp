@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 #include <filesystem>
+#include <fstream>
 
 #include "CommandHandler.h"
 #include "TunnelProtocol.h"

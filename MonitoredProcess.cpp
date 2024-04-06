@@ -97,7 +97,7 @@ void MonitoredProcess::_run(void)
 		char numStr[21];
 
 		statusStr = "Process fail: ";
-		sprintf(numStr, "%d", result);
+		snprintf(numStr, sizeof(numStr), "%d", result);
 		statusStr.append(numStr);
 		statusStr.append(" ");
 	}
