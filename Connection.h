@@ -13,6 +13,7 @@ class Connection
 {
 public:
 	Connection(MavlinkSystem* mavlink);
+	virtual ~Connection();
 
 	bool start					();
 	void stop					();

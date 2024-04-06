@@ -7,7 +7,14 @@
 
 Connection::Connection(MavlinkSystem* mavlink)
 	: _mavlink				(mavlink)
-{}
+{
+
+}
+
+Connection::~Connection()
+{
+
+}
 
 bool Connection::start()
 {
