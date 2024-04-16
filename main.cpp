@@ -5,6 +5,7 @@
 #include "TelemetryCache.h"
 #include "MavlinkSystem.h"
 #include "PulseSimulator.h"
+#include "MavlinkFtpServer.h"
 
 #include <chrono>
 #include <cstdint>
@@ -43,6 +44,7 @@ int main(int argc, char** argv)
 
 	auto mavlink 			= new MavlinkSystem(connectionUrl);
     auto commandHandler 	= CommandHandler { mavlink };
+    auto ftpServer 			= MavlinkFtpServer { mavlink };
     auto telemetryCache     = new TelemetryCache(mavlink);
     auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), 50000, mavlink, telemetryCache };
 

@@ -32,6 +32,7 @@ add_executable(MavlinkTagController2
     PulseSimulator.cpp PulseSimulator.h
     timeHelpers.cpp timeHelpers.h
     LogFileManager.cpp LogFileManager.h
+    MavlinkFtpServer.cpp MavlinkFtpServer.h
 )
 
 target_include_directories(MavlinkTagController2

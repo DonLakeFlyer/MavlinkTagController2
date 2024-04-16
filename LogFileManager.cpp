@@ -12,7 +12,7 @@ namespace bf = boost::filesystem;
 namespace bs = boost::system;
 
 LogFileManager* LogFileManager::_instance       = nullptr;
-const char* 	LogFileManager::_logDirPrefix   = "Logs";
+const char* 	LogFileManager::_logDirPrefix   = "Logs-";
 
 LogFileManager* LogFileManager::instance()
 {
@@ -37,7 +37,7 @@ void LogFileManager::detectorsStarted()
     char buffer[80];
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%d_%H-%M", &now_utc);
 
-    _logDir = formatString("%s/%s-%s", _homeDir.c_str(), _logDirPrefix, buffer);
+    _logDir = formatString("%s/%s%s", _homeDir.c_str(), _logDirPrefix, buffer);
 
     bs::error_code errorCode;
     bf::create_directory(_logDir.c_str(), errorCode);
