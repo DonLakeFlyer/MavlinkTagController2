@@ -11,8 +11,10 @@ public:
 	void 		detectorsStopped();
     bool        detectorsRunning() const { return _detectorsRunning; }
 
-	std::string filename(const char* root, const char* extension);
-	std::string logDir() const { return _logDir; }
+	std::string filename	(const char* root, const char* extension);
+	std::string logDir		() const { return _logDir; }
+
+	static std::string logDirPrefix() { return _logDirPrefix; }
 
 private:
 	LogFileManager();
