@@ -3,6 +3,8 @@
 #include "UdpConnection.h"
 #include "SerialConnection.h"
 #include "TunnelProtocol.h"
+#include "timeHelpers.h"
+#include "TelemetryCache.h"
 
 #include <mutex>
 #include <fstream>
@@ -200,6 +202,13 @@ void MavlinkSystem::startTunnelHeartbeatSender()
 			heartbeat.status			= _heartbeatStatus;
 
             sendTunnelMessage(&heartbeat, sizeof(heartbeat));
+
+#if 1
+			// Handy for debugging telemetry cache
+			double time = secondsSinceEpoch() - 5.0;
+			auto cacheEntry = _telemetryCache->telemetryForTime(time);
+			logDebug() << "Telemetry cache entry for time - yaw:" << cacheEntry.attitudeEuler.yawDegrees;
+#endif
 
             if (cpuWaitCount-- <= 0) {
                 cpuWaitCount = 30;

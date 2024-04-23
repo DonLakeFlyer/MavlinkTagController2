@@ -19,6 +19,7 @@
 using MessageCallback = std::function<void(const mavlink_message_t&)>;
 
 class Connection;
+class TelemetryCache;
 
 class MavlinkSystem
 {
@@ -26,6 +27,7 @@ public:
 	MavlinkSystem(const std::string& connectionUrl);
 	~MavlinkSystem();
 
+	void setTelemetryCache(TelemetryCache* telemetryCache) { _telemetryCache = telemetryCache; }
 	bool start();
 	void stop();
 
@@ -57,6 +59,7 @@ private:
 	std::mutex 					_subscriptions_mutex {};
 	Telemetry 					_telemetry;
 	uint16_t					_heartbeatStatus { HEARTBEAT_STATUS_IDLE };
+	TelemetryCache*				_telemetryCache;
 
 	friend class MavlinkOutgoingMessageQueue;
 };

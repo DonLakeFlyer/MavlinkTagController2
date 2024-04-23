@@ -50,6 +50,7 @@ int main(int argc, char** argv)
 
     udpPulseReceiver.start();
 
+	mavlink->setTelemetryCache(telemetryCache);
 	if (!mavlink->start()) {
 		logError() << "Mavlink start failed";
 		return 1;

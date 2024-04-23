@@ -45,8 +45,6 @@ TelemetryCache::TelemetryCacheEntry_t TelemetryCache::telemetryForTime(double ti
     TelemetryCacheEntry_t           bestEntry       { };
     double                          bestDiffMSecs   = -1;
 
-    logDebug() << "telemetryForTime";
-
     // Find the closest matching entry in the cache
     for (auto entry : _telemetryCache) {
         double  entryDiffMSecs  = std::fabs(timeInSeconds - entry.timeInSeconds);
@@ -60,6 +58,12 @@ TelemetryCache::TelemetryCacheEntry_t TelemetryCache::telemetryForTime(double ti
                 bestEntry = entry;
             }
         }
+    }
+
+    if (bestDiffMSecs == -1) {
+        logError() << "telemtryForTime: No telemetry data available";
+    } else {
+        logDebug() << "telemetryForTime: Found telemetry data for time " << timeInSeconds << " at " << bestEntry.timeInSeconds << " (diff: " << bestDiffMSecs << "s)";
     }
 
     return bestEntry;
