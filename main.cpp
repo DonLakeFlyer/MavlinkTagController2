@@ -6,6 +6,7 @@
 #include "MavlinkSystem.h"
 #include "PulseSimulator.h"
 #include "MavlinkFtpServer.h"
+#include "PulseHandler.h"
 
 #include <chrono>
 #include <cstdint>
@@ -43,10 +44,17 @@ int main(int argc, char** argv)
     logInfo() << "Connecting to" << connectionUrl;
 
 	auto mavlink 			= new MavlinkSystem(connectionUrl);
-    auto commandHandler 	= CommandHandler { mavlink };
     auto ftpServer 			= MavlinkFtpServer { mavlink };
     auto telemetryCache     = new TelemetryCache(mavlink);
-    auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), 50000, mavlink, telemetryCache };
+	auto pulseHandler 		= new PulseHandler(mavlink, telemetryCache);
+    auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), 50000, pulseHandler };
+
+	PulseSimulator* pulseSimulator = nullptr;
+	if (simulatePulse) {
+		pulseSimulator = new PulseSimulator(pulseHandler, mavlink, antennaOffset);
+	}
+
+    auto commandHandler 	= CommandHandler { mavlink, pulseSimulator };
 
     udpPulseReceiver.start();
 
@@ -58,11 +66,6 @@ int main(int argc, char** argv)
 	logInfo() << "Waiting for autopilot heartbeat...";
 	while (!mavlink->connected()) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	}
-
-	PulseSimulator* pulseSimulator = nullptr;
-	if (simulatePulse) {
-		pulseSimulator = new PulseSimulator(mavlink, antennaOffset);
 	}
 
 	bool tunnelHeartbeatsStarted = false;
