@@ -4,9 +4,11 @@
 #include "TunnelProtocol.h"
 #include "formatString.h"
 #include "log.h"
+#include "PulseHandler.h"
 
-PulseSimulator::PulseSimulator(MavlinkSystem* mavlink, uint32_t antennaOffset)
-	: _mavlink      (mavlink)
+PulseSimulator::PulseSimulator(PulseHandler* pulseHandler, MavlinkSystem* mavlink, uint32_t antennaOffset)
+    : _pulseHandler (pulseHandler)
+	, _mavlink      (mavlink)
     , _antennaOffset(antennaOffset)
 {
     std::thread([this]()
@@ -18,59 +20,48 @@ PulseSimulator::PulseSimulator(MavlinkSystem* mavlink, uint32_t antennaOffset)
         while (true) {
             Telemetry& telemetry = _mavlink->telemetry();
 
-            TunnelProtocol::PulseInfo_t heartbeatInfo;
-
-            memset(&heartbeatInfo, 0, sizeof(heartbeatInfo));
-
-            heartbeatInfo.header.command    = COMMAND_ID_PULSE;
-            heartbeatInfo.frequency_hz      = 0;
+            PulseHandler::UDPPulseInfo_T heartbeatInfo;
+            memset(&heartbeatInfo, 0, sizeof(heartbeatInfo));   // frequezy_hz == 0 means heartbeat
 
             if (telemetry.lastPosition().has_value() && telemetry.lastAttitudeEuler().has_value() && _mavlink->gcsSystemId().has_value()) {
-                heartbeatInfo.tag_id = 2;
-                _mavlink->sendTunnelMessage(&heartbeatInfo, sizeof(heartbeatInfo));
-                heartbeatInfo.tag_id = 3;
-                _mavlink->sendTunnelMessage(&heartbeatInfo, sizeof(heartbeatInfo));
+                if (_sendTagPulses) {
+                    // Send detector heartbeats
+                    heartbeatInfo.tag_id = 2;
+                    _pulseHandler->handlePulse(heartbeatInfo);
+                    heartbeatInfo.tag_id = 3;
+                    _pulseHandler->handlePulse(heartbeatInfo);
 
-				auto vehicleAttitude = telemetry.lastAttitudeEuler().value();
-				auto vehiclePosition = telemetry.lastPosition().value();
+                    // Send tag pulses for resting tag
+                    
+                    auto vehicleAttitude = telemetry.lastAttitudeEuler().value();
 
-                double currentTimeInSeconds = secondsSinceEpoch();
+                    double currentTimeInSeconds = secondsSinceEpoch();
 
-                TunnelProtocol::PulseInfo_t pulseInfo;
+                    PulseHandler::UDPPulseInfo_T pulseInfo;
+                    memset(&pulseInfo, 0, sizeof(pulseInfo));
 
-                memset(&pulseInfo, 0, sizeof(pulseInfo));
+                    pulseInfo.tag_id            = 3;
+                    pulseInfo.frequency_hz      = _frequencyHz;
+                    pulseInfo.snr               = _snrFromYaw(vehicleAttitude.yawDegrees);
+                    pulseInfo.stft_score        = pulseInfo.snr;
+                    pulseInfo.group_seq_counter = seqCounter++;
+                    pulseInfo.confirmed_status  = 1;
+                    pulseInfo.noise_psd         = 1e-9;
 
-                pulseInfo.header.command                = COMMAND_ID_PULSE;
-                pulseInfo.tag_id                        = 3;
-                pulseInfo.frequency_hz                  = 146000000;
-                pulseInfo.snr                           = _snrFromYaw(vehicleAttitude.yawDegrees);
-                pulseInfo.group_seq_counter             = seqCounter++;
-                pulseInfo.confirmed_status              = 1;
-                pulseInfo.position_x                    = vehiclePosition.latitude;
-                pulseInfo.position_y                    = vehiclePosition.longitude;
-                pulseInfo.position_z                    = vehiclePosition.relativeAltitude;
-                pulseInfo.orientation_x                 = vehicleAttitude.rollDegrees;
-                pulseInfo.orientation_y                 = vehicleAttitude.pitchDegrees;
-                pulseInfo.orientation_z                 = vehicleAttitude.yawDegrees;
-                pulseInfo.noise_psd                     = 1e-9;
+                    for (int i=2; i>=0; i--) {
+                        pulseInfo.start_time_seconds    = currentTimeInSeconds - (i * intraPulseSeconds);
+                        pulseInfo.group_ind             = i + 1;
 
-                for (int i=2; i>=0; i--) {
-                    pulseInfo.start_time_seconds            = currentTimeInSeconds - (i * intraPulseSeconds);
-                    pulseInfo.group_ind                     = i + 1;
+                        std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f noise_psd: %5.1g freq: %9u",
+                                                        pulseInfo.confirmed_status,
+                                                        pulseInfo.tag_id,
+                                                        pulseInfo.snr,
+                                                        pulseInfo.noise_psd,
+                                                        pulseInfo.frequency_hz);
+                        logInfo() << pulseStatus;
 
-                    std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
-                                                    pulseInfo.confirmed_status,
-                                                    pulseInfo.tag_id,
-                                                    pulseInfo.snr,
-                                                    pulseInfo.noise_psd,
-                                                    pulseInfo.frequency_hz,
-                                                    vehiclePosition.latitude,
-                                                    vehiclePosition.longitude,
-                                                    vehicleAttitude.yawDegrees,
-                                                    vehiclePosition.relativeAltitude);
-                    logInfo() << pulseStatus;
-
-                    _mavlink->sendTunnelMessage(&pulseInfo, sizeof(pulseInfo));
+                        _pulseHandler->handlePulse(pulseInfo);
+                    }
                 }
             }
 

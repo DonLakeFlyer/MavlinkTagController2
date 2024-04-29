@@ -22,13 +22,15 @@
 #include "channelizerTuner.h"
 #include "MavlinkSystem.h"
 #include "LogFileManager.h"
+#include "PulseSimulator.h"
 
 using namespace TunnelProtocol;
 
-CommandHandler::CommandHandler(MavlinkSystem* mavlink)
-    : _mavlink              (mavlink)
-    , _homePath             (getenv("HOME"))
-    , _airspyCmdLine        ("-h 21 -t 0")
+CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimulator)
+    : _mavlink          (mavlink)
+    , _pulseSimulator   (pulseSimulator)
+    , _homePath         (getenv("HOME"))
+    , _airspyCmdLine    ("-h 21 -t 0")
 {
     using namespace std::placeholders;
     _mavlink->subscribeToMessage(MAVLINK_MSG_ID_TUNNEL, std::bind(&CommandHandler::_handleTunnelMessage, this, _1));
@@ -180,77 +182,81 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
         logInfo() << "\tradio_center_frequency_hz:" << startDetection.radio_center_frequency_hz; 
         logInfo() << "\tsdr_type:"                  << startDetection.sdr_type; 
 
-        switch (startDetection.sdr_type) {
-        case SDR_TYPE_AIRSPY_MINI:
-        {
-            _airspyPipe         = new bp::pipe();
-            airspyChannelizeDir = "airspy_channelize_mini";
+        if (_pulseSimulator) {
+            _pulseSimulator->startSendingTagPulses(startDetection.radio_center_frequency_hz);
+        } else {
+            switch (startDetection.sdr_type) {
+            case SDR_TYPE_AIRSPY_MINI:
+            {
+                _airspyPipe         = new bp::pipe();
+                airspyChannelizeDir = "airspy_channelize_mini";
 
-            commandStr  = formatString("airspy_rx -f %f -a 3000000 -r /dev/stdout %s", (double)startDetection.radio_center_frequency_hz / 1000000.0, _airspyCmdLine.c_str());
-            logPath     = logFileManager->filename("airspy_rx", "log");
-            MonitoredProcess* airspyProc = new MonitoredProcess(
-                                                    _mavlink, 
-                                                    "airspy_rx", 
-                                                    commandStr.c_str(), 
-                                                    logPath.c_str(), 
-                                                    MonitoredProcess::OutputPipe,
-                                                    _airspyPipe);
-            airspyProc->start();
-            _processes.push_back(airspyProc);
+                commandStr  = formatString("/usr/local/bin/airspy_rx -f %f -a 3000000 -r /dev/stdout %s", (double)startDetection.radio_center_frequency_hz / 1000000.0, _airspyCmdLine.c_str());
+                logPath     = logFileManager->filename("airspy_rx", "log");
+                MonitoredProcess* airspyProc = new MonitoredProcess(
+                                                        _mavlink, 
+                                                        "airspy_rx", 
+                                                        commandStr.c_str(), 
+                                                        logPath.c_str(), 
+                                                        MonitoredProcess::OutputPipe,
+                                                        _airspyPipe);
+                airspyProc->start();
+                _processes.push_back(airspyProc);
 
-            logPath = logFileManager->filename("csdr-uavrt", "log");
-            MonitoredProcess* csdrProc = new MonitoredProcess(
-                                                    _mavlink, 
-                                                    "csdr-uavrt", 
-                                                    "csdr-uavrt fir_decimate_cc 8 0.05 HAMMING", 
-                                                    logPath.c_str(), 
-                                                    MonitoredProcess::InputPipe,
-                                                    _airspyPipe);
-            csdrProc->start();
-            _processes.push_back(csdrProc);
-        }
-            break;
+                logPath = logFileManager->filename("csdr-uavrt", "log");
+                MonitoredProcess* csdrProc = new MonitoredProcess(
+                                                        _mavlink, 
+                                                        "csdr-uavrt", 
+                                                        "csdr-uavrt fir_decimate_cc 8 0.05 HAMMING", 
+                                                        logPath.c_str(), 
+                                                        MonitoredProcess::InputPipe,
+                                                        _airspyPipe);
+                csdrProc->start();
+                _processes.push_back(csdrProc);
+            }
+                break;
 
-        case SDR_TYPE_AIRSPY_HF:
-        {
-            airspyChannelizeDir = "airspy_channelize_hf";
+            case SDR_TYPE_AIRSPY_HF:
+            {
+                airspyChannelizeDir = "airspy_channelize_hf";
 
-            commandStr  = formatString("airspyhf_rx_udp -u 10000 -f %f -a 192000 -g on -l low", (double)startDetection.radio_center_frequency_hz / 1000000.0);
-            logPath     = logFileManager->filename("airspyhf_rx_udp", "log");
-            MonitoredProcess* airspyProc = new MonitoredProcess(
-                                                    _mavlink, 
-                                                    "airspyhf_rx_udp", 
-                                                    commandStr.c_str(), 
-                                                    logPath.c_str(), 
-                                                    MonitoredProcess::NoPipe,
-                                                    NULL);
-            airspyProc->start();
-            _processes.push_back(airspyProc);
-        }
-            break;
+                commandStr  = formatString("airspyhf_rx_udp -u 10000 -f %f -a 192000 -g on -l low", (double)startDetection.radio_center_frequency_hz / 1000000.0);
+                logPath     = logFileManager->filename("airspyhf_rx_udp", "log");
+                MonitoredProcess* airspyProc = new MonitoredProcess(
+                                                        _mavlink, 
+                                                        "airspyhf_rx_udp", 
+                                                        commandStr.c_str(), 
+                                                        logPath.c_str(), 
+                                                        MonitoredProcess::NoPipe,
+                                                        NULL);
+                airspyProc->start();
+                _processes.push_back(airspyProc);
+            }
+                break;
 
-        default:
-            logError() << "_handleStartDetection - Unknown sdr type:" << startDetection.sdr_type;
-            _mavlink->sendStatusText("Command failed. Unknown sdr type.", MAV_SEVERITY_ERROR);
-            return;
-        }
+            default:
+                logError() << "_handleStartDetection - Unknown sdr type:" << startDetection.sdr_type;
+                _mavlink->sendStatusText("Command failed. Unknown sdr type.", MAV_SEVERITY_ERROR);
+                return;
+            }
 
-        commandStr  = formatString("%s/repos/%s/airspy_channelize %s", _homePath, airspyChannelizeDir.c_str(), _tagDatabase.channelizerCommandLine().c_str());
-        logPath = logFileManager->filename("airspy_channelize", "log");
-        MonitoredProcess* channelizeProc = new MonitoredProcess(
-                                                    _mavlink, 
-                                                    "airspy_channelize", 
-                                                    commandStr.c_str(), 
-                                                    logPath.c_str(), 
-                                                    MonitoredProcess::NoPipe,
-                                                    NULL);
-        channelizeProc->start();
-        _processes.push_back(channelizeProc);
+            commandStr  = formatString("%s/repos/%s/airspy_channelize %s", _homePath, airspyChannelizeDir.c_str(), _tagDatabase.channelizerCommandLine().c_str());
+            logPath = logFileManager->filename("airspy_channelize", "log");
+            MonitoredProcess* channelizeProc = new MonitoredProcess(
+                                                        _mavlink, 
+                                                        "airspy_channelize", 
+                                                        commandStr.c_str(), 
+                                                        logPath.c_str(), 
+                                                        MonitoredProcess::NoPipe,
+                                                        NULL);
+            channelizeProc->start();
+            _processes.push_back(channelizeProc);
 
-        for (const TunnelProtocol::TagInfo_t& tagInfo: _tagDatabase) {
-            _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
-            if (tagInfo.intra_pulse2_msecs != 0) {
-                _startDetector(logFileManager, tagInfo, true /* secondaryChannel */);
+            for (const TunnelProtocol::TagInfo_t& tagInfo: _tagDatabase) {
+                _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
+                if (tagInfo.intra_pulse2_msecs != 0) {
+                    _startDetector(logFileManager, tagInfo, true /* secondaryChannel */);
+                }
             }
         }
 
@@ -273,13 +279,17 @@ bool CommandHandler::_handleStopDetection(void)
     }
 
     std::thread([this]() {
-        for (MonitoredProcess* process: _processes) {
-            process->stop();
-        }
-        _processes.clear();
+        if (_pulseSimulator) {
+            _pulseSimulator->stopSendingTagPulses();
+        } else {
+            for (MonitoredProcess* process: _processes) {
+                process->stop();
+            }
+            _processes.clear();
 
-        delete _airspyPipe;
-        _airspyPipe = NULL;
+            delete _airspyPipe;
+            _airspyPipe = NULL;
+        }
 
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
         _mavlink->sendStatusText("#Detectors stopped", MAV_SEVERITY_INFO);
@@ -315,11 +325,11 @@ bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         switch (rawCapture.sdr_type) {
         case SDR_TYPE_AIRSPY_MINI:
-            commandStr = formatString("airspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 90000000", _homePath, frequencyMhz);
+            commandStr = formatString("/usr/local/bin/airspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 90000000", _homePath, frequencyMhz);
             logPath    = formatString("%s/airspy-mini-capture.log", _homePath);
             break;
         case SDR_TYPE_AIRSPY_HF:
-            commandStr = formatString("airspyhf_rx_udp -r %s/airspy_hf.dat -f %f -a 192000 -g on -l low -n 5760000", _homePath, frequencyMhz);
+            commandStr = formatString("/usr/local/bin/airspyhf_rx_udp -r %s/airspy_hf.dat -f %f -a 192000 -g on -l low -n 5760000", _homePath, frequencyMhz);
             logPath    = formatString("%s/airspy-hf-capture.log", _homePath);
             break;
         default:

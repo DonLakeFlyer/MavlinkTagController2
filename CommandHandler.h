@@ -14,10 +14,11 @@ namespace bp = boost::process;
 class MavlinkSystem;
 class MonitoredProcess;
 class LogFileManager;
+class PulseSimulator;
 
 class CommandHandler {
 public:
-    CommandHandler(MavlinkSystem* mavlink);
+    CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimulator);
 
 private:
     void _sendCommandAck        (uint32_t command, uint32_t result, std::string& ackMessage);
@@ -34,12 +35,13 @@ private:
     std::string _tunnelCommandResultToString(uint32_t result);
 
 private:
-    MavlinkSystem*                  _mavlink;
+    MavlinkSystem*                  _mavlink                = nullptr;
+    PulseSimulator*                 _pulseSimulator         = nullptr;
     TagDatabase                     _tagDatabase;
     bool                            _receivingTags          = false;
     uint32_t                        _receivingTagsSdrType;
-    char*                           _homePath               = NULL;
+    char*                           _homePath               = nullptr;
     std::vector<MonitoredProcess*>  _processes;
-    bp::pipe*                       _airspyPipe             = NULL;
+    bp::pipe*                       _airspyPipe             = nullptr;
     std::string                     _airspyCmdLine;
 };
