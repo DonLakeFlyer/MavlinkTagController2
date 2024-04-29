@@ -65,10 +65,11 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
         pulseInfo.orientation_z                 = telemetry.attitudeEuler.yawDegrees;
         pulseInfo.noise_psd                     = udpPulseInfo.noise_psd;
 
-        std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+        std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f stft_score: %5.1f noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
                                         pulseInfo.confirmed_status,
                                         pulseInfo.tag_id,
                                         pulseInfo.snr,
+                                        pulseInfo.stft_score,
                                         pulseInfo.noise_psd,
                                         pulseInfo.frequency_hz,
                                         telemetry.position.latitude,
