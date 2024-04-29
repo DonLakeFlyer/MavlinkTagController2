@@ -37,7 +37,7 @@ This is a custom version of csdr which outputs to udp
 
 ```
 cd ~/repos
-git clone git@github.com:DonLakeFlyer/csdr-uavrt.git
+git clone https://github.com/DonLakeFlyer/csdr-uavrt.git
 cd csdr-uavrt 
 make
 sudo make install
@@ -46,7 +46,7 @@ sudo make install
 ### uavrt_detection
 ```
 cd ~/repos
-git clone --recursive git@github.com:dynamic-and-active-systems-lab/uavrt_detection.git
+git clone --recursive https://github.com/dynamic-and-active-systems-lab/uavrt_detection.git
 cd uavrt_detection 
 make
 ```
@@ -56,7 +56,7 @@ make
 #### AirSpy Mini version
 ```
 cd ~/repos
-git clone --recursive git@github.com:dynamic-and-active-systems-lab/airspy_channelize.git airspy_channelize_mini
+git clone --recursive https://github.com/dynamic-and-active-systems-lab/airspy_channelize.git airspy_channelize_mini
 cd airspy_channelize_mini
 make
 ```
@@ -64,13 +64,13 @@ make
 #### AirSpy HF version
 ```
 cd ~/repos
-git clone --recursive -b airspy-hf git@github.com:dynamic-and-active-systems-lab/airspy_channelize.git airspy_channelize_hf
+git clone --recursive -b airspy-hf https://github.com/dynamic-and-active-systems-lab/airspy_channelize.git airspy_channelize_hf
 cd airspy_channelize_hf
 make
 ```
 
 ## Tag Tracker QGC
-You can get an insaller artifact from here: `https://github.com/DonLakeFlyer/UAV-RT-TagTracker/actions`
+You can get an installer artifact from here: `https://github.com/DonLakeFlyer/UAV-RT-TagTracker/actions`
 
 You need libfuse2 to run the appimages produced by GitHub. Install instructions here: https://github.com/AppImage/AppImageKit/wiki/FUSE
 On Ubuntu (>= 22.04):
