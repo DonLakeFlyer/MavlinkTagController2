@@ -191,7 +191,7 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
                 _airspyPipe         = new bp::pipe();
                 airspyChannelizeDir = "airspy_channelize_mini";
 
-                commandStr  = formatString("airspy_rx -f %f -a 3000000 -r /dev/stdout %s", (double)startDetection.radio_center_frequency_hz / 1000000.0, _airspyCmdLine.c_str());
+                commandStr  = formatString("/usr/local/bin/airspy_rx -f %f -a 3000000 -r /dev/stdout %s", (double)startDetection.radio_center_frequency_hz / 1000000.0, _airspyCmdLine.c_str());
                 logPath     = logFileManager->filename("airspy_rx", "log");
                 MonitoredProcess* airspyProc = new MonitoredProcess(
                                                         _mavlink, 
@@ -325,11 +325,11 @@ bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         switch (rawCapture.sdr_type) {
         case SDR_TYPE_AIRSPY_MINI:
-            commandStr = formatString("airspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 90000000", _homePath, frequencyMhz);
+            commandStr = formatString("/usr/local/bin/airspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 90000000", _homePath, frequencyMhz);
             logPath    = formatString("%s/airspy-mini-capture.log", _homePath);
             break;
         case SDR_TYPE_AIRSPY_HF:
-            commandStr = formatString("airspyhf_rx_udp -r %s/airspy_hf.dat -f %f -a 192000 -g on -l low -n 5760000", _homePath, frequencyMhz);
+            commandStr = formatString("/usr/local/bin/airspyhf_rx_udp -r %s/airspy_hf.dat -f %f -a 192000 -g on -l low -n 5760000", _homePath, frequencyMhz);
             logPath    = formatString("%s/airspy-hf-capture.log", _homePath);
             break;
         default:
