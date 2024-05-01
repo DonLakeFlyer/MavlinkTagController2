@@ -32,6 +32,12 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimu
     , _homePath         (getenv("HOME"))
     , _airspyCmdLine    ("-h 21 -t 0")
 {
+    if (_homePath == nullptr) {
+        // When we are running from a crontab entry on the rPi the PATH environment variable is not set.
+        // So we need to explicitly specify where the airspy executables are located.
+        _airspyPath = "/usr/local/bin/";
+    }
+
     using namespace std::placeholders;
     _mavlink->subscribeToMessage(MAVLINK_MSG_ID_TUNNEL, std::bind(&CommandHandler::_handleTunnelMessage, this, _1));
 
@@ -180,7 +186,7 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
 
         logInfo() << "COMMAND_ID_START_DETECTION:";
         logInfo() << "\tradio_center_frequency_hz:" << startDetection.radio_center_frequency_hz; 
-        logInfo() << "\tsdr_type:"                  << startDetection.sdr_type; 
+        logInfo() << "\tsdr_type:"                  << startDetection.sdr_type;
 
         if (_pulseSimulator) {
             _pulseSimulator->startSendingTagPulses(startDetection.radio_center_frequency_hz);
@@ -191,7 +197,10 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
                 _airspyPipe         = new bp::pipe();
                 airspyChannelizeDir = "airspy_channelize_mini";
 
-                commandStr  = formatString("/usr/local/bin/airspy_rx -f %f -a 3000000 -r /dev/stdout %s", (double)startDetection.radio_center_frequency_hz / 1000000.0, _airspyCmdLine.c_str());
+                commandStr  = formatString("%sairspy_rx -f %f -a 3000000 -r /dev/stdout %s", 
+                                    _airspyPath.c_str(),
+                                    (double)startDetection.radio_center_frequency_hz / 1000000.0, 
+                                    _airspyCmdLine.c_str());
                 logPath     = logFileManager->filename("airspy_rx", "log");
                 MonitoredProcess* airspyProc = new MonitoredProcess(
                                                         _mavlink, 
@@ -220,7 +229,9 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
             {
                 airspyChannelizeDir = "airspy_channelize_hf";
 
-                commandStr  = formatString("airspyhf_rx_udp -u 10000 -f %f -a 192000 -g on -l low", (double)startDetection.radio_center_frequency_hz / 1000000.0);
+                commandStr  = formatString("%sairspyhf_rx_udp -u 10000 -f %f -a 192000 -g on -l low", 
+                                    _airspyPath.c_str(),
+                                    (double)startDetection.radio_center_frequency_hz / 1000000.0);
                 logPath     = logFileManager->filename("airspyhf_rx_udp", "log");
                 MonitoredProcess* airspyProc = new MonitoredProcess(
                                                         _mavlink, 
@@ -325,11 +336,17 @@ bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         switch (rawCapture.sdr_type) {
         case SDR_TYPE_AIRSPY_MINI:
-            commandStr = formatString("/usr/local/bin/airspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 90000000", _homePath, frequencyMhz);
+            commandStr = formatString("%sairspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 90000000", 
+                            _airspyPath.c_str(),
+                            _homePath, 
+                            frequencyMhz);
             logPath    = formatString("%s/airspy-mini-capture.log", _homePath);
             break;
         case SDR_TYPE_AIRSPY_HF:
-            commandStr = formatString("/usr/local/bin/airspyhf_rx_udp -r %s/airspy_hf.dat -f %f -a 192000 -g on -l low -n 5760000", _homePath, frequencyMhz);
+            commandStr = formatString("%sairspyhf_rx_udp -r %s/airspy_hf.dat -f %f -a 192000 -g on -l low -n 5760000", 
+                            _airspyPath.c_str(),
+                            _homePath, 
+                            frequencyMhz);
             logPath    = formatString("%s/airspy-hf-capture.log", _homePath);
             break;
         default:
