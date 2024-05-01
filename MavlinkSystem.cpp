@@ -165,7 +165,7 @@ std::optional<uint8_t> MavlinkSystem::gcsSystemId() const
 	}
 }
 
-void MavlinkSystem::_logCPUTemp()
+float MavlinkSystem::_cpuTemp()
 {
     std::string         fileName = "/sys/class/thermal/thermal_zone0/temp";
     std::ifstream       stream;
@@ -179,12 +179,12 @@ void MavlinkSystem::_logCPUTemp()
 
         temp = std::stof(buffer.str());     // convert string to float
         temp = temp / 1000;                 // convert float value to degree
-        temp = roundf(temp * 100) / 100;    // round decimal to nearest  
-
-        logDebug() << "CPU Temperature: " << temp << "°C";
+        temp = roundf(temp * 100) / 100;    // round decimal to nearest
     } else {
         logError() << "Failed to open CPU temperature file";
     }
+
+	return temp;
 }
 
 void MavlinkSystem::startTunnelHeartbeatSender()
@@ -198,12 +198,13 @@ void MavlinkSystem::startTunnelHeartbeatSender()
             heartbeat.header.command    = COMMAND_ID_HEARTBEAT;
             heartbeat.system_id         = HEARTBEAT_SYSTEM_ID_MAVLINKCONTROLLER;
 			heartbeat.status			= _heartbeatStatus;
+			heartbeat.cpu_temp_c		= _cpuTemp();
 
             sendTunnelMessage(&heartbeat, sizeof(heartbeat));
 
             if (cpuWaitCount-- <= 0) {
                 cpuWaitCount = 30;
-                _logCPUTemp();
+        		logInfo() << "CPU Temperature: " << _cpuTemp() << "°C";
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));

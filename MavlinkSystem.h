@@ -46,8 +46,8 @@ public:
 	void					setHeartbeatStatus			(uint16_t heartbeatStatus) { _heartbeatStatus = heartbeatStatus; }
 
 private:
-	void _sendMessageOnConnection(const mavlink_message_t& message);
-    void _logCPUTemp();
+	void 	_sendMessageOnConnection(const mavlink_message_t& message);
+    float 	_cpuTemp				();
 
 	std::unordered_map<uint16_t, MessageCallback> _message_subscriptions {}; // Mavlink message ID --> callback(mavlink_message_t)
 
