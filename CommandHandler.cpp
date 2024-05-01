@@ -32,9 +32,11 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimu
     , _homePath         (getenv("HOME"))
     , _airspyCmdLine    ("-h 21 -t 0")
 {
-    if (_homePath == nullptr) {
-        // When we are running from a crontab entry on the rPi the PATH environment variable is not set.
-        // So we need to explicitly specify where the airspy executables are located.
+    if (strcmp(_homePath, "/home/pi") == 0) {
+        // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
+        // Because of this the process start fail to find the airsp_rx executable. So we need to explicitly specify 
+        // where the airspy executables are located.
+        logInfo() << "CommandHandler::CommandHandler - Running on rPi. Setting airspy path to /usr/local/bin/";
         _airspyPath = "/usr/local/bin/";
     }
 
