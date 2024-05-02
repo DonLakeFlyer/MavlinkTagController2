@@ -338,7 +338,7 @@ bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         switch (rawCapture.sdr_type) {
         case SDR_TYPE_AIRSPY_MINI:
-            commandStr = formatString("%sairspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 90000000", 
+            commandStr = formatString("%sairspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 24000000", 
                             _airspyPath.c_str(),
                             _homePath, 
                             frequencyMhz);
