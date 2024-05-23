@@ -15,6 +15,8 @@
 #include <memory>
 #include <thread>
 
+MavlinkSystem* globalMavlinkSystem = nullptr;
+
 int main(int argc, char** argv)
 {
 	setbuf(stdout, NULL); // Disable stdout buffering
@@ -48,6 +50,8 @@ int main(int argc, char** argv)
     auto telemetryCache     = new TelemetryCache(mavlink);
 	auto pulseHandler 		= new PulseHandler(mavlink, telemetryCache);
     auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), 50000, pulseHandler };
+
+	globalMavlinkSystem		= mavlink;
 
 	PulseSimulator* pulseSimulator = nullptr;
 	if (simulatePulse) {

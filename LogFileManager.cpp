@@ -1,15 +1,19 @@
 #include "LogFileManager.h"
 #include "formatString.h"
 #include "log.h"
+#include "MavlinkSystem.h"
 
 #include <chrono>
 #include <iomanip>
+#include <ctime>
 
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
 
 namespace bf = boost::filesystem;
 namespace bs = boost::system;
+
+extern MavlinkSystem* globalMavlinkSystem;
 
 LogFileManager* LogFileManager::_instance       = nullptr;
 const char* 	LogFileManager::_logDirPrefix   = "Logs-";
@@ -31,13 +35,20 @@ void LogFileManager::detectorsStarted()
 {
     _detectorsRunning = true;
 
-    auto now_time_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    auto now_utc    = *std::gmtime(&now_time_t);
+    std::time_t vehicleTime;
+    if (globalMavlinkSystem->vehicleEpochTime().has_value()) {
+        vehicleTime = globalMavlinkSystem->vehicleEpochTime().value();
+    } else {
+        logWarn() << "Vehicle time not available, using rPi time";
+        vehicleTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    }
+    auto vehicleTimeUTC = *std::gmtime(&vehicleTime);
 
     char buffer[80];
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d_%H-%M", &now_utc);
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d_%H-%M", &vehicleTimeUTC);
 
     _logDir = formatString("%s/%s%s", _homeDir.c_str(), _logDirPrefix, buffer);
+    logDebug() << "Creating new log directory:" << _logDir;
 
     bs::error_code errorCode;
     bf::create_directory(_logDir.c_str(), errorCode);

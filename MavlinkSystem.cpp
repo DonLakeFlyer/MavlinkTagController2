@@ -6,6 +6,7 @@
 
 #include <mutex>
 #include <fstream>
+#include <functional>
 
 MavlinkSystem::MavlinkSystem(const std::string& connectionUrl)
 	: _connectionUrl		(connectionUrl)
@@ -36,6 +37,8 @@ bool MavlinkSystem::start()
 	} else {
 		logError() << "Invalid connection string:", _connectionUrl.c_str();
 	}
+
+    subscribeToMessage(MAVLINK_MSG_ID_SYSTEM_TIME, std::bind(&MavlinkSystem::_handleSystemTime, this, std::placeholders::_1));
 
 	return _connection->start();
 }
@@ -216,4 +219,14 @@ void MavlinkSystem::startTunnelHeartbeatSender()
 void MavlinkSystem::_sendMessageOnConnection(const mavlink_message_t& message)
 {
 	_connection->_sendMessage(message);
+}
+
+void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
+{
+    mavlink_system_time_t system_time;
+
+    mavlink_msg_system_time_decode(&message, &system_time);
+
+	auto epochTimeSeconds = system_time.time_unix_usec / 1000000;
+	_vehicleEpochTime = static_cast<std::time_t>(epochTimeSeconds);
 }
