@@ -45,7 +45,7 @@ void LogFileManager::detectorsStarted()
     auto vehicleTimeUTC = *std::gmtime(&vehicleTime);
 
     char buffer[80];
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d_%H-%M", &vehicleTimeUTC);
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d_%H-%M-%S", &vehicleTimeUTC);
 
     _logDir = formatString("%s/%s%s", _homeDir.c_str(), _logDirPrefix, buffer);
     logDebug() << "Creating new log directory:" << _logDir;
