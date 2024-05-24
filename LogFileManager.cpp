@@ -13,8 +13,6 @@
 namespace bf = boost::filesystem;
 namespace bs = boost::system;
 
-extern MavlinkSystem* globalMavlinkSystem;
-
 LogFileManager* LogFileManager::_instance       = nullptr;
 const char* 	LogFileManager::_logDirPrefix   = "Logs-";
 
@@ -35,13 +33,8 @@ void LogFileManager::detectorsStarted()
 {
     _detectorsRunning = true;
 
-    std::time_t vehicleTime;
-    if (globalMavlinkSystem->vehicleEpochTime().has_value()) {
-        vehicleTime = globalMavlinkSystem->vehicleEpochTime().value();
-    } else {
-        logWarn() << "Vehicle time not available, using rPi time";
-        vehicleTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    }
+    // rPi time should be synchronized with vehicle time
+    auto vehicleTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     auto vehicleTimeUTC = *std::gmtime(&vehicleTime);
 
     char buffer[80];

@@ -7,6 +7,7 @@
 #include <mutex>
 #include <fstream>
 #include <functional>
+#include <sys/time.h>
 
 MavlinkSystem::MavlinkSystem(const std::string& connectionUrl)
 	: _connectionUrl		(connectionUrl)
@@ -227,6 +228,19 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 
     mavlink_msg_system_time_decode(&message, &system_time);
 
-	auto epochTimeSeconds = system_time.time_unix_usec / 1000000;
-	_vehicleEpochTime = static_cast<std::time_t>(epochTimeSeconds);
+	auto vehicleEpochTimeSeconds = system_time.time_unix_usec / 1000000;
+	auto vehicleEpochTimeT = static_cast<std::time_t>(vehicleEpochTimeSeconds);
+
+    auto rpiEpochTimeT = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+
+	if (static_cast<uint64_t>(vehicleEpochTimeT) != static_cast<uint64_t>(rpiEpochTimeT)) {
+		struct timeval tv;
+
+		logInfo() << "Synchronizing rPi time to vehicle time";
+		tv.tv_sec = static_cast<uint64_t>(vehicleEpochTimeT);
+		tv.tv_usec = 0;
+		if (settimeofday(&tv, NULL) != 0) {
+			logError() << "Failed to set rPi time of day";
+		}
+	}
 }
