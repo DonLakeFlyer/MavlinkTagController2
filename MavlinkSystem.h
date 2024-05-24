@@ -33,7 +33,6 @@ public:
 	std::optional<uint8_t> 		ourSystemId					() const;
 	uint8_t 					ourComponentId				() const { return MAV_COMP_ID_ONBOARD_COMPUTER; }
 	std::optional<uint8_t> 		gcsSystemId					() const;
-	std::optional<std::time_t> 	vehicleEpochTime			() const { return _vehicleEpochTime; }
 	const std::string& 			connectionUrl				() const { return _connectionUrl; }
 	void 						subscribeToMessage			(uint16_t message_id, const MessageCallback& callback);
 	void 						handleMessage				(const mavlink_message_t& message);
@@ -60,7 +59,6 @@ private:
 	std::mutex 					_subscriptions_mutex {};
 	Telemetry 					_telemetry;
 	uint16_t					_heartbeatStatus { HEARTBEAT_STATUS_IDLE };
-	std::optional<std::time_t> 	_vehicleEpochTime;
 
 	friend class MavlinkOutgoingMessageQueue;
 };
