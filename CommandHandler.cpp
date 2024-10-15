@@ -336,20 +336,28 @@ bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         memcpy(&rawCapture, tunnel.payload, sizeof(rawCapture));
 
+        auto currentTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        auto currentTimeUTC = *std::gmtime(&currentTime);
+
+        char timeString[80];
+        std::strftime(timeString, sizeof(timeString), "%Y-%m-%d_%H-%M-%S", &currentTimeUTC);
+
         switch (rawCapture.sdr_type) {
         case SDR_TYPE_AIRSPY_MINI:
-            commandStr = formatString("%sairspy_rx -r %s/airspy_mini.dat -f %f -a 3000000 -h 21 -t 0 -n 24000000", 
+            commandStr = formatString("%sairspy_rx -r %s/airspy_mini.%s.dat -f %f -a 3000000 -h 21 -t 0 -n 24000000", 
                             _airspyPath.c_str(),
                             _homePath, 
+                            timeString,
                             frequencyMhz);
-            logPath    = formatString("%s/airspy-mini-capture.log", _homePath);
+            logPath    = formatString("%s/airspy-mini-capture.%s.log", _homePath, timeString);
             break;
         case SDR_TYPE_AIRSPY_HF:
-            commandStr = formatString("%sairspyhf_rx_udp -r %s/airspy_hf.dat -f %f -a 192000 -g on -l low -n 5760000", 
+            commandStr = formatString("%sairspyhf_rx_udp -r %s/airspy_hf.%s.dat -f %f -a 192000 -g on -l low -n 5760000", 
                             _airspyPath.c_str(),
                             _homePath, 
+                            timeString,
                             frequencyMhz);
-            logPath    = formatString("%s/airspy-hf-capture.log", _homePath);
+            logPath    = formatString("%s/airspy-hf-capture.%s.log", _homePath, timeString);
             break;
         default:
             logError() << "_handleRawCapture - Unknown sdr type:" << rawCapture.sdr_type;
