@@ -9,9 +9,10 @@
 #include <functional>
 #include <sys/time.h>
 
-MavlinkSystem::MavlinkSystem(const std::string& connectionUrl)
-	: _connectionUrl		(connectionUrl)
-	, _outgoingMessageQueue	(this)
+static MavlinkSystem* _instance = nullptr;
+
+MavlinkSystem::MavlinkSystem()
+	: _outgoingMessageQueue	(this)
 	, _telemetry			(this)
 {
 	// Force all output to Mavlink V2
@@ -22,6 +23,19 @@ MavlinkSystem::MavlinkSystem(const std::string& connectionUrl)
 MavlinkSystem::~MavlinkSystem()
 {
 	stop();
+}
+
+MavlinkSystem* MavlinkSystem::instance()
+{
+	if (_instance == nullptr) {
+		_instance = new MavlinkSystem;
+	}
+	return _instance;
+}
+
+void MavlinkSystem::init(const std::string& connectionUrl)
+{
+	_connectionUrl = connectionUrl;
 }
 
 bool MavlinkSystem::start()
@@ -101,7 +115,7 @@ void MavlinkSystem::sendHeartbeat()
 	sendMessage(message);
 }
 
-void MavlinkSystem::sendStatusText(std::string&& text, MAV_SEVERITY severity)
+void MavlinkSystem::sendStatusText(std::string& text, MAV_SEVERITY severity)
 {
     if (!gcsSystemId().has_value()) {
         logError() << "Called before gcs discovered";
@@ -240,7 +254,7 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 		tv.tv_sec = static_cast<uint64_t>(vehicleEpochTimeT);
 		tv.tv_usec = 0;
 		if (settimeofday(&tv, NULL) != 0) {
-			logError() << "Failed to set rPi time of day";
+			logError() << "Failed to set rPi time of day: " << strerror(errno);
 		}
 	}
 }

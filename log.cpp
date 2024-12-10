@@ -73,8 +73,8 @@ LogDetailed::~LogDetailed()
     std::cout << sStream.str() << std::endl;
 
     auto logFileManager = LogFileManager::instance();
-    if (logFileManager->detectorsRunning()) {
-        std::ofstream logFile(logFileManager->filename("MavLinkController", "txt"), std::ios_base::app);
+    if (logFileManager->detectorsLogging()) {
+        std::ofstream logFile(logFileManager->filename(LogFileManager::DETECTORS, "MavLinkController", "txt"), std::ios_base::app);
         logFile << sStream.str() << std::endl;
     }
 
