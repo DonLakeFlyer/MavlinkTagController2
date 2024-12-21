@@ -24,8 +24,10 @@ class Connection;
 class MavlinkSystem
 {
 public:
-	MavlinkSystem(const std::string& connectionUrl);
 	~MavlinkSystem();
+
+	static MavlinkSystem* instance();
+	void init(const std::string& connectionUrl);
 
 	bool start();
 	void stop();
@@ -39,7 +41,8 @@ public:
 	void 						startTunnelHeartbeatSender	();
 	bool 						connected					();
 	void 						sendHeartbeat				();
-	void 						sendStatusText				(std::string&& message, MAV_SEVERITY severity = MAV_SEVERITY_INFO);
+	void 						sendStatusText				(std::string& message, MAV_SEVERITY severity = MAV_SEVERITY_INFO);
+	void 						sendStatusText				(const char* message, MAV_SEVERITY severity = MAV_SEVERITY_INFO) { std::string str(message); sendStatusText(str, severity); }
 	void 						sendTunnelMessage			(void* tunnelPayload, size_t tunnelPayloadSize);
 	void 						sendMessage					(const mavlink_message_t& message);
 	Telemetry& 					telemetry					() { return _telemetry; }
@@ -47,6 +50,8 @@ public:
 	void						setHeartbeatStatus			(uint16_t heartbeatStatus) { _heartbeatStatus = heartbeatStatus; }
 
 private:
+	MavlinkSystem();
+
 	void 	_sendMessageOnConnection(const mavlink_message_t& message);
     float 	_cpuTemp				();
     void 	_handleSystemTime   	(const mavlink_message_t& message);

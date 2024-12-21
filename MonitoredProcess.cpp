@@ -103,7 +103,7 @@ void MonitoredProcess::_run(void)
 	}
 	statusStr.append(_name);
 	logError() << statusStr;
-	_mavlink->sendStatusText(statusStr.c_str(), (result == 0 || _terminated) ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
+	_mavlink->sendStatusText(statusStr, (result == 0 || _terminated) ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
 
 	if (_rawCaptureProcess) {
 		_mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_IDLE);

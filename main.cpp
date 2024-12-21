@@ -45,7 +45,10 @@ int main(int argc, char** argv)
     }
     logInfo() << "Connecting to" << connectionUrl;
 
-	auto mavlink 			= new MavlinkSystem(connectionUrl);
+	MavlinkSystem* mavlink = MavlinkSystem::instance();
+	mavlink->init(connectionUrl);
+
+
     auto ftpServer 			= MavlinkFtpServer { mavlink };
     auto telemetryCache     = new TelemetryCache(mavlink);
 	auto pulseHandler 		= new PulseHandler(mavlink, telemetryCache);

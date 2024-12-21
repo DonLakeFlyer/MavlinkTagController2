@@ -14,10 +14,10 @@ std::string TagDatabase::detectorConfigFileName(const TunnelProtocol::TagInfo_t&
 {
     auto logFileManager = LogFileManager::instance();
     auto root = formatString("detector_%d", tagInfo.id + (secondaryChannel ? 1 : 0));
-    return logFileManager->filename(root.c_str(), "config");
+    return logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "config");
 }
 
-bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, uint32_t sdrType) const
+bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel) const
 {
     auto logFileManager = LogFileManager::instance();
 
@@ -36,17 +36,14 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
     auto    tip_msecs                   = secondaryChannel ? tagInfo.intra_pulse2_msecs : tagInfo.intra_pulse1_msecs;
     auto    portData                    = 20000 + ((tagInfo.channelizer_channel_number - 1) * 2) + secondaryChannelIncrement;
     auto    tip                         = double(tip_msecs) / 1000.0;
+    auto    logDir                      = logFileManager->logDir(LogFileManager::DETECTORS);
 
     fprintf(fp, "##################################################\n");
     fprintf(fp, "ID:\t%d\n",                                tagId);
     fprintf(fp, "channelCenterFreqMHz:\t%f\n",              channelCenterFreqMHz);
     fprintf(fp, "ipData:\t127.0.0.1\n");
     fprintf(fp, "portData:\t%d\n",                          portData);
-    if (sdrType == SDR_TYPE_AIRSPY_MINI) {
-        fprintf(fp, "Fs:\t3750\n");
-    } else {
-        fprintf(fp, "Fs:\t1920\n");
-    }
+    fprintf(fp, "Fs:\t3750\n");
     fprintf(fp, "tagFreqMHz:\t%f\n",                            tagFreqMHz);
     fprintf(fp, "tp:\t%f\n",                                    tagInfo.pulse_width_msecs / 1000.0);
     fprintf(fp, "tip:\t%f\n",                                   tip);
@@ -56,12 +53,12 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
     fprintf(fp, "opMode:\tfreqSearchHardLock\n");
     fprintf(fp, "excldFreqs:\t[Inf, -Inf]\n");
     fprintf(fp, "falseAlarmProb:\t%f\n",                        tagInfo.false_alarm_probability);
-    fprintf(fp, "dataRecordPath:\t%s/data_record_%d.bin\n",     logFileManager->logDir().c_str(), tagId);
-    fprintf(fp, "logPath:\t%s\n",                               logFileManager->logDir().c_str());
+    fprintf(fp, "dataRecordPath:\t%s/data_record_%d.bin\n",     logDir.c_str(), tagId);
+    fprintf(fp, "logPath:\t%s\n",                               logDir.c_str());
     fprintf(fp, "startIndex:\t%d\n",                            1);
     fprintf(fp, "ipCntrl:\t127.0.0.1\n");
     fprintf(fp, "portCntrl:\t30000\n");
-    fprintf(fp, "processedOuputPath:\t%s\n",                    logFileManager->logDir().c_str());
+    fprintf(fp, "processedOuputPath:\t%s\n",                    logDir.c_str());
     fprintf(fp, "ros2enable:\tfalse\n");
     fprintf(fp, "startInRunState:\ttrue\n");
     fprintf(fp, "timeStamp:\t1646403180.469\n");
@@ -90,12 +87,12 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
     return true;
 }
 
-bool TagDatabase::writeDetectorConfigs(uint32_t sdrType) const
+bool TagDatabase::writeDetectorConfigs() const
 {
     for (const auto& tagInfo : *this) {
-        _writeDetectorConfig(tagInfo, false, sdrType);
+        _writeDetectorConfig(tagInfo, false);
         if (tagInfo.intra_pulse2_msecs != 0) {
-            _writeDetectorConfig(tagInfo, true, sdrType);
+            _writeDetectorConfig(tagInfo, true);
         }
     }
 
