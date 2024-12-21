@@ -10,6 +10,33 @@ cd ~/repos
 ```
 sudo apt-get install libboost-all-dev
 ```
+### Install CMake and others
+```
+sudo apt update
+sudo apt-get install libssl-dev
+sudo apt install build-essential libtool autoconf unzip wget
+```
+ Go to the official [CMake webpage](https://www.cmake.org/download), then download and extract the latest version. Update the version and build variables in the following command to get the desired version:
+ ```
+version=3.29
+build=1
+## don't modify from here
+mkdir ~/temp
+cd ~/temp
+wget https://cmake.org/files/v$version/cmake-$version.$build.tar.gz
+tar -xzvf cmake-$version.$build.tar.gz
+cd cmake-$version.$build/
+```
+ Install the extracted source by running:
+ ```
+ ./bootstrap
+make -j$(nproc)
+sudo make install
+```
+Test your new cmake version.
+```
+$ cmake --version
+```
 
 ### MavlinkTagController
 This is the controller on the vehicle which talks back/forth with QGC.
@@ -20,6 +47,7 @@ git clone --recursive git@github.com:DonLakeFlyer/MavlinkTagController2.git
 cd MavlinkTagController2
 make
 ```
+
 
 ### Airspy
 `sudo apt install airspy`
