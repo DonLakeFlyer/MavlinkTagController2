@@ -8,6 +8,8 @@
 #include <ctime>
 #include <filesystem>
 
+#include <unistd.h>
+
 namespace fs = std::filesystem;
 
 LogFileManager* LogFileManager::_instance = nullptr;
@@ -197,6 +199,8 @@ void LogFileManager::saveLogsToSDCard()
             MavlinkSystem::instance()->sendStatusText("#Error during log save", MAV_SEVERITY_ERROR);
         }
     }
+
+    sync(); // Flush all disks
 
     MavlinkSystem::instance()->sendStatusText("#Logs saved to flash drive", MAV_SEVERITY_INFO);
 }
