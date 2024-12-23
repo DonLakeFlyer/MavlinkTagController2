@@ -187,6 +187,8 @@ void LogFileManager::saveLogsToSDCard()
         return;
     }
 
+    MavlinkSystem::instance()->sendStatusText("#Saving logs", MAV_SEVERITY_INFO);
+
     // Copy all directories in logDirs to //media/pi/LOGS
     for (const auto& logDir: logDirs) {
         fs::path srcDir = _homeDir + "/" + logDir;
@@ -202,7 +204,7 @@ void LogFileManager::saveLogsToSDCard()
 
     sync(); // Flush all disks
 
-    MavlinkSystem::instance()->sendStatusText("#Logs saved to flash drive", MAV_SEVERITY_INFO);
+    MavlinkSystem::instance()->sendStatusText("#Log save complete", MAV_SEVERITY_INFO);
 }
 
 void LogFileManager::cleanLocalLogs()
