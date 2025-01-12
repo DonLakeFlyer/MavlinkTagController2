@@ -175,6 +175,8 @@ std::string LogFileManager::_getSDCardPath()
 
 void LogFileManager::saveLogsToSDCard()
 {
+    logInfo() << "Saving logs to SD card";
+
     std::string sdCardPath = _getSDCardPath();
     if (sdCardPath.empty()) {
         return;
@@ -202,13 +204,17 @@ void LogFileManager::saveLogsToSDCard()
         }
     }
 
+    logInfo() << "Calling sync";
     sync(); // Flush all disks
 
+    logInfo() << "Log save complete";
     MavlinkSystem::instance()->sendStatusText("#Log save complete", MAV_SEVERITY_INFO);
 }
 
 void LogFileManager::cleanLocalLogs()
 {
+    logInfo() << "Cleaning local logs";
+
     auto logDirs = _listLogFileDirs();
     if (logDirs.empty()) {
         logInfo() << "No log directories found";
@@ -227,5 +233,6 @@ void LogFileManager::cleanLocalLogs()
         }
     }
 
+    logInfo() << "Local logs deleted";
     MavlinkSystem::instance()->sendStatusText("#Logs deleted", MAV_SEVERITY_INFO);
 }
