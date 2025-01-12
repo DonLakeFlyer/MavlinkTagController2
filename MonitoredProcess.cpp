@@ -106,7 +106,7 @@ void MonitoredProcess::_run(void)
 	_mavlink->sendStatusText(statusStr, (result == 0 || _terminated) ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
 
 	if (_rawCaptureProcess) {
-		_mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_IDLE);
+		_mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
 		_mavlink->sendStatusText("#Capture complete", MAV_SEVERITY_INFO);
 	}
 
