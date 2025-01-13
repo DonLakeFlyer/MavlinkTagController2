@@ -204,11 +204,13 @@ void LogFileManager::saveLogsToSDCard()
         }
     }
 
-    logInfo() << "Calling sync";
-    sync(); // Flush all disks
-
-    logInfo() << "Log save complete";
-    MavlinkSystem::instance()->sendStatusText("#Log save complete", MAV_SEVERITY_INFO);
+    auto unmountCommand = formatString("sudo umount %s", sdCardPath.c_str());
+    int unmountResult = std::system(unmountCommand.c_str());
+    if (unmountResult == 0) {
+        MavlinkSystem::instance()->sendStatusText("#Log save complete", MAV_SEVERITY_INFO);
+    } else {
+        MavlinkSystem::instance()->sendStatusText("#Unmount failed", MAV_SEVERITY_ERROR);
+    }
 }
 
 void LogFileManager::cleanLocalLogs()
