@@ -30,7 +30,6 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimu
     : _mavlink          (mavlink)
     , _pulseSimulator   (pulseSimulator)
     , _homePath         (getenv("HOME"))
-    , _airspyCmdLine    ("-h 21 -t 0")
 {
     if (strcmp(_homePath, "/home/pi") == 0) {
         // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
@@ -42,20 +41,6 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimu
 
     using namespace std::placeholders;
     _mavlink->subscribeToMessage(MAVLINK_MSG_ID_TUNNEL, std::bind(&CommandHandler::_handleTunnelMessage, this, _1));
-
-    namespace fs = std::filesystem;
-
-    std::string configFileName = formatString("%s/airspy_cmdline.txt", _homePath);
-    fs::path path(configFileName);
-    if (fs::exists(path)) {
-        std::ifstream file(configFileName);
-        std::string str;
-        std::getline(file, str);
-        _airspyCmdLine = str;
-        logInfo() << "CommandHandler::CommandHandler - Using custom airspy command line:" << _airspyCmdLine;
-    } else {
-        logInfo() << "CommandHandler::CommandHandler - Using default airspy command line:" << _airspyCmdLine;
-    }
 }
 
 void CommandHandler::_sendCommandAck(uint32_t command, uint32_t result, std::string& ackMessage)
@@ -194,10 +179,10 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
             _airspyPipe         = new bp::pipe();
             airspyChannelizeDir = "airspy_channelize_mini";
 
-            commandStr  = formatString("%sairspy_rx -f %f -a 3000000 -r /dev/stdout %s", 
+            commandStr  = formatString("%sairspy_rx -f %f -a 3000000 -r /dev/stdout -h %d -t 0", 
                                 _airspyPath.c_str(),
                                 (double)startDetection.radio_center_frequency_hz / 1000000.0, 
-                                _airspyCmdLine.c_str());
+                                startDetection.gain);
             logPath     = logFileManager->filename(LogFileManager::DETECTORS, "airspy_rx", "log");
             MonitoredProcess* airspyProc = new MonitoredProcess(
                                                     _mavlink, 
@@ -305,11 +290,12 @@ bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         memcpy(&rawCapture, tunnel.payload, sizeof(rawCapture));
 
-        auto commandStr = formatString("%sairspy_rx -r %s/airspy_mini.%d.dat -f %f -a 3000000 -h 21 -t 0 -n 24000000", 
+        auto commandStr = formatString("%sairspy_rx -r %s/airspy_mini.%d.dat -f %f -a 3000000 -h %d -t 0 -n 24000000", 
                         _airspyPath.c_str(),
                         logDir.c_str(),
                         ++_rawCaptureCount,
-                        frequencyMhz);
+                        frequencyMhz,
+                        rawCapture.gain);
         auto captureLogPath = formatString("%s/airspy-mini.%d.log", logDir.c_str(), _rawCaptureCount);
 
         MonitoredProcess* airspyProcess = new MonitoredProcess(
