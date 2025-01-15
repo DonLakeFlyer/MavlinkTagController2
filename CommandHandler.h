@@ -45,6 +45,5 @@ private:
     std::vector<MonitoredProcess*>  _processes;
     bp::pipe*                       _airspyPipe             = nullptr;
     std::string                     _airspyPath;
-    std::string                     _airspyCmdLine;
     int                            _rawCaptureCount         = 0;
 };
