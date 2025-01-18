@@ -25,7 +25,7 @@ int main(int argc, char** argv)
     static_assert(TunnelProtocolValidateSizes, "TunnelProtocolValidateSizes failed");
 
     bool simulatePulse 		= false;
-	uint32_t antennaOffset	= 0;
+	int32_t antennaOffset	= 0;
 	std::string connectionUrl = "udp://127.0.0.1:14540";    // default to SITL
     if (argc == 2) {
 		std::string strArg = argv[1];
