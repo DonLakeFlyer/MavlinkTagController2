@@ -50,7 +50,7 @@ bool MavlinkSystem::start()
 		_connection = std::make_unique<UdpConnection>(this);
 
 	} else {
-		logError() << "Invalid connection string:", _connectionUrl.c_str();
+		logError() << "Invalid connection string:" << _connectionUrl.c_str();
 	}
 
     subscribeToMessage(MAVLINK_MSG_ID_SYSTEM_TIME, std::bind(&MavlinkSystem::_handleSystemTime, this, std::placeholders::_1));
@@ -199,7 +199,11 @@ float MavlinkSystem::_cpuTemp()
         temp = temp / 1000;                 // convert float value to degree
         temp = roundf(temp * 100) / 100;    // round decimal to nearest
     } else {
-        logError() << "Failed to open CPU temperature file";
+		static bool notified = false;
+		if (!notified) {
+			notified = true;
+	        logError() << "Failed to open CPU temperature file";
+		}
     }
 
 	return temp;
