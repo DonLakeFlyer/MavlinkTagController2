@@ -204,6 +204,7 @@ float MavlinkSystem::_cpuTemp()
 			notified = true;
 	        logError() << "Failed to open CPU temperature file";
 		}
+		temp = std::nanf("");
     }
 
 	return temp;

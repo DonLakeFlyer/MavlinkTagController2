@@ -41,7 +41,7 @@ private:
 	std::string						_logPath;
 	std::thread*					_thread			= NULL;
 	boost::process::child*			_childProcess 	= NULL;
-	bool							_terminated		= false;
+	bool							_stopped		= false;
 	IntermediatePipeType			_intermediatePipeType;
 	bp::pipe*						_intermediatePipe;
 	bool							_rawCaptureProcess;

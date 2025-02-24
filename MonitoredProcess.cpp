@@ -1,6 +1,7 @@
 #include "MonitoredProcess.h"
 #include "log.h"
 #include "MavlinkSystem.h"
+#include "formatString.h"
 
 #include <string>
 #include <iostream>
@@ -35,13 +36,20 @@ void MonitoredProcess::start(void)
 
 void MonitoredProcess::stop(void)
 {
-	logDebug() << "MonitoredProcess::stop _childProcess:_childProcess.running" 
+	logDebug() << "MonitoredProcess::stop _name _childProcess:_childProcess.running" 
+		<< _name
 		<< _childProcess
 		<< (_childProcess ? _childProcess->running() : false);
 
 	if (_childProcess) {
-		_terminated = true;
-		_childProcess->terminate();
+		_stopped = true;
+		try {
+			_childProcess->terminate();
+		} catch(bp::process_error& e) {
+			logError() << "MonitoredProcess::run terminate threw process_error exception\n" 
+				<< "\terror: " << e.what() << "\n"
+				<< "\tcommand: " << _command;
+		}
 	}
 }
 
@@ -76,23 +84,27 @@ void MonitoredProcess::_run(void)
 		logError() << "MonitoredProcess::run boost::process:child threw process_error exception\n" 
             << "\terror: " << e.what() << "\n"
             << "\tcommand: " << _command;
-		_terminated = true;
-//		} catch(...) {
-//			std::cout << "MonitoredProcess::run boost::process:child threw unknown exception" << std::endl;
-//			_terminated = true;
+		auto statusStr = formatString("#Process start failed: %s", _name.c_str());
+		_mavlink->sendStatusText(statusStr, MAV_SEVERITY_ERROR);
+		delete this;
+		return;
 	}
 
 	int result = 255;
 
 	if (_childProcess) {
-		_childProcess->wait();
+		try {
+			_childProcess->wait();
+		} catch(bp::process_error& e) {
+			// This is ok since child process is gone
+		}
 		result = _childProcess->exit_code();
 	}
 
 	if (result == 0) {
 		statusStr = "Process end: ";
-	} else if (_terminated) {
-		statusStr = "Process terminated: ";
+	} else if (_stopped) {
+		statusStr = "Process stopped: ";
 	} else {
 		char numStr[21];
 
@@ -103,7 +115,7 @@ void MonitoredProcess::_run(void)
 	}
 	statusStr.append(_name);
 	logError() << statusStr;
-	_mavlink->sendStatusText(statusStr, (result == 0 || _terminated) ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
+	_mavlink->sendStatusText(statusStr, (result == 0 || _stopped) ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
 
 	if (_rawCaptureProcess) {
 		_mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
@@ -113,7 +125,7 @@ void MonitoredProcess::_run(void)
 	delete _childProcess;
 	_childProcess = NULL;
 
-	_terminated = false;
+	_stopped = false;
 
     delete this;   
 }
