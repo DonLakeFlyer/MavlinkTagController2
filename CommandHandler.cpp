@@ -177,7 +177,7 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
             _pulseSimulator->startSendingTagPulses(startDetection.radio_center_frequency_hz);
         } else {
             _airspyPipe         = new bp::pipe();
-            airspyChannelizeDir = "airspy_channelize_mini";
+            airspyChannelizeDir = "airspy_channelize";
 
             commandStr  = formatString("%sairspy_rx -f %f -a 3000000 -r /dev/stdout -h %d -t 0", 
                                 _airspyPath.c_str(),
@@ -257,7 +257,6 @@ bool CommandHandler::_handleStopDetection(void)
         }
 
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
-        _mavlink->sendStatusText("#Detectors stopped", MAV_SEVERITY_INFO);
 
         auto logFileManager = LogFileManager::instance();
         logFileManager->detectorsStopped();
@@ -290,7 +289,7 @@ bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         memcpy(&rawCapture, tunnel.payload, sizeof(rawCapture));
 
-        auto commandStr = formatString("%sairspy_rx -r %s/airspy_mini.%d.dat -f %f -a 3000000 -h %d -t 0 -n 24000000", 
+        auto commandStr = formatString("%sairspy_rx -r %s/airspy.%d.dat -f %f -a 3000000 -h %d -t 0 -n 24000000", 
                         _airspyPath.c_str(),
                         logDir.c_str(),
                         ++_rawCaptureCount,
