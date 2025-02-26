@@ -36,7 +36,7 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimu
         // Because of this the process start fail to find the airsp_rx executable. So we need to explicitly specify 
         // where the airspy executables are located.
         logInfo() << "CommandHandler::CommandHandler - Running on rPi. Setting airspy path to /usr/local/bin/";
-        _airspyPath = "/usr/local/bin/";
+        _airspyPath = "/usr/bin/";
     }
 
     using namespace std::placeholders;
