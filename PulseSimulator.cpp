@@ -5,13 +5,15 @@
 #include "formatString.h"
 #include "log.h"
 #include "PulseHandler.h"
+#include "TelemetryCache.h"
 
 #include <cmath>
 
-PulseSimulator::PulseSimulator(PulseHandler* pulseHandler, MavlinkSystem* mavlink, int32_t antennaOffset)
-    : _pulseHandler (pulseHandler)
-	, _mavlink      (mavlink)
-    , _antennaOffset(antennaOffset)
+PulseSimulator::PulseSimulator(PulseHandler* pulseHandler, MavlinkSystem* mavlink, TelemetryCache* telemetryCache, int32_t antennaOffset)
+    : _pulseHandler     (pulseHandler)
+	, _mavlink          (mavlink)
+    , _telemetryCache   (telemetryCache)
+    , _antennaOffset    (antennaOffset)
 {
     std::thread([this]()
     {
@@ -45,7 +47,6 @@ PulseSimulator::PulseSimulator(PulseHandler* pulseHandler, MavlinkSystem* mavlin
 
                 pulseInfo.tag_id            = 3;
                 pulseInfo.frequency_hz      = _frequencyHz;
-                pulseInfo.snr               = _calcSNR(telemetry.lastPosition().value(), _tagPosition.value(), telemetry.lastAttitudeEuler().value());
                 pulseInfo.stft_score        = pulseInfo.snr;
                 pulseInfo.group_seq_counter = seqCounter++;
                 pulseInfo.confirmed_status  = 1;
@@ -54,6 +55,9 @@ PulseSimulator::PulseSimulator(PulseHandler* pulseHandler, MavlinkSystem* mavlin
                 for (int i=2; i>=0; i--) {
                     pulseInfo.start_time_seconds    = currentTimeInSeconds - (i * intraPulseSeconds);
                     pulseInfo.group_ind             = i + 1;
+
+                    TelemetryCache::TelemetryCacheEntry_t cacheEntry = _telemetryCache->telemetryForTime(pulseInfo.start_time_seconds);
+                    pulseInfo.snr = _calcSNR(cacheEntry.position, _tagPosition.value(), cacheEntry.attitudeEuler);
 
                     std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f noise_psd: %5.1g freq: %9u",
                                                     pulseInfo.confirmed_status,
