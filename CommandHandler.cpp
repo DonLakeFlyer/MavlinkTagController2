@@ -225,7 +225,7 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
             }
         }
 
-        std::string startedStr = formatString("#All processes started at center hz: %.3f", (double)startDetection.radio_center_frequency_hz / 1000000.0);
+        std::string startedStr = formatString("All processes started at center hz: %.3f", (double)startDetection.radio_center_frequency_hz / 1000000.0);
         _mavlink->sendStatusText(startedStr.c_str(), MAV_SEVERITY_INFO);
 
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_DETECTING);

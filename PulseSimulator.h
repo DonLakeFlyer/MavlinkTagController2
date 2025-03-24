@@ -11,11 +11,12 @@
 #include <optional>
 
 class PulseHandler;
+class TelemetryCache;
 
 class PulseSimulator
 {
 public:
-	PulseSimulator(PulseHandler* pulseHandler, MavlinkSystem* mavlink, int32_t antennaOffset);
+	PulseSimulator(PulseHandler* pulseHandler, MavlinkSystem* mavlink, TelemetryCache* telemetryCache, int32_t antennaOffset);
 
 	void startSendingTagPulses	(uint32_t frequencyHz) { _frequencyHz = frequencyHz; _sendTagPulses = true; }
 	void stopSendingTagPulses	(void) { _sendTagPulses = false; }
@@ -30,6 +31,7 @@ private:
 
 	PulseHandler* 	_pulseHandler	= nullptr;
 	MavlinkSystem* 	_mavlink 		= nullptr;
+	TelemetryCache* _telemetryCache	= nullptr;
 	int32_t 		_antennaOffset 	= 0;
 	uint32_t		_frequencyHz 	= 146000000;
 	bool 			_sendTagPulses 	= false;

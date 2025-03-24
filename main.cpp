@@ -58,7 +58,7 @@ int main(int argc, char** argv)
 
 	PulseSimulator* pulseSimulator = nullptr;
 	if (simulatePulse) {
-		pulseSimulator = new PulseSimulator(pulseHandler, mavlink, antennaOffset);
+		pulseSimulator = new PulseSimulator(pulseHandler, mavlink, telemetryCache, antennaOffset);
 	}
 
     auto commandHandler 	= CommandHandler { mavlink, pulseSimulator };
