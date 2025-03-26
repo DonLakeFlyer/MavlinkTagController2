@@ -21,6 +21,8 @@ int main(int argc, char** argv)
 {
 	setbuf(stdout, NULL); // Disable stdout buffering
 
+	logDebug() << "**************** MavlinkTagController starting... ****************";
+
     // Check that TunnelProtocol hasn't exceed limits
     static_assert(TunnelProtocolValidateSizes, "TunnelProtocolValidateSizes failed");
 

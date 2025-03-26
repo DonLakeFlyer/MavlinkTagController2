@@ -106,11 +106,3 @@ void set_color(LogColor LogColor, std::stringstream& s)
             break;
     }
 }
-
-void LogDetailed::truncateLog()
-{
-    logDebug() << formatString("%s/MavlinkTagController.log", getenv("HOME")).c_str();
-    _logMutex.lock();
-    std::remove(formatString("%s/MavlinkTagController.log", getenv("HOME")).c_str());
-    _logMutex.unlock();
-}
