@@ -52,6 +52,8 @@ public:
         return *this;
     }
 
+    static void truncateLog();
+
 protected:
     LogLevel _log_level = LogLevel::Debug;
 
