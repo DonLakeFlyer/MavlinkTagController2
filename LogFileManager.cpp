@@ -220,7 +220,6 @@ void LogFileManager::cleanLocalLogs()
     auto logDirs = _listLogFileDirs();
     if (logDirs.empty()) {
         logInfo() << "No log directories found";
-        MavlinkSystem::instance()->sendStatusText("#No logs to delete", MAV_SEVERITY_INFO);
         return;
     }
 
@@ -236,5 +235,4 @@ void LogFileManager::cleanLocalLogs()
     }
 
     logInfo() << "Local logs deleted";
-    MavlinkSystem::instance()->sendStatusText("#Logs deleted", MAV_SEVERITY_INFO);
 }

@@ -1,7 +1,9 @@
 #include "log.h"
 #include "LogFileManager.h"
+#include "formatString.h"
 
 #include <fstream>
+#include <cstdio>
 
 #define ANSI_COLOR_RED "\x1b[31m"
 #define ANSI_COLOR_GREEN "\x1b[32m"
@@ -74,7 +76,7 @@ LogDetailed::~LogDetailed()
 
     auto logFileManager = LogFileManager::instance();
     if (logFileManager->detectorsLogging()) {
-        std::ofstream logFile(logFileManager->filename(LogFileManager::DETECTORS, "MavLinkController", "txt"), std::ios_base::app);
+        std::ofstream logFile(logFileManager->filename(LogFileManager::DETECTORS, "MavlinkTagController", "log"), std::ios_base::app);
         logFile << sStream.str() << std::endl;
     }
 
@@ -103,4 +105,12 @@ void set_color(LogColor LogColor, std::stringstream& s)
             s << ANSI_COLOR_RESET;
             break;
     }
+}
+
+void LogDetailed::truncateLog()
+{
+    logDebug() << formatString("%s/MavlinkTagController.log", getenv("HOME")).c_str();
+    _logMutex.lock();
+    std::remove(formatString("%s/MavlinkTagController.log", getenv("HOME")).c_str());
+    _logMutex.unlock();
 }
