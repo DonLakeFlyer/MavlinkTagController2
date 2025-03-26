@@ -246,7 +246,11 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 	static bool timeSetFailed = false;
     mavlink_system_time_t system_time;
 
-    mavlink_msg_system_time_decode(&message, &system_time);
+	if (timeSetFailed) {
+		return;
+	}
+
+	mavlink_msg_system_time_decode(&message, &system_time);
 
 	auto vehicleEpochTimeSeconds = system_time.time_unix_usec / 1000000;
 	auto vehicleEpochTimeT = static_cast<std::time_t>(vehicleEpochTimeSeconds);
@@ -259,7 +263,7 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 		logInfo() << "Synchronizing rPi time to vehicle time";
 		tv.tv_sec = static_cast<uint64_t>(vehicleEpochTimeT);
 		tv.tv_usec = 0;
-		if (!timeSetFailed && settimeofday(&tv, NULL) != 0) {
+		if (settimeofday(&tv, NULL) != 0) {
 			timeSetFailed = true;
 			logError() << "Failed to set rPi time of day: " << strerror(errno);
 		}
