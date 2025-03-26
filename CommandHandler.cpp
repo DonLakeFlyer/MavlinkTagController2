@@ -342,7 +342,6 @@ bool CommandHandler::_handleCleanLogs(void)
     }
 
     std::thread([]() {
-        LogDetailed::truncateLog();
         auto logFileManager = LogFileManager::instance();
         logFileManager->cleanLocalLogs();
         MavlinkSystem::instance()->sendStatusText("#Logs deleted", MAV_SEVERITY_INFO);
