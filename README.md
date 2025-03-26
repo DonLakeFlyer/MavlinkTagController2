@@ -33,7 +33,7 @@ sh full_setup.sh
 
 * Note that if your home directory is not `\home\pi` you will need to update the script
 * run `crontab -e'
-* Add this to the end of the file: `@reboot /home/pi/repos/MavlinkTagController2/build/MavlinkTagController2 serial:///dev/serial0:921600 2>&1 >>/home/pi/MavlinkTagController.log`
+* Add this to the end of the file: `@reboot if [ -f /home/pi/MavlinkTagController.log ]; then mv -f /home/pi/MavlinkTagController.log /home/pi/MavlinkTagController.log.save; tail -n 500 /home/pi/MavlinkTagController.log.save >> /home/pi/MavlinkTagController.log; rm /home/pi/MavlinkTagController.log.save; fi; /home/pi/repos/MavlinkTagController2/build/MavlinkTagController2 serial:///dev/serial0:921600 2>&1 >>/home/pi/MavlinkTagController.log`
 
 ### Check on rPi whether controller is running
 
