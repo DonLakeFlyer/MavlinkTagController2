@@ -2,7 +2,7 @@
 
 ## Configure GitHub login for repo access
 
-Setup auth for ssh connections.
+Setup auth for *ssh* connections.
 
 ```
 sudo apt update
