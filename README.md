@@ -20,14 +20,29 @@ wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/f
 sh full_setup.sh
 ```
 
-### Setup rPi for UTC timezone
+### Setup rPi for UTC timezone and Serial Port usage
 
-* To work around a problem with timezone difference between matlab code and the controll you must set the rPi timezone to UTC
+To work around a problem with timezone difference between matlab code and the controll you must set the rPi timezone to UTC:
 * `sudo raspi-config`
 * Select `Localization Options`
 * Select `Timezone`
 * Select `None of the above`
 * Select `UTC`
+
+Enable serial port usage by FMU:
+* `sudo raspi-config`
+* Select `Interface Options`
+* Select `Serial Port`
+* Answer `No` to `Login shell accessible over serial`
+* Answer `Yes` to `Serial port hardware enabled`
+
+### Setup Pixhawk to talk to rPi CM4 over serial
+
+Adjust these parameters:
+* MAV_1_CONFIG: TELEM2
+* MAV_1_MODE: Onboard
+* SER_TEL2_BAUD: 921600 8N1
+* Reboot Pixhawk
 
 ### Setup rPi to start MavlinkTagController at boot
 
