@@ -41,6 +41,7 @@ Enable serial port usage by FMU:
 Adjust these parameters:
 * MAV_1_CONFIG: TELEM2
 * MAV_1_MODE: Onboard
+* MAV_1_FORWARD: On
 * SER_TEL2_BAUD: 921600 8N1
 * Reboot Pixhawk
 
