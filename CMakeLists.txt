@@ -8,6 +8,11 @@ project(MavlinkTagController2)
 
 add_definitions("-Wall -Wextra -Wno-address-of-packed-member")
 
+if(POLICY CMP0167)
+    # Needed for find boost to work correctly with CMake 3.16+
+    cmake_policy(SET CMP0167 NEW)
+endif()
+
 set(Boost_USE_MULTITHREADED ON) 
 find_package( Boost REQUIRED COMPONENTS system filesystem )
 
