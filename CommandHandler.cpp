@@ -143,16 +143,22 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
     _processes.push_back(detectorProc);
 }
 
-bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
+std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
 {
    if (tunnel.payload_length != sizeof(StartDetectionInfo_t)) {
         logError() << "COMMAND_ID_START_DETECTION - ERROR: Payload length incorrect expected:actual" << sizeof(StartDetectionInfo_t) << tunnel.payload_length;
-        return false;
+        return "Payload length incorrect";
     }
 
     if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
         logError() << "COMMAND_ID_START_DETECTION - ERROR: Start detection failed. Controller in incorrect state - heartbeatStatus" << _mavlink->heartbeatStatus();
-        return false;
+        return "Controller in incorrect state";
+    }
+
+    std::string airspyInfoError = _checkForAirSpy();
+    if (!airspyInfoError.empty()) {
+        logError() << "COMMAND_ID_START_DETECTION - ERROR: airspy_info failed: " << airspyInfoError;
+        return airspyInfoError;
     }
 
     auto logFileManager = LogFileManager::instance();
@@ -231,7 +237,7 @@ bool CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_DETECTING);
     }).detach();
 
-    return true;
+    return ""; // Return empty string to indicate success
 }
 
 bool CommandHandler::_handleStopDetection(void)
@@ -265,18 +271,24 @@ bool CommandHandler::_handleStopDetection(void)
     return true;
 }
 
-bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
+std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 {
     logDebug() << "_handleRawCapture heartbeatStatus" << _mavlink->heartbeatStatus();
 
     if (tunnel.payload_length != sizeof(RawCaptureInfo_t)) {
         logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: Payload length incorrect expected:actual" << sizeof(RawCaptureInfo_t) << tunnel.payload_length;
-        return false;
+        return "Payload length incorrect";
     }
 
     if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
         _mavlink->sendStatusText("Command failed. Controller in incorrect state", MAV_SEVERITY_ALERT);
-        return false;
+        return "Controller in incorrect state";
+    }
+
+    std::string airspyInfoError = _checkForAirSpy();
+    if (!airspyInfoError.empty()) {
+        logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: airspy_info failed: " << airspyInfoError;
+        return airspyInfoError;
     }
 
     std::thread([this, tunnel]() {
@@ -310,7 +322,7 @@ bool CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_CAPTURE);
     }).detach();
 
-    return true;
+    return ""; // Return empty string to indicate success
 }
 
 bool CommandHandler::_handleSaveLogs(void)
@@ -379,16 +391,27 @@ void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
         success = _handleTag(tunnel);
         break;
     case COMMAND_ID_START_DETECTION:
-        success = _handleStartDetection(tunnel);
-        if (success) {
-            ackMessage = LogFileManager::instance()->logDir(LogFileManager::DETECTORS);
+        {
+            std::string errorMessage = _handleStartDetection(tunnel);
+            success = errorMessage.empty();
+            if (success) {
+                ackMessage = LogFileManager::instance()->logDir(LogFileManager::DETECTORS);
+            } else {
+                ackMessage = errorMessage;
+            }
         }
         break;
     case COMMAND_ID_STOP_DETECTION:
         success = _handleStopDetection();
         break;
     case COMMAND_ID_RAW_CAPTURE:
-        success = _handleRawCapture(tunnel);
+        {
+            std::string errorMessage = _handleRawCapture(tunnel);
+            success = errorMessage.empty();
+            if (!success) {
+                ackMessage = errorMessage;
+            }
+        }
         break;
     case COMMAND_ID_SAVE_LOGS:
         success = _handleSaveLogs();
@@ -399,6 +422,56 @@ void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
     }
 
     _sendCommandAck(headerInfo.command, success ? COMMAND_RESULT_SUCCESS : COMMAND_RESULT_FAILURE, ackMessage);
+}
+
+std::string CommandHandler::_checkForAirSpy(void)
+{
+    std::string output;
+    std::string errorOutput;
+
+    logInfo() << "Running airspy_info command to check for AirSpy device";
+    
+    try {
+        bp::ipstream pipe_stream;
+        bp::ipstream error_stream;
+        
+        std::string command = _airspyPath + "airspy_info";
+        
+        bp::child child_process(command, bp::std_out > pipe_stream, bp::std_err > error_stream);
+        
+        std::string line;
+        while (pipe_stream && std::getline(pipe_stream, line) && !line.empty()) {
+            output += line + "\n";
+        }
+        
+        // Also capture any error output
+        while (error_stream && std::getline(error_stream, line) && !line.empty()) {
+            errorOutput += line + "\n";
+        }
+        
+        child_process.wait();
+
+        if (child_process.exit_code() != 0 || !errorOutput.empty()) {
+            logError() << "airspy_info command failed with exit code:" << child_process.exit_code();
+            if (!errorOutput.empty()) {
+                logError() << "airspy_info error output:" << errorOutput;
+                // Check for specific AirSpy device not found error
+                if (errorOutput.find("AIRSPY_ERROR_NOT_FOUND") != std::string::npos) {
+                    return "No AirSpy device found";
+                }
+                return errorOutput; // Return error output when command fails
+            }
+            return "Command failed with exit code: " + std::to_string(child_process.exit_code());
+        } else {
+            logInfo() << "airspy_info succeeded with output:\n" << errorOutput;
+        }
+        
+    } catch (const std::exception& e) {
+        logError() << "Exception running airspy_info:" << e.what();
+        return "Exception running airspy_info: " + std::string(e.what()); // Return exception message when command fails
+    }
+    
+    return ""; // Return empty string when command succeeds
 }
 
 std::string CommandHandler::_tunnelCommandIdToString(uint32_t command)
