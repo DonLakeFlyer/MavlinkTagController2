@@ -7,6 +7,7 @@
 #include "PulseSimulator.h"
 #include "MavlinkFtpServer.h"
 #include "PulseHandler.h"
+#include "formatString.h"
 
 #include <chrono>
 #include <cstdint>
@@ -14,6 +15,9 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 MavlinkSystem* globalMavlinkSystem = nullptr;
 
@@ -82,7 +86,43 @@ int main(int argc, char** argv)
 		if (!tunnelHeartbeatsStarted && mavlink->gcsSystemId().has_value()) {
 			tunnelHeartbeatsStarted = true;
 			mavlink->startTunnelHeartbeatSender();
-		    mavlink->sendStatusText("MavlinkTagController Ready");
+			// Create status text message to indicate ready. Include IP of the rPi for user reference.
+			std::string ipAddress = "Unknown IP";
+
+			struct ifaddrs *interfaces = NULL;
+			if (getifaddrs(&interfaces) == 0) {
+				std::string fallback;
+				for (struct ifaddrs *iface = interfaces; iface != NULL; iface = iface->ifa_next) {
+					if (!iface->ifa_addr) continue;
+					if (iface->ifa_addr->sa_family != AF_INET) continue; // IPv4 only
+
+					char addressBuffer[INET_ADDRSTRLEN];
+					void* addrPtr = &((struct sockaddr_in*)iface->ifa_addr)->sin_addr;
+					const char* ntopResult = inet_ntop(AF_INET, addrPtr, addressBuffer, sizeof(addressBuffer));
+					if (ntopResult == nullptr) {
+						continue;
+					}
+					std::string addr(addressBuffer);
+
+					// Exclude loopback addresses
+					if (addr == "127.0.0.1") continue;
+
+					std::string name(iface->ifa_name);
+					// Prefer wlan0 (or names that start with wl)
+					if (name == "wlan0" || name.rfind("wl", 0) == 0) {
+						ipAddress = addr;
+						break;
+					}
+
+					// Keep the first non-loopback as fallback
+					if (fallback.empty()) fallback = addr;
+				}
+				if (ipAddress == "Unknown IP" && !fallback.empty()) ipAddress = fallback;
+				freeifaddrs(interfaces);
+			}
+
+			auto statusMessage = formatString("Controller Ready - %s", ipAddress.c_str());
+			mavlink->sendStatusText(statusMessage);
 		}
 
 		// Do nothing -- message subscription callbacks are asynchronous and run in the connection receiver thread

@@ -73,7 +73,7 @@ bool Connection::_parseMavlinkBuffer(uint8_t* buffer, size_t cBuffer)
 				if (heartbeat.type == MAV_TYPE_GCS) {
 					if (_gcsFound) {
 						if (message.sysid == _sysidGcs) {
-							_lastReceivedHeartbeatAutopilotMSecs = msecsSinceEpoch();
+							_lastReceivedHeartbeatGcsMSecs = msecsSinceEpoch();
 						}
 					} else if (message.sysid == 255) {
 						// We were getting strange GCS connections on other sysids, so we only accept sysid 255 to prevent
@@ -82,7 +82,7 @@ bool Connection::_parseMavlinkBuffer(uint8_t* buffer, size_t cBuffer)
 						_sysidGcs = message.sysid;
 						_lastReceivedHeartbeatGcsMSecs = msecsSinceEpoch();
 					}
-					
+
 				}
 			}
 		}
