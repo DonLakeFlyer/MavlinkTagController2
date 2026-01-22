@@ -16,7 +16,7 @@ This will install/setup/build MavlinkController2, Airspy, csdr_uavrt, uavrt_dete
 
 ```
 cd ~/Downloads
-wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/full_setup.sh
+wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/full_setup.sh
 sh full_setup.sh
 ```
 
@@ -47,9 +47,9 @@ Adjust these parameters:
 
 ### Setup rPi to start MavlinkTagController at boot
 
-* Note that if your home directory is not `\home\pi` you will need to update the script
-* run `crontab -e'
-* Add this to the end of the file: `@reboot if [ -f /home/pi/MavlinkTagController.log ]; then mv -f /home/pi/MavlinkTagController.log /home/pi/MavlinkTagController.log.save; tail -n 500 /home/pi/MavlinkTagController.log.save >> /home/pi/MavlinkTagController.log; rm /home/pi/MavlinkTagController.log.save; fi; /home/pi/repos/MavlinkTagController2/build/MavlinkTagController2 serial:///dev/serial0:921600 2>&1 >>/home/pi/MavlinkTagController.log`
+* Note that if your home directory is not `/home/pi` you will need to update the reboot line
+* run `crontab -e`
+* Add this to the end of the file: `@reboot /bin/bash /home/pi/repos/MavlinkTagController2/setup/crontab-start-controller.sh`
 
 ### Check on rPi whether controller is running
 
@@ -57,8 +57,8 @@ Adjust these parameters:
 
 ## Testing with PX4 SITL
 
-* Follow the instructions here to build/run a SITL version: 
+* Follow the instructions here to build/run a SITL version:
   * `https://docs.px4.io/main/en/dev_setup/getting_started.html`
-* Start MavlinkTagController: 
+* Start MavlinkTagController:
   * `cd ~/repos/MavlinkTagController2`
   * `./build/MavlinkTagControler2`
