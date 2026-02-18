@@ -13,7 +13,6 @@
 #include <stdio.h>
 #include <filesystem>
 #include <fstream>
-
 #include "CommandHandler.h"
 #include "TunnelProtocol.h"
 #include "MonitoredProcess.h"
@@ -33,7 +32,7 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimu
 {
     if (strcmp(_homePath, "/home/pi") == 0) {
         // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
-        // Because of this the process start fail to find the airsp_rx executable. So we need to explicitly specify 
+        // Because of this, the process fails to find the airspy_rx executable. So we need to explicitly specify
         // where the airspy executables are located.
         logInfo() << "CommandHandler::CommandHandler - Running on rPi. Setting airspy path to /usr/local/bin/";
         _airspyPath = "/usr/bin/";
@@ -98,7 +97,7 @@ bool CommandHandler::_handleTag(const mavlink_tunnel_t& tunnel)
         return false;
     }
 
-    logDebug() << "CommandHandler::handleTagCommand: id:freq:intra_pulse1_msecs " 
+    logDebug() << "CommandHandler::handleTagCommand: id:freq:intra_pulse1_msecs "
                 << tagInfo.id
                 << tagInfo.frequency_hz
                 << tagInfo.intra_pulse1_msecs;
@@ -133,13 +132,13 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
     std::string logPath     = logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "log");
 
     MonitoredProcess* detectorProc = new MonitoredProcess(
-                                                _mavlink, 
-                                                "uavrt_detection", 
-                                                commandStr.c_str(), 
-                                                logPath.c_str(), 
+                                                _mavlink,
+                                                "uavrt_detection",
+                                                commandStr.c_str(),
+                                                logPath.c_str(),
                                                 MonitoredProcess::NoPipe,
                                                 NULL);
-    detectorProc->start();  
+    detectorProc->start();
     _processes.push_back(detectorProc);
 }
 
@@ -155,10 +154,11 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         return "Controller in incorrect state";
     }
 
-    std::string airspyInfoError = _checkForAirSpy();
-    if (!airspyInfoError.empty()) {
-        logError() << "COMMAND_ID_START_DETECTION - ERROR: airspy_info failed: " << airspyInfoError;
-        return airspyInfoError;
+    std::string airspyError;
+    auto deviceType = _connectedAirSpyType(&airspyError);
+    if (deviceType == AirSpyDeviceType::NONE) {
+        logError() << "COMMAND_ID_START_DETECTION - ERROR: AirSpy detection failed: " << airspyError;
+        return std::string("AirSpy detection failed: ") + airspyError;
     }
 
     auto logFileManager = LogFileManager::instance();
@@ -168,33 +168,59 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         _mavlink->sendStatusText("Write Detector Configs failed", MAV_SEVERITY_ALERT);
     }
 
-    std::thread([this, tunnel, logFileManager]() {
+    std::thread([this, tunnel, logFileManager, deviceType]() {
         StartDetectionInfo_t    startDetection;
         std::string             commandStr;
         std::string             logPath;
         std::string             airspyChannelizeDir;
+        std::string             airspyChannelizeProcessName;
+        std::string             airspyChannelizeExecutable;
+        std::string             airspyReceiverProcessName;
 
         memcpy(&startDetection, tunnel.payload, sizeof(startDetection));
 
         logInfo() << "COMMAND_ID_START_DETECTION:";
-        logInfo() << "\tradio_center_frequency_hz:" << startDetection.radio_center_frequency_hz; 
+        logInfo() << "\tradio_center_frequency_hz:" << startDetection.radio_center_frequency_hz;
+        const double centerFrequencyMhz = (double)startDetection.radio_center_frequency_hz / 1000000.0;
 
         if (_pulseSimulator) {
             _pulseSimulator->startSendingTagPulses(startDetection.radio_center_frequency_hz);
         } else {
             _airspyPipe         = new bp::pipe();
-            airspyChannelizeDir = "airspy_channelize";
+            std::string sdrPathStatus;
+            if (deviceType == AirSpyDeviceType::HF) {
+                airspyChannelizeDir = "airspyhf_channelize";
+                airspyChannelizeProcessName = "airspyhf_channelize";
+                airspyChannelizeExecutable = "airspyhf_channelize";
+                airspyReceiverProcessName = "airspyhf_rx";
+                sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
 
-            commandStr  = formatString("%sairspy_rx -f %f -a 3000000 -r /dev/stdout -h %d -t 0", 
-                                _airspyPath.c_str(),
-                                (double)startDetection.radio_center_frequency_hz / 1000000.0, 
-                                startDetection.gain);
-            logPath     = logFileManager->filename(LogFileManager::DETECTORS, "airspy_rx", "log");
+                commandStr = formatString("%sairspyhf_rx -f %f -a 768000 -r /dev/stdout -g off -m on",
+                                    _airspyPath.c_str(),
+                                    centerFrequencyMhz);
+                logInfo() << "COMMAND_ID_START_DETECTION - using AirSpy HF stream source";
+            } else {
+                airspyChannelizeDir = "airspy_channelize";
+                airspyChannelizeProcessName = "airspy_channelize";
+                airspyChannelizeExecutable = "airspy_channelize";
+                airspyReceiverProcessName = "airspy_rx";
+                sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
+
+                commandStr  = formatString("%sairspy_rx -f %f -a 3000000 -r /dev/stdout -h %d -t 0",
+                                    _airspyPath.c_str(),
+                                    centerFrequencyMhz,
+                                    startDetection.gain);
+                logInfo() << "COMMAND_ID_START_DETECTION - using AirSpy Mini stream source";
+            }
+
+            _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
+
+            logPath     = logFileManager->filename(LogFileManager::DETECTORS, airspyReceiverProcessName.c_str(), "log");
             MonitoredProcess* airspyProc = new MonitoredProcess(
-                                                    _mavlink, 
-                                                    "airspy_rx", 
-                                                    commandStr.c_str(), 
-                                                    logPath.c_str(), 
+                                                    _mavlink,
+                                                    airspyReceiverProcessName.c_str(),
+                                                    commandStr.c_str(),
+                                                    logPath.c_str(),
                                                     MonitoredProcess::OutputPipe,
                                                     _airspyPipe);
             airspyProc->start();
@@ -202,22 +228,26 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
 
             logPath = logFileManager->filename(LogFileManager::DETECTORS, "csdr-uavrt", "log");
             MonitoredProcess* csdrProc = new MonitoredProcess(
-                                                    _mavlink, 
-                                                    "csdr-uavrt", 
-                                                    "csdr-uavrt fir_decimate_cc 8 0.05 HAMMING", 
-                                                    logPath.c_str(), 
+                                                    _mavlink,
+                                                    "csdr-uavrt",
+                                                    "csdr-uavrt fir_decimate_cc 8 0.05 HAMMING",
+                                                    logPath.c_str(),
                                                     MonitoredProcess::InputPipe,
                                                     _airspyPipe);
             csdrProc->start();
             _processes.push_back(csdrProc);
 
-            commandStr  = formatString("%s/repos/%s/airspy_channelize %s", _homePath, airspyChannelizeDir.c_str(), _tagDatabase.channelizerCommandLine().c_str());
-            logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspy_channelize", "log");
+            commandStr  = formatString("%s/repos/%s/%s %s",
+                                _homePath,
+                                airspyChannelizeDir.c_str(),
+                                airspyChannelizeExecutable.c_str(),
+                                _tagDatabase.channelizerCommandLine().c_str());
+            logPath = logFileManager->filename(LogFileManager::DETECTORS, airspyChannelizeProcessName.c_str(), "log");
             MonitoredProcess* channelizeProc = new MonitoredProcess(
-                                                        _mavlink, 
-                                                        "airspy_channelize", 
-                                                        commandStr.c_str(), 
-                                                        logPath.c_str(), 
+                                                        _mavlink,
+                                                        airspyChannelizeProcessName.c_str(),
+                                                        commandStr.c_str(),
+                                                        logPath.c_str(),
                                                         MonitoredProcess::NoPipe,
                                                         NULL);
             channelizeProc->start();
@@ -285,15 +315,21 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
         return "Controller in incorrect state";
     }
 
-    std::string airspyInfoError = _checkForAirSpy();
-    if (!airspyInfoError.empty()) {
-        logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: airspy_info failed: " << airspyInfoError;
-        return airspyInfoError;
+    std::string airspyError;
+    auto deviceType = _connectedAirSpyType(&airspyError);
+    if (deviceType == AirSpyDeviceType::NONE) {
+        logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: AirSpy device detection failed: " << airspyError;
+        return airspyError;
     }
 
-    std::thread([this, tunnel]() {
+    if (_tagDatabase.size() == 0) {
+        logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: No tags configured";
+        return "No tags configured";
+    }
+
+    std::thread([this, tunnel, deviceType]() {
         RawCaptureInfo_t    rawCapture;
-        double              frequencyMhz = (double)_tagDatabase[0].frequency_hz / 1000000.0; 
+        double              frequencyMhz = (double)_tagDatabase[0].frequency_hz / 1000000.0;
         auto                logFileManager = LogFileManager::instance();
 
         logFileManager->rawCaptureStarted();
@@ -301,19 +337,52 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         memcpy(&rawCapture, tunnel.payload, sizeof(rawCapture));
 
-        auto commandStr = formatString("%sairspy_rx -r %s/airspy.%d.dat -f %f -a 3000000 -h %d -t 0 -n 24000000", 
-                        _airspyPath.c_str(),
-                        logDir.c_str(),
-                        ++_rawCaptureCount,
-                        frequencyMhz,
-                        rawCapture.gain);
-        auto captureLogPath = formatString("%s/airspy-mini.%d.log", logDir.c_str(), _rawCaptureCount);
+        ++_rawCaptureCount;
+
+        std::string commandStr;
+        std::string captureLogPath;
+        std::string sdrPathStatus;
+        std::string processName;
+
+        const int sampleDurationSeconds = 8;
+        if (deviceType == AirSpyDeviceType::HF) {
+            // AGC off, LNA on
+            const int sampleRate = 768000; // 768 ksps is the default sample rate for AirSpy HF
+            const int numSamples = sampleRate * sampleDurationSeconds;
+            commandStr = formatString("%sairspyhf_rx -r %s/airspy-hf.%d.dat -f %f -a 768000 -g off -m on -n %d",
+                                      _airspyPath.c_str(),
+                                      logDir.c_str(),
+                                      _rawCaptureCount,
+                                      frequencyMhz,
+                                      numSamples);
+            captureLogPath = formatString("%s/airspy-hf.%d.log", logDir.c_str(), _rawCaptureCount);
+            sdrPathStatus = _sdrPathStatusText(deviceType, frequencyMhz);
+            processName = "airspy-hf-capture";
+            logInfo() << "COMMAND_ID_RAW_CAPTURE - using AirSpy HF capture command";
+        } else {
+            const int sampleRate = 3000000; // 3 Msps
+            const int numSamples = sampleRate * sampleDurationSeconds;
+
+            commandStr = formatString("%sairspy_rx -r %s/airspy-mini.%d.dat -f %f -a 3000000 -h %d -t 0 -n %d",
+                                      _airspyPath.c_str(),
+                                      logDir.c_str(),
+                                      _rawCaptureCount,
+                                      frequencyMhz,
+                                      rawCapture.gain,
+                                      numSamples);
+            captureLogPath = formatString("%s/airspy-mini.%d.log", logDir.c_str(), _rawCaptureCount);
+            sdrPathStatus = _sdrPathStatusText(deviceType, frequencyMhz);
+            processName = "airspy-mini-capture";
+            logInfo() << "COMMAND_ID_RAW_CAPTURE - using AirSpy Mini capture command";
+        }
+
+        _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
 
         MonitoredProcess* airspyProcess = new MonitoredProcess(
-                                                    _mavlink, 
-                                                    "airspy-capture", 
-                                                    commandStr.c_str(), 
-                                                    captureLogPath.c_str(), 
+                                                    _mavlink,
+                                                    processName.c_str(),
+                                                    commandStr.c_str(),
+                                                    captureLogPath.c_str(),
                                                     MonitoredProcess::NoPipe,
                                                     NULL,
                                                     true /* rawCaptureProcess */);
@@ -426,52 +495,120 @@ void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
 
 std::string CommandHandler::_checkForAirSpy(void)
 {
-    std::string output;
-    std::string errorOutput;
+    std::string errorMessage;
+    auto deviceType = _connectedAirSpyType(&errorMessage);
 
-    logInfo() << "Running airspy_info command to check for AirSpy device";
-    
+    if (deviceType == AirSpyDeviceType::MINI) {
+        logInfo() << "Detected AirSpy Mini";
+        return "";
+    }
+
+    if (deviceType == AirSpyDeviceType::HF) {
+        logInfo() << "Detected AirSpy HF";
+        return "";
+    }
+
+    return errorMessage;
+}
+
+std::string CommandHandler::_sdrPathStatusText(AirSpyDeviceType deviceType, double frequencyMhz) const
+{
+    if (deviceType == AirSpyDeviceType::HF) {
+        return formatString("SDR path selected: AirSpy HF @ %.3f MHz", frequencyMhz);
+    }
+
+    if (deviceType == AirSpyDeviceType::MINI) {
+        return formatString("SDR path selected: AirSpy Mini @ %.3f MHz", frequencyMhz);
+    }
+
+    return formatString("SDR path selected: Unknown AirSpy @ %.3f MHz", frequencyMhz);
+}
+
+CommandHandler::AirSpyDeviceType CommandHandler::_connectedAirSpyType(std::string* errorMessage)
+{
+    logInfo() << "Checking for AirSpy devices";
+
+    // Collect any exception messages so callers can see root cause details
+    std::string exceptionDetails;
+
+    // Try airspy_info for Mini detection
     try {
         bp::ipstream pipe_stream;
         bp::ipstream error_stream;
-        
+
         std::string command = _airspyPath + "airspy_info";
-        
         bp::child child_process(command, bp::std_out > pipe_stream, bp::std_err > error_stream);
-        
+
+        std::string output;
+        std::string errorOutput;
         std::string line;
-        while (pipe_stream && std::getline(pipe_stream, line) && !line.empty()) {
+
+        while (pipe_stream && std::getline(pipe_stream, line)) {
             output += line + "\n";
         }
-        
-        // Also capture any error output
-        while (error_stream && std::getline(error_stream, line) && !line.empty()) {
+
+        while (error_stream && std::getline(error_stream, line)) {
             errorOutput += line + "\n";
         }
-        
+
         child_process.wait();
 
-        if (child_process.exit_code() != 0 || !errorOutput.empty()) {
-            logError() << "airspy_info command failed with exit code:" << child_process.exit_code();
-            if (!errorOutput.empty()) {
-                logError() << "airspy_info error output:" << errorOutput;
-                // Check for specific AirSpy device not found error
-                if (errorOutput.find("AIRSPY_ERROR_NOT_FOUND") != std::string::npos) {
-                    return "No AirSpy device found";
-                }
-                return errorOutput; // Return error output when command fails
-            }
-            return "Command failed with exit code: " + std::to_string(child_process.exit_code());
-        } else {
-            logInfo() << "airspy_info succeeded with output:\n" << errorOutput;
+        // Check if Mini device is NOT found
+        if (errorOutput.find("AIRSPY_ERROR_NOT_FOUND") == std::string::npos &&
+            child_process.exit_code() == 0) {
+            logInfo() << "Detected AirSpy Mini";
+            return AirSpyDeviceType::MINI;
         }
-        
+
     } catch (const std::exception& e) {
         logError() << "Exception running airspy_info:" << e.what();
-        return "Exception running airspy_info: " + std::string(e.what()); // Return exception message when command fails
+        exceptionDetails += std::string("airspy_info exception: ") + e.what() + "\n";
     }
-    
-    return ""; // Return empty string when command succeeds
+
+    // Try airspyhf_info for HF detection
+    try {
+        bp::ipstream pipe_stream;
+        bp::ipstream error_stream;
+
+        std::string command = _airspyPath + "airspyhf_info";
+        bp::child child_process(command, bp::std_out > pipe_stream, bp::std_err > error_stream);
+
+        std::string output;
+        std::string errorOutput;
+        std::string line;
+
+        while (pipe_stream && std::getline(pipe_stream, line)) {
+            output += line + "\n";
+        }
+
+        while (error_stream && std::getline(error_stream, line)) {
+            errorOutput += line + "\n";
+        }
+
+        child_process.wait();
+
+        // Check if HF device is NOT found
+        std::string combinedOutput = output + errorOutput;
+        if (combinedOutput.find("No devices attached") == std::string::npos &&
+            child_process.exit_code() == 0) {
+            logInfo() << "Detected AirSpy HF";
+            return AirSpyDeviceType::HF;
+        }
+
+    } catch (const std::exception& e) {
+        logError() << "Exception running airspyhf_info:" << e.what();
+        exceptionDetails += std::string("airspyhf_info exception: ") + e.what() + "\n";
+    }
+
+    // No device found - surface any collected exception details when available
+    if (errorMessage) {
+        if (!exceptionDetails.empty()) {
+            *errorMessage = exceptionDetails;
+        } else {
+            *errorMessage = "No AirSpy device found";
+        }
+    }
+    return AirSpyDeviceType::NONE;
 }
 
 std::string CommandHandler::_tunnelCommandIdToString(uint32_t command)
