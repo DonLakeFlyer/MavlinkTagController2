@@ -553,7 +553,7 @@ CommandHandler::AirSpyDeviceType CommandHandler::_connectedAirSpyType(std::strin
 
         child_process.wait();
 
-        // Check if Mini device is NOT found
+        // Check if Mini device is found
         if (errorOutput.find("AIRSPY_ERROR_NOT_FOUND") == std::string::npos &&
             child_process.exit_code() == 0) {
             logInfo() << "Detected AirSpy Mini";
