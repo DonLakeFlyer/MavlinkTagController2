@@ -25,6 +25,10 @@
 
 using namespace TunnelProtocol;
 
+namespace {
+constexpr double kAirSpyHfFrequencyOffsetMhz = 0.01; // 10 kHz
+}
+
 CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimulator)
     : _mavlink          (mavlink)
     , _pulseSimulator   (pulseSimulator)
@@ -196,10 +200,9 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
 
                 // Tune 10 kHz above the requested center to keep the signal away from the DC bin.
                 // This avoids the AirSpy HF baseband DC spike; airspyhf_decimator --shift-khz 10 shifts it back.
-                const double hfFrequencyOffset = 0.01; // 10 kHz in MHz
                 commandStr = formatString("%sairspyhf_rx -f %f -a 768000 -r /dev/stdout -g off -m on",
                                     _airspyPath.c_str(),
-                                    centerFrequencyMhz + hfFrequencyOffset);
+                                    centerFrequencyMhz + kAirSpyHfFrequencyOffsetMhz);
                 logInfo() << "COMMAND_ID_START_DETECTION - using AirSpy HF stream source";
 
                 _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
@@ -382,12 +385,11 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
             const int numSamples = sampleRate * sampleDurationSeconds;
             // Match start-detection tuning: capture 10 kHz above requested center to avoid the DC spike at baseband.
             // Post-processing can account for the same +10 kHz offset when interpreting frequency bins.
-            const double hfFrequencyOffset = 0.01; // 10 kHz in MHz
             commandStr = formatString("%sairspyhf_rx -r %s/airspy-hf.%d.dat -f %f -a 768000 -g off -m on -n %d",
                                       _airspyPath.c_str(),
                                       logDir.c_str(),
                                       _rawCaptureCount,
-                                      frequencyMhz + hfFrequencyOffset,
+                                      frequencyMhz + kAirSpyHfFrequencyOffsetMhz,
                                       numSamples);
             captureLogPath = formatString("%s/airspy-hf.%d.log", logDir.c_str(), _rawCaptureCount);
             sdrPathStatus = _sdrPathStatusText(deviceType, frequencyMhz);
