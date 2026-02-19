@@ -17,7 +17,7 @@ std::string TagDatabase::detectorConfigFileName(const TunnelProtocol::TagInfo_t&
     return logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "config");
 }
 
-bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel) const
+bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode) const
 {
     auto logFileManager = LogFileManager::instance();
 
@@ -34,7 +34,8 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
     double  channelCenterFreqMHz        = double(tagInfo.channelizer_channel_center_frequency_hz) / 1000000.0;
     double  tagFreqMHz                  = double(tagInfo.frequency_hz) / 1000000.0;
     auto    tip_msecs                   = secondaryChannel ? tagInfo.intra_pulse2_msecs : tagInfo.intra_pulse1_msecs;
-    auto    portData                    = 20000 + ((tagInfo.channelizer_channel_number - 1) * 2) + secondaryChannelIncrement;
+    auto    portData                    = isHFMode ? (10000 + secondaryChannelIncrement) : (20000 + ((tagInfo.channelizer_channel_number - 1) * 2) + secondaryChannelIncrement);
+    auto    sampleRate                  = isHFMode ? 3840 : 3750;
     auto    tip                         = double(tip_msecs) / 1000.0;
     auto    logDir                      = logFileManager->logDir(LogFileManager::DETECTORS);
 
@@ -43,7 +44,7 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
     fprintf(fp, "channelCenterFreqMHz:\t%f\n",              channelCenterFreqMHz);
     fprintf(fp, "ipData:\t127.0.0.1\n");
     fprintf(fp, "portData:\t%d\n",                          portData);
-    fprintf(fp, "Fs:\t3750\n");
+    fprintf(fp, "Fs:\t%d\n",                                sampleRate);
     fprintf(fp, "tagFreqMHz:\t%f\n",                            tagFreqMHz);
     fprintf(fp, "tp:\t%f\n",                                    tagInfo.pulse_width_msecs / 1000.0);
     fprintf(fp, "tip:\t%f\n",                                   tip);
@@ -87,12 +88,12 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
     return true;
 }
 
-bool TagDatabase::writeDetectorConfigs() const
+bool TagDatabase::writeDetectorConfigs(bool isHFMode) const
 {
     for (const auto& tagInfo : *this) {
-        _writeDetectorConfig(tagInfo, false);
+        _writeDetectorConfig(tagInfo, false, isHFMode);
         if (tagInfo.intra_pulse2_msecs != 0) {
-            _writeDetectorConfig(tagInfo, true);
+            _writeDetectorConfig(tagInfo, true, isHFMode);
         }
     }
 
