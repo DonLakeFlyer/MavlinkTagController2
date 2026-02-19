@@ -194,7 +194,8 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 airspyReceiverProcessName = "airspyhf_rx";
                 sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
 
-                // Tune 10 kHz higher to avoid DC spike at baseband; decimator will shift back
+                // Tune 10 kHz above the requested center to keep the signal away from the DC bin.
+                // This avoids the AirSpy HF baseband DC spike; airspyhf_decimator --shift-khz 10 shifts it back.
                 const double hfFrequencyOffset = 0.01; // 10 kHz in MHz
                 commandStr = formatString("%sairspyhf_rx -f %f -a 768000 -r /dev/stdout -g off -m on",
                                     _airspyPath.c_str(),
@@ -379,11 +380,14 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
             // AGC off, LNA on
             const int sampleRate = 768000; // 768 ksps is the default sample rate for AirSpy HF
             const int numSamples = sampleRate * sampleDurationSeconds;
+            // Match start-detection tuning: capture 10 kHz above requested center to avoid the DC spike at baseband.
+            // Post-processing can account for the same +10 kHz offset when interpreting frequency bins.
+            const double hfFrequencyOffset = 0.01; // 10 kHz in MHz
             commandStr = formatString("%sairspyhf_rx -r %s/airspy-hf.%d.dat -f %f -a 768000 -g off -m on -n %d",
                                       _airspyPath.c_str(),
                                       logDir.c_str(),
                                       _rawCaptureCount,
-                                      frequencyMhz,
+                                      frequencyMhz + hfFrequencyOffset,
                                       numSamples);
             captureLogPath = formatString("%s/airspy-hf.%d.log", logDir.c_str(), _rawCaptureCount);
             sdrPathStatus = _sdrPathStatusText(deviceType, frequencyMhz);
