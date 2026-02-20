@@ -90,14 +90,16 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
 
 bool TagDatabase::writeDetectorConfigs(bool isHFMode) const
 {
+    bool success = true;
+
     for (const auto& tagInfo : *this) {
-        _writeDetectorConfig(tagInfo, false, isHFMode);
+        success &= _writeDetectorConfig(tagInfo, false, isHFMode);
         if (tagInfo.intra_pulse2_msecs != 0) {
-            _writeDetectorConfig(tagInfo, true, isHFMode);
+            success &= _writeDetectorConfig(tagInfo, true, isHFMode);
         }
     }
 
-    return true;
+    return success;
 }
 
 std::string TagDatabase::channelizerCommandLine() const

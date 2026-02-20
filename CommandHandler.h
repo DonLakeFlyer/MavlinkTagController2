@@ -27,6 +27,7 @@ private:
         HF
     };
 
+
     void _sendCommandAck        (uint32_t command, uint32_t result, std::string& ackMessage);
     bool _handleStartTags       (const mavlink_tunnel_t& tunnel);
     bool _handleEndTags         (void);
@@ -45,7 +46,6 @@ private:
     std::string _tunnelCommandIdToString    (uint32_t command);
     std::string _tunnelCommandResultToString(uint32_t result);
 
-private:
     MavlinkSystem*                  _mavlink                = nullptr;
     PulseSimulator*                 _pulseSimulator         = nullptr;
     TagDatabase                     _tagDatabase;
@@ -55,4 +55,6 @@ private:
     bp::pipe*                       _airspyPipe             = nullptr;
     std::string                     _airspyPath;
     int                            _rawCaptureCount         = 0;
+
+    static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3940 Hz outgoing
 };

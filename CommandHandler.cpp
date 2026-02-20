@@ -25,10 +25,6 @@
 
 using namespace TunnelProtocol;
 
-namespace {
-constexpr double kAirSpyHfFrequencyOffsetMhz = 0.01; // 10 kHz
-}
-
 CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimulator)
     : _mavlink          (mavlink)
     , _pulseSimulator   (pulseSimulator)
@@ -198,11 +194,11 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 airspyReceiverProcessName = "airspyhf_rx";
                 sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
 
-                // Tune 10 kHz above the requested center to keep the signal away from the DC bin.
-                // This avoids the AirSpy HF baseband DC spike; airspyhf_decimator --shift-khz 10 shifts it back.
+                // Tune 10 kHz above the requested center to keep the signal away from the AirSpy HF DC bin.
+                // Then apply +10 kHz digital shift so the target is re-centered while the hardware DC spike moves to +10 kHz.
                 commandStr = formatString("%sairspyhf_rx -f %f -a 768000 -r /dev/stdout -g off -m on",
                                     _airspyPath.c_str(),
-                                    centerFrequencyMhz + kAirSpyHfFrequencyOffsetMhz);
+                                    centerFrequencyMhz + (static_cast<double>(kAirSpyHfFrequencyOffsetHz) / 1000000.0));
                 logInfo() << "COMMAND_ID_START_DETECTION - using AirSpy HF stream source";
 
                 _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
@@ -219,9 +215,11 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 _processes.push_back(airspyProc);
 
                 // Start airspyhf_decimator (decimates by 200 to get 3840 Hz)
-                // --shift-khz 10 compensates for the 10 kHz frequency offset to avoid DC spike
-                commandStr = formatString("%s/repos/AirspyHFDecimate/build/airspyhf_decimator --input-rate 768000 --shift-khz 10 --ports 10000,10001",
-                                    _homePath);
+                // --shift-khz +10 compensates for the +10 kHz receiver tune offset with this shifter convention.
+                const int hfFrequencyShiftKhz = (kAirSpyHfFrequencyOffsetHz / 1000);
+                commandStr = formatString("%s/repos/AirspyHFDecimate/build/airspyhf_decimator --input-rate 768000 --shift-khz %d --ports 10000,10001",
+                                    _homePath,
+                                    hfFrequencyShiftKhz);
                 logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
                 MonitoredProcess* decimatorProc = new MonitoredProcess(
                                                         _mavlink,
@@ -389,7 +387,7 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
                                       _airspyPath.c_str(),
                                       logDir.c_str(),
                                       _rawCaptureCount,
-                                      frequencyMhz + kAirSpyHfFrequencyOffsetMhz,
+                                      frequencyMhz + (static_cast<double>(kAirSpyHfFrequencyOffsetHz) / 1000000.0),
                                       numSamples);
             captureLogPath = formatString("%s/airspy-hf.%d.log", logDir.c_str(), _rawCaptureCount);
             sdrPathStatus = _sdrPathStatusText(deviceType, frequencyMhz);
