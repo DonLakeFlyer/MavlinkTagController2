@@ -56,5 +56,5 @@ private:
     std::string                     _airspyPath;
     int                            _rawCaptureCount         = 0;
 
-    static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3940 Hz outgoing
+    static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3840 Hz outgoing
 };
