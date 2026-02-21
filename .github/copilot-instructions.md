@@ -1,54 +1,27 @@
 # Repository Instructions
 
-This repository is part of a 3-repo signal pipeline. Keep code and docs aligned across all three:
+This is a monorepo containing the full UAV radio-tag tracking signal pipeline:
 
-1. AirspyHFDecimate
-   - https://github.com/DonLakeFlyer/AirspyHFDecimate
-2. airspyhf-zeromq
-   - https://github.com/DonLakeFlyer/airspyhf-zeromq
-3. MavlinkTagController2 (this repo)
-   - https://github.com/DonLakeFlyer/MavlinkTagController2
+| Component | Directory | Description |
+| --- | --- | --- |
+| Controller | `controller/` | MAVLink tag controller, detector management, pulse relay |
+| Decimator | `decimator/` | ZeroMQ→UDP IQ decimator (8×5×5) |
+| ZeroMQ publisher | `airspyhf_zeromq/` | Airspy HF+ SDR → ZeroMQ PUB stream |
+| Wire format | `shared/tagtracker_wireformat/` | Shared packet header (header-only C library) |
 
-## System contract (cross-repo)
+## Wire-format contract
 
-- `airspyhf-zeromq` publishes IQ over ZeroMQ PUB with the documented packet header and float32 IQ payload.
-- `AirspyHFDecimate` subscribes to that ZeroMQ stream, validates header/sequence/rate, decimates, and emits UDP packets in the downstream expected format.
-- `MavlinkTagController2` consumes downstream telemetry/detection products and relies on stream timing and packet continuity assumptions.
+The packet header in `shared/tagtracker_wireformat/zmq_iq_packet.h` is the single source of truth for all three components. Any change to field layout, sizes, endianness, magic, or version semantics is a **breaking contract change** that must:
 
-## Change policy
-
-When changing packet assumptions, timing, continuity handling, or detector/controller interfaces in this repo:
-
-- Treat it as a cross-repo contract change.
-- Update README and runtime configuration docs in this repo.
-- Call out required companion changes in:
-  - `airspyhf-zeromq` (publisher side), and/or
-  - `AirspyHFDecimate` (subscriber/decimator side).
-- Prefer backward-compatible transitions when practical (feature flags, version checks, soft warnings before hard-fail).
-
-## Integration checks to preserve
-
-- Maintain compatibility with decimator output framing and timestamp behavior.
-- Handle upstream packet continuity assumptions explicitly (drops/out-of-order conditions).
-- Keep controller behavior robust to expected stream rate and timing constraints.
+- Bump `TTWF_ZMQ_IQ_VERSION`.
+- Update all three components atomically in the same commit/PR.
+- Update the ZeroMQ packet format table in README.md.
 
 ## Coding focus
 
 - Keep edits minimal and interface-safe.
 - Do not introduce silent behavior changes in stream contracts.
-- If ambiguity exists between repos, document assumptions in PR description and README notes.
-
-## Versioning policy
-
-- Any incompatible change to expected decimator output framing, timestamps, or continuity handling must be explicitly versioned.
-- Prefer backward-compatible handling paths before requiring new upstream behavior.
-- Do not change default assumptions in a silent way.
-
-## Wire-format and ABI contract
-
-- Treat incoming payload structure, timestamp encoding, and field interpretation as stable contracts.
-- If parser assumptions change, update docs and call out upstream dependencies.
-- Keep binary parsing robust to malformed/incomplete input.
+- Wire-format changes require updating the shared header, all consumers, and tests.
 
 ## Rate and timing invariants
 
@@ -68,20 +41,20 @@ When changing packet assumptions, timing, continuity handling, or detector/contr
 ## Observability requirements
 
 - Expose stable counters/log keys for continuity and timing anomalies.
-- Keep enough diagnostic context to correlate issues back to publisher or decimator.
+- Keep enough diagnostic context to correlate issues across components.
 - Avoid silent error absorption in control paths.
 
-## Cross-repo change checklist
+## Build system
 
-When changing this repo, verify and document impact on:
+The top-level CMakeLists.txt supports selective builds:
 
-- `airspyhf-zeromq`: assumptions on source timing/rate quality and continuity semantics.
-- `AirspyHFDecimate`: expected UDP framing, timestamp behavior, and rate/continuity diagnostics.
-- This repo README/config docs: updated thresholds, flags, fallback behavior, and compatibility notes.
+- `BUILD_CONTROLLER` (ON by default)
+- `BUILD_DECIMATOR` (ON by default)
+- `BUILD_AIRSPYHF_ZMQ` (OFF by default — requires system libairspyhf)
 
 ## Test requirements by change type
 
-- Interface/parsing change: add/update compatibility and malformed-input tests.
+- Wire-format change: update `shared/test_zmq_iq_packet.c` and `decimator/tests/test_main.cpp`.
 - Timing/rate change: validate behavior under nominal, drifted, and degraded-rate scenarios.
 - Error-handling change: verify anomaly-specific action paths and operator-visible logs.
 
@@ -91,8 +64,9 @@ When changing this repo, verify and document impact on:
 - Avoid unbounded queues that can mask prolonged upstream problems.
 - If introducing buffering/retry logic, ensure loss/lag remains visible in diagnostics.
 
-## PR expectations
+## Dependencies
 
-- Include a cross-repo impact section in PR descriptions.
-- State backward-compatibility status and migration guidance.
-- Include representative logs/metrics for changed failure-handling behavior.
+- **MAVLink C headers** — fetched via CPM at configure time from `mavlink/c_library_v2`. Pinned to a specific commit in the top-level `CMakeLists.txt`. To update: change the `GIT_TAG` in the `CPMAddPackage(NAME mavlink ...)` call.
+- `libs/uavrt_interfaces/` — TunnelProtocol.h. Git submodule from `dynamic-and-active-systems-lab/uavrt_interfaces`.
+
+`uavrt_interfaces` is a git submodule — clone with `--recurse-submodules`. CPM caches downloads in `~/.cache/CPM` by default.
