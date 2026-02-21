@@ -1,0 +1,139 @@
+{
+    "version": 4,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "debug",
+            "displayName": "Debug",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "BUILD_TESTING": "ON"
+            }
+        },
+        {
+            "name": "release",
+            "displayName": "Release",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "relwithdebinfo",
+            "displayName": "RelWithDebInfo",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+            }
+        },
+        {
+            "name": "controller",
+            "displayName": "Controller only",
+            "inherits": "debug",
+            "cacheVariables": {
+                "BUILD_CONTROLLER": "ON",
+                "BUILD_DECIMATOR": "OFF",
+                "BUILD_AIRSPYHF_ZMQ": "OFF"
+            }
+        },
+        {
+            "name": "decimator",
+            "displayName": "Decimator only",
+            "inherits": "debug",
+            "cacheVariables": {
+                "BUILD_CONTROLLER": "OFF",
+                "BUILD_DECIMATOR": "ON",
+                "BUILD_AIRSPYHF_ZMQ": "OFF"
+            }
+        },
+        {
+            "name": "airspyhf-zeromq",
+            "displayName": "Airspy HF+ ZeroMQ only",
+            "inherits": "relwithdebinfo",
+            "cacheVariables": {
+                "BUILD_CONTROLLER": "OFF",
+                "BUILD_DECIMATOR": "OFF",
+                "BUILD_AIRSPYHF_ZMQ": "ON"
+            }
+        },
+        {
+            "name": "wireformat-tests",
+            "displayName": "Wire-format tests only",
+            "inherits": "debug",
+            "cacheVariables": {
+                "BUILD_CONTROLLER": "OFF",
+                "BUILD_DECIMATOR": "OFF",
+                "BUILD_AIRSPYHF_ZMQ": "OFF",
+                "BUILD_TESTING": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug",
+            "configurePreset": "debug",
+            "jobs": 0
+        },
+        {
+            "name": "release",
+            "configurePreset": "release",
+            "jobs": 0
+        },
+        {
+            "name": "relwithdebinfo",
+            "configurePreset": "relwithdebinfo",
+            "jobs": 0
+        },
+        {
+            "name": "controller",
+            "configurePreset": "controller",
+            "targets": ["MavlinkTagController2"],
+            "jobs": 0
+        },
+        {
+            "name": "decimator",
+            "configurePreset": "decimator",
+            "targets": ["airspyhf_decimator"],
+            "jobs": 0
+        },
+        {
+            "name": "airspyhf-zeromq",
+            "configurePreset": "airspyhf-zeromq",
+            "targets": ["airspyhf_zeromq_rx"],
+            "jobs": 0
+        },
+        {
+            "name": "wireformat-tests",
+            "configurePreset": "wireformat-tests",
+            "jobs": 0
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "debug",
+            "configurePreset": "debug",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "decimator",
+            "configurePreset": "decimator",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "wireformat-tests",
+            "configurePreset": "wireformat-tests",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

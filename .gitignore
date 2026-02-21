@@ -37,6 +37,7 @@ Temporary Items
 # Auterion build output
 output
 build
+build-*
 
 # Other files
 decimationfactorsandrates.xlsx
