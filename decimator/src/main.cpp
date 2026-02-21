@@ -30,8 +30,8 @@ constexpr double kTotalDecimation = 8.0 * 5.0 * 5.0;
 constexpr std::size_t kBytesPerIQ = TTWF_ZMQ_IQ_BYTES_PER_COMPLEX_SAMPLE;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
-constexpr uint32_t kZmqMagic = TTWF_ZMQ_IQ_MAGIC;
-constexpr uint16_t kZmqVersion = TTWF_ZMQ_IQ_VERSION;
+[[maybe_unused]] constexpr uint32_t kZmqMagic = TTWF_ZMQ_IQ_MAGIC;
+[[maybe_unused]] constexpr uint16_t kZmqVersion = TTWF_ZMQ_IQ_VERSION;
 constexpr uint16_t kZmqHeaderSizeBytes = TTWF_ZMQ_IQ_HEADER_SIZE;
 
 struct Options {
