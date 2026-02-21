@@ -4,3 +4,6 @@
 [submodule "mavlink/v2"]
 	path = mavlink/v2
 	url = https://github.com/mavlink/c_library_v2.git
+[submodule "TagTrackerWireFormat"]
+	path = TagTrackerWireFormat
+	url = https://github.com/DonLakeFlyer/TagTrackerWireFormat.git

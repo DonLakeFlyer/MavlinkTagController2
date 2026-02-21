@@ -8,6 +8,12 @@
 
 Protocol, packet-format, timing, and sample-rate assumption changes must be coordinated across all three repositories.
 
+This repository also tracks the shared wire-format module as a submodule:
+
+```
+git submodule update --init --recursive
+```
+
 ## Configure GitHub login for repo access
 
 Setup auth for *https* connections.
