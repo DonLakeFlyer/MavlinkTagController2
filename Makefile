@@ -1,4 +1,4 @@
-.PHONY: all controller decimator airspyhf_zeromq test clean
+.PHONY: all controller decimator airspyhf_zeromq install test clean
 
 # Default: build everything (parallel via CMake presets, jobs=0 = all cores)
 all: controller decimator airspyhf_zeromq
@@ -14,6 +14,9 @@ decimator:
 airspyhf_zeromq:
 	cmake --preset airspyhf-zeromq
 	cmake --build --preset airspyhf-zeromq
+
+install: airspyhf_zeromq
+	cmake --install build
 
 test:
 	cmake --preset debug
