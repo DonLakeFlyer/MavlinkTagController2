@@ -17,7 +17,7 @@ cd ~/repos
 echo "*** Clone and build MavlinkTagController2 (controller + decimator + airspyhf_zeromq)"
 cd ~/repos
 if [ ! -d MavlinkTagController2 ]; then
-	git clone git@github.com:DonLakeFlyer/MavlinkTagController2.git
+	git clone https://github.com/DonLakeFlyer/MavlinkTagController2.git
 fi
 cd ~/repos/MavlinkTagController2
 git pull origin main
@@ -32,14 +32,10 @@ echo "*** Build all components"
 cmake -Bbuild -H. -DCMAKE_BUILD_TYPE=Debug -DBUILD_CONTROLLER=ON -DBUILD_DECIMATOR=ON -DBUILD_AIRSPYHF_ZMQ=ON
 cmake --build build -j4
 
-echo "*** Install airspyhf_zeromq"
-sudo cmake --install build
-sudo ldconfig
-
 echo "*** Clone and build csdr-uavrt"
 cd ~/repos
 if [ ! -d csdr-uavrt ]; then
-	git clone --recursive git@github.com:DonLakeFlyer/csdr-uavrt.git
+	git clone --recursive https://github.com/DonLakeFlyer/csdr-uavrt.git
 fi
 cd ~/repos/csdr-uavrt
 git pull origin master
@@ -49,7 +45,7 @@ sudo make install
 echo "*** Clone and build airspy_channelize"
 cd ~/repos
 if [ ! -d airspy_channelize ]; then
-	git clone --recursive git@github.com:dynamic-and-active-systems-lab/airspy_channelize.git
+	git clone --recursive https://github.com/dynamic-and-active-systems-lab/airspy_channelize.git
 fi
 cd ~/repos/airspy_channelize
 git pull origin main
@@ -58,7 +54,7 @@ make
 echo "*** Clone and build uavrt_detection"
 cd ~/repos
 if [ ! -d uavrt_detection ]; then
-	git clone --recursive git@github.com:dynamic-and-active-systems-lab/uavrt_detection.git
+	git clone --recursive https://github.com/dynamic-and-active-systems-lab/uavrt_detection.git
 fi
 cd ~/repos/uavrt_detection
 git pull origin main
