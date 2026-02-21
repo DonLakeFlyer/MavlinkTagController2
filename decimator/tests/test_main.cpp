@@ -72,6 +72,7 @@ std::vector<uint8_t> makeIqPayload(
     return payload;
 }
 
+[[maybe_unused]]
 std::vector<uint8_t> makeZmqFrame(
     uint32_t magic, uint16_t version, uint16_t headerSize, uint64_t sequence,
     uint64_t timestampUs, uint32_t sampleRate, uint32_t sampleCount,

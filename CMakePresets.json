@@ -98,7 +98,7 @@
         {
             "name": "decimator",
             "configurePreset": "decimator",
-            "targets": ["airspyhf_decimator"],
+            "targets": ["airspyhf_decimator", "airspyhf_decimator_tests"],
             "jobs": 0
         },
         {
@@ -126,6 +126,11 @@
             "configurePreset": "decimator",
             "output": {
                 "outputOnFailure": true
+            },
+            "filter": {
+                "include": {
+                    "name": "airspyhf_decimator_tests"
+                }
             }
         },
         {
