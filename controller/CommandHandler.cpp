@@ -187,19 +187,19 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         if (_pulseSimulator) {
             _pulseSimulator->startSendingTagPulses(startDetection.radio_center_frequency_hz);
         } else {
-            _airspyPipe         = new bp::pipe();
             std::string sdrPathStatus;
             if (deviceType == AirSpyDeviceType::HF) {
-                // HF Pipeline: airspyhf_rx -> airspyhf_decimator -> UDP 10000/10001 -> detectors
-                airspyReceiverProcessName = "airspyhf_rx";
+                // HF Pipeline: airspyhf_zeromq_rx --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
+                airspyReceiverProcessName = "airspyhf_zeromq_rx";
                 sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
 
                 // Tune 10 kHz above the requested center to keep the signal away from the AirSpy HF DC bin.
                 // Then apply +10 kHz digital shift so the target is re-centered while the hardware DC spike moves to +10 kHz.
-                commandStr = formatString("%sairspyhf_rx -f %f -a 768000 -r /dev/stdout -g off -m on",
-                                    _airspyPath.c_str(),
+                // The -Z flag enables ZeroMQ PUB output on tcp://127.0.0.1:5555 (default).
+                commandStr = formatString("%s/repos/MavlinkTagController2/build/airspyhf_zeromq/tools/src/airspyhf_zeromq_rx -Z -f %f -a 768000 -g off -m on",
+                                    _homePath,
                                     centerFrequencyMhz + (static_cast<double>(kAirSpyHfFrequencyOffsetHz) / 1000000.0));
-                logInfo() << "COMMAND_ID_START_DETECTION - using AirSpy HF stream source";
+                logInfo() << "COMMAND_ID_START_DETECTION - using AirSpy HF ZeroMQ stream source";
 
                 _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
 
@@ -209,15 +209,15 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                                                         airspyReceiverProcessName.c_str(),
                                                         commandStr.c_str(),
                                                         logPath.c_str(),
-                                                        MonitoredProcess::OutputPipe,
-                                                        _airspyPipe);
+                                                        MonitoredProcess::NoPipe,
+                                                        NULL);
                 airspyProc->start();
                 _processes.push_back(airspyProc);
 
-                // Start airspyhf_decimator (decimates by 200 to get 3840 Hz)
-                // --shift-khz +10 compensates for the +10 kHz receiver tune offset with this shifter convention.
+                // Start airspyhf_decimator (subscribes to ZMQ, decimates by 200 to get 3840 Hz)
+                // --shift-khz 10 compensates for the +10 kHz receiver tune offset with this shifter convention.
                 const int hfFrequencyShiftKhz = (kAirSpyHfFrequencyOffsetHz / 1000);
-                commandStr = formatString("%s/repos/AirspyHFDecimate/build/airspyhf_decimator --input-rate 768000 --shift-khz %d --ports 10000,10001",
+                commandStr = formatString("%s/repos/MavlinkTagController2/build/decimator/airspyhf_decimator --input-rate 768000 --shift-khz %d --ports 10000,10001",
                                     _homePath,
                                     hfFrequencyShiftKhz);
                 logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
@@ -226,11 +226,12 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                                                         "airspyhf_decimator",
                                                         commandStr.c_str(),
                                                         logPath.c_str(),
-                                                        MonitoredProcess::InputPipe,
-                                                        _airspyPipe);
+                                                        MonitoredProcess::NoPipe,
+                                                        NULL);
                 decimatorProc->start();
                 _processes.push_back(decimatorProc);
             } else {
+                _airspyPipe = new bp::pipe();
                 // Mini Pipeline: airspy_rx -> csdr-uavrt -> channelizer -> UDP 20000+ -> detectors
                 airspyChannelizeDir = "airspy_channelize";
                 airspyChannelizeProcessName = "airspy_channelize";
@@ -383,8 +384,8 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
             const int numSamples = sampleRate * sampleDurationSeconds;
             // Match start-detection tuning: capture 10 kHz above requested center to avoid the DC spike at baseband.
             // Post-processing can account for the same +10 kHz offset when interpreting frequency bins.
-            commandStr = formatString("%sairspyhf_rx -r %s/airspy-hf.%d.dat -f %f -a 768000 -g off -m on -n %d",
-                                      _airspyPath.c_str(),
+            commandStr = formatString("%s/repos/MavlinkTagController2/build/airspyhf_zeromq/tools/src/airspyhf_zeromq_rx -r %s/airspy-hf.%d.dat -f %f -a 768000 -g off -m on -n %d",
+                                      _homePath,
                                       logDir.c_str(),
                                       _rawCaptureCount,
                                       frequencyMhz + (static_cast<double>(kAirSpyHfFrequencyOffsetHz) / 1000000.0),
@@ -392,7 +393,7 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
             captureLogPath = formatString("%s/airspy-hf.%d.log", logDir.c_str(), _rawCaptureCount);
             sdrPathStatus = _sdrPathStatusText(deviceType, frequencyMhz);
             processName = "airspy-hf-capture";
-            logInfo() << "COMMAND_ID_RAW_CAPTURE - using AirSpy HF capture command";
+            logInfo() << "COMMAND_ID_RAW_CAPTURE - using AirSpy HF ZeroMQ capture command";
         } else {
             const int sampleRate = 3000000; // 3 Msps
             const int numSamples = sampleRate * sampleDurationSeconds;
