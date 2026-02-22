@@ -153,35 +153,149 @@ where noise PSD is computed from the STFT while masking out time-frequency regio
 
 ---
 
-## 7. State Machine (Detection Modes)
+## 7. Operating Modes (Detection State Machine)
 
-The `process()` method in `waveform.m` (~line 1370) implements a **state machine** with four modes:
+The detector operates as a state machine with **two layers**: an **outer loop** in `uavrt_detection.m` that maps high-level suggestions into concrete modes, and an **inner `process()` method** in `waveform.m` that executes the detection logic for each mode.
 
-| Mode | Freq Search | Time Search | Description |
-|------|-------------|-------------|-------------|
-| **D** (Discovery) | Naive (all freqs) | Naive (all times) | Initial detection, no prior info |
-| **I** (Informed Discovery) | Informed (narrowed freq) | Naive (all times) | Uses known frequency, naive time |
-| **C** (Confirmation) | Naive | Naive | Re-detects and validates against prior |
-| **T** (Tracking) | Informed | Informed | Both time and frequency narrowed |
+### 7a. Configuration-Level Operating Mode (`opMode`)
 
-### State Transitions
+The `DetectorConfig` class defines a top-level `opMode` string (default: `'freqSearchHardLock'`). The supported values are:
+
+| `opMode` Value | Description |
+|---|---|
+| `freqSearchHardLock` | Start with a full-bandwidth frequency search. Once confirmed, lock the frequency and never release until reset. (Default) |
+| `freqSearchSoftLock` | Start with a full-bandwidth frequency search. Lock frequency on confirmation, but release the lock if tracking fails. |
+| `freqKnownHardLock` | The tag frequency is known a priori. Start with an informed (narrowed) frequency search and hard-lock on confirmation. |
+| `freqAllNeverLock` | Always search the full frequency bandwidth. Never lock or narrow the frequency search, regardless of detections. |
+
+> **Note:** In the current codebase the `opMode` switch is commented out (~line 323 of `uavrt_detection.m`). The runtime behavior effectively follows a `freqSearchSoftLock` pattern — frequency is locked on confirmation and released if tracking fails.
+
+### 7b. Internal Detection Modes
+
+The `process()` method in `waveform.m` (~line 1370) implements **five internal mode codes**:
+
+| Code | Name | Freq Search | Time Search | Run Mode | Description |
+|------|------|-------------|-------------|----------|-------------|
+| **D** | Discovery | Naive (all freqs) | Naive (all times) | `search` | Initial detection with no prior. Searches the entire frequency band and all time windows. Computationally the most expensive mode. |
+| **I** | Informed Discovery | Informed (narrowed freq) | Naive (all times) | `search` | Like Discovery, but restricts the frequency search to the band around a previously detected frequency (`fstart` to `fend`). Used when frequency is locked (`fLock = true`) but the detector needs to re-search in time. |
+| **C** | Confirmation | Naive (all freqs) | Naive (all times) | `confirm` | Re-detects with the same broad search as Discovery, then validates the found pulses against the prior detection using `confirmpulses()`. This is a "trust but verify" step. |
+| **T** | Tracking | Informed (narrowed freq) | Informed (narrowed time) | `track` | Both frequency and time searches are narrowed based on prior detections. The fastest mode — only looks where pulses are expected to be. |
+| **S** | Search (pseudo-mode) | — | — | — | Not a real processing mode. It's a **suggestion code** from the inner `process()` to the outer loop meaning "go back to searching." The outer loop translates it to D or I depending on `fLock`. |
+
+### 7c. Mode Entry Requirements
+
+Before executing, the `process()` method **validates** that sufficient priori information exists for the requested mode. If not, it silently falls back to Discovery:
+
+- **Tracking (T)** requires both `have_priori_freq_band` (finite `fstart`/`fend`) AND `have_priori_time` (finite last pulse time, `t_p`, `t_ip`, `t_ipu`, `t_ipj`). If either is missing → falls back to **D**.
+- **Confirmation (C)** requires `have_priori_time` (needs a previous pulse time to confirm against). If missing → falls back to **D**.
+- **Informed Discovery (I)** requires `have_priori_freq_band`. If missing → falls back to **D**.
+- **Discovery (D)** has no entry requirements — it's the universal fallback.
+
+### 7d. Detailed Mode Behavior
+
+#### Discovery Mode (D)
+
+1. Calls `findpulse('naive', 'naive', excluded_freq_bands)` — searches all frequencies and all time windows.
+2. If a detection is made (score exceeds threshold):
+   - Also runs `confirmpulses()` to check against any prior. This allows direct D → T transition if the detected pulse aligns with a previous detection (e.g., after a brief dropout).
+   - **If confirmed**: sets `con_dec = true` on pulses, recommends mode **T** (tracking).
+   - **If detected but not confirmed**: recommends mode **C** (confirmation).
+3. If no detection: recommends mode **S** (search again).
+
+#### Informed Discovery Mode (I)
+
+Identical logic to Discovery, except `findpulse` is called with `freq_search_type = 'informed'`. This restricts the frequency search to the band `[ps_pre.fstart, ps_pre.fend]` (typically ±100 Hz around the last confirmed frequency). The time search remains naive (all windows).
+
+This mode is entered when the outer loop receives an **S** suggestion but `fLock = true` — the detector lost the pulse in time but still trusts the frequency.
+
+#### Confirmation Mode (C)
+
+1. Calls `findpulse('naive', 'naive', excluded_freq_bands)` — full frequency and time search (same as Discovery).
+2. If a detection is made:
+   - Runs `confirmpulses()` to validate against the prior segment's pulses.
+   - **If confirmed**: sets `con_dec = true`, recommends mode **T** (tracking).
+   - **If detected but not confirmed**: recommends mode **S** (search) — the detection didn't match expectations, so confidence is not established.
+3. If no detection: recommends mode **S** (search).
+
+The key difference from Discovery: in Confirmation mode, a detection that fails the confirmation check sends the detector back to **S** (search), whereas in Discovery mode that same scenario would recommend **C** (try to confirm). This prevents infinite D ↔ C loops.
+
+#### Tracking Mode (T)
+
+1. Calls `findpulse('informed', 'informed', excluded_freq_bands)` — both frequency and time searches are narrowed.
+   - **Frequency** is restricted to `[fstart, fend]` (typically ±100 Hz band).
+   - **Time** is restricted based on projecting the last known pulse forward by `t_ip ± t_ipu ± t_ipj`.
+2. If a detection is made:
+   - Runs `confirmpulses()`.
+   - **If confirmed**: stays in **T** (tracking). The `trackedCount` counter increments.
+   - **If detected but not confirmed**: recommends mode **S** (search) — lost the pulse.
+3. If no detection: recommends mode **S** (search) — lost the pulse.
+
+Because the search space is narrowed, Tracking mode is **dramatically faster** than Discovery or Confirmation. This is critical for real-time operation where the processing time must be less than the data segment duration.
+
+### 7e. Outer Loop Mode Mapping
+
+The outer loop in `uavrt_detection.m` (~line 363) translates the `suggestedMode` from the previous segment's `ps_pos.mode` into the actual mode used for processing:
 
 ```
-Start → D (Discovery)
-  Detection made → C (Confirmation)
-  No detection → S (Search again)
+suggestedMode = 'S' (Search):
+    if fLock == true  → mode = 'I' (Informed Discovery)
+    if fLock == false → mode = 'D' (Discovery)
 
-C (Confirmation):
-  Detection + Confirmed → T (Tracking)
-  Detection but not confirmed → S
-  No detection → S
-
-T (Tracking):
-  Detection + Confirmed → T (stay in tracking)
-  Failure → S
+suggestedMode = 'C' → mode = 'C' (Confirmation)
+suggestedMode = 'T' → mode = 'T' (Tracking), trackedCount++
 ```
 
-The outer loop in `uavrt_detection.m` maps `S` → `D` (or `I` if frequency is locked).
+The `fLock` flag is set to `true` when all pulses in the detected group are confirmed (`con_dec = true`), and set to `false` otherwise.
+
+### 7f. State Transition Diagram
+
+```
+                    ┌──────────────────────────────────────────────────────┐
+                    │                                                      │
+                    ▼                                                      │
+    ┌───────────────────────────┐                                          │
+    │  D (Discovery)            │──── detection + confirmed ──────────────▶│
+    │  or I (Informed Discovery)│                                          │
+    │  freq: naive/informed     │──── detection, not confirmed ──▶ C       │
+    │  time: naive              │                                  │       │
+    │                           │──── no detection ──▶ S ──▶ D/I   │       │
+    └───────────────────────────┘                                  │       │
+                    ▲                                               │       │
+                    │                                               ▼       │
+                    │                              ┌─────────────────────┐  │
+                    │                              │  C (Confirmation)   │  │
+                    │                              │  freq: naive        │  │
+                    │◀── det, not confirmed ────── │  time: naive        │──┘
+                    │◀── no detection ──────────── │                     │  confirmed
+                    │                              └─────────────────────┘  │
+                    │                                                      │
+                    │                              ┌─────────────────────┐  │
+                    │                              │  T (Tracking)       │◀─┘
+                    │                              │  freq: informed     │
+                    │◀── not confirmed ─────────── │  time: informed     │
+                    │◀── no detection ──────────── │                     │──┐
+                    │                              └─────────────────────┘  │
+                    │                                                      │
+                    │                  confirmed ──────────────────────────┘
+                    │                  (stays in T)
+```
+
+### 7g. Frequency Lock Behavior
+
+The `fLock` variable in the outer loop controls whether the detector trusts a previously detected frequency:
+
+- **Set to `true`** when `all([X.ps_pos.pl.con_dec])` — every pulse in the group was confirmed.
+- **Set to `false`** when confirmation fails or no detection is made.
+
+When `fLock = true` and the detector falls back to Search, it enters **Informed Discovery (I)** instead of full **Discovery (D)**. This means it retains the frequency lock but re-searches across all time windows. This is useful for brief signal dropouts where the tag frequency hasn't changed but timing was lost.
+
+### 7h. Processing Time Guard
+
+A safety check (~line 476 of `uavrt_detection.m`) monitors whether the processing time exceeds 90% of the waveform's real-time duration. If it does:
+
+- A warning is printed suggesting the user reduce K by 1.
+- All buffers are reset and the detector returns to Search mode.
+- This prevents the detector from falling behind the incoming data stream, which would cause stale data accumulation.
 
 ---
 
