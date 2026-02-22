@@ -23,6 +23,105 @@ The entry point is `uavrt_detection.m`. On startup it:
 
 3. Sets up async data/time buffers (`dsp.AsyncBuffer`) and a UDP receiver to receive channelized IQ samples.
 
+### Understanding `tip`, `tipu`, and `tipj`
+
+Three parameters define the temporal structure of the pulse train. They are conceptually distinct and serve different purposes throughout the pipeline:
+
+#### `tip` — Inter-Pulse Time (Nominal)
+
+The **mean** or **nominal** time between the start of one pulse and the start of the next (also called the Pulse Repetition Interval, or PRI). For example, if a tag transmits every 1.0 second, `tip = 1.0`.
+
+This is the "center" of the timing model. All other time parameters describe deviations from this value.
+
+#### `tipu` — Inter-Pulse Time Uncertainty
+
+A **systematic** or **deterministic** uncertainty in the inter-pulse time. This represents the range of *possible mean PRI values* — the tag's actual PRI might be any value in the range `[tip - tipu, tip + tipu]`.
+
+This typically arises because:
+- The tag's exact PRI is not precisely known (e.g., manufacturer tolerance)
+- Temperature or battery voltage cause the tag's oscillator to drift
+
+**Key characteristic: `tipu` accumulates over multiple pulses.** If you don't know whether the true PRI is 0.98 s or 1.02 s (tipu = 0.02), by the 5th pulse the uncertainty on that pulse's arrival time is 5 × 0.02 = 0.10 s. This is because uncertainty represents a persistent offset from the nominal PRI — every inter-pulse interval shifts by the same (unknown) amount.
+
+In code, this accumulation appears in the confirmation windows (`confirmpulses.m`):
+
+```
+Earliest possible time of pulse n:  tref + (tip - tipu) * n
+Latest possible time of pulse n:    tref + (tip + tipu) * n
+```
+
+For pulse 1, the window is `tip ± tipu`. For pulse 3, it is `3*tip ± 3*tipu` — the window widens linearly with each successive pulse.
+
+#### `tipj` — Inter-Pulse Time Jitter
+
+A **stochastic** or **random** per-pulse deviation from the mean PRI. Unlike `tipu`, jitter is independent from pulse to pulse — each pulse independently deviates from the mean PRI by up to `±tipj` seconds.
+
+This typically arises from:
+- Random variations in the tag's transmit circuitry
+- Digitization/sampling timing effects
+
+**Key characteristic: `tipj` does NOT accumulate over multiple pulses.** Whether you're looking at the 1st pulse or the 5th, each one individually may deviate by up to `±tipj` from where its nominal PRI would place it.
+
+In code, jitter is added as a flat offset to the confirmation window:
+
+```
+Earliest: tref + (tip - tipu) * n - tipj
+Latest:   tref + (tip + tipu) * n + tipj
+```
+
+The `tipj` term is the same constant regardless of `n`.
+
+#### How They Differ — A Concrete Example
+
+Consider `tip = 1.0 s`, `tipu = 0.02 s`, `tipj = 0.005 s`:
+
+| Pulse # (n) | Earliest Arrival | Latest Arrival | Window Width |
+|---|---|---|---|
+| 1 | 0 + (0.98)(1) - 0.005 = **0.975 s** | 0 + (1.02)(1) + 0.005 = **1.025 s** | 0.050 s |
+| 2 | 0 + (0.98)(2) - 0.005 = **1.955 s** | 0 + (1.02)(2) + 0.005 = **2.045 s** | 0.090 s |
+| 3 | 0 + (0.98)(3) - 0.005 = **2.935 s** | 0 + (1.02)(3) + 0.005 = **3.065 s** | 0.130 s |
+
+Notice how the window grows by 0.04 s (= 2 × tipu) per pulse due to uncertainty accumulation, while the jitter contributes a fixed ±0.005 s.
+
+#### Where `tipu` and `tipj` Are Used in the Pipeline
+
+1. **Conversion to STFT window units** (`waveform.getprioridependentprops`):
+   ```
+   M = ceil(n_ipu / n_ws)     where n_ipu = ceil(tipu * Fs)
+   J = ceil(n_ipj / n_ws)     where n_ipj = ceil(tipj * Fs)
+   ```
+   M and J are the uncertainty and jitter expressed in STFT time-step units, used everywhere downstream.
+
+2. **Segment/buffer sizing** — The data segment must be long enough to guarantee K pulses regardless of timing variation:
+   ```
+   sampsForKPulses = n_ws * (K * (N + M) + J + 1) + n_ol
+   ```
+   Both M (from tipu) and J (from tipj) enlarge the required segment. M is multiplied by K (accumulates), while J appears only once (does not accumulate).
+
+3. **Time correlator matrix Wq** (`buildtimecorrelatormatrix.m` → `assembleWq.m`):
+   - `tipu` → M generates the list of possible mean PRI values: `N + (-M : M)`
+   - `tipj` → J generates the list of per-pulse jitter offsets: `(-J : J)`
+   - All combinations of K pulses across these possibilities are enumerated in `generate_pulse_positions_func.m`, producing every valid K-pulse arrival pattern
+   - The Wq matrix has one column per pattern — the incoherent summation tries all of them and picks the best
+
+4. **Time search windows in `findpulse`** — When building per-pulse time search ranges:
+   ```
+   timeSearchRange(i,:) = timeSearchRange(1,:) + [(i-1)*(N-M)-J, (i-1)*(N+M)+J]
+   ```
+   M widens the range proportionally (uncertainty accumulates), J adds a fixed offset (jitter doesn't accumulate).
+
+5. **Segment overlap** — Overlap between successive segments ensures no pulses are missed at boundaries:
+   ```
+   overlap_windows = 2 * (K * M + J)
+   ```
+   Again M scales with K, J is constant.
+
+6. **Stale data detection** — If the integrated timestamp error in a buffered segment exceeds `tipu + tipj`, the segment is considered too corrupted for reliable detection and is discarded.
+
+7. **Confirmation windows** (`confirmpulses.m`) — As described above, tipu accumulates with pulse index n while tipj is a flat additive term.
+
+8. **Posteriori updates** (`pulsestats.updateposteriori`) — Crucially, **neither `tipu` nor `tipj` are updated** from detection results. They are always held at their configured values. The comment in the code explains: *"Don't update this because it can get too narrow."* If the detector narrowed the uncertainty window based on a few good detections, it might become too restrictive and reject valid pulses during a subsequent noisy period. Only `tip` (the mean PRI) is adaptively updated.
+
 ---
 
 ## 2. Data Acquisition & Buffering
