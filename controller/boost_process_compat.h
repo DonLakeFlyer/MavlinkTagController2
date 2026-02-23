@@ -1,22 +1,23 @@
 #pragma once
 
 /**
- * Boost.Process version compatibility layer.
- *
- * Handles differences between Boost >= 1.83 and earlier versions:
- * - Boost >= 1.83: Use boost::process::v1 (to prevent deprecation warnings)
- * - Boost < 1.83:  Use boost::process directly
+ * Boost.Process compatibility wrapper.
+ * Suppresses deprecation and unused-parameter warnings from Boost headers
+ * on both GCC and Clang.
  */
 
-#include <boost/version.hpp>
-
-#if BOOST_VERSION >= 108300
-    #define BOOST_PROCESS_VERSION 1
+#if defined(__clang__)
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Wunused-parameter"
     #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    #include <boost/process/v1.hpp>
-    #pragma clang diagnostic pop
-#else
-    #include <boost/process.hpp>
+#elif defined(__GNUC__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wunused-parameter"
+    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
+#include <boost/process.hpp>
+
+#if defined(__clang__) || defined(__GNUC__)
+    #pragma GCC diagnostic pop
 #endif
