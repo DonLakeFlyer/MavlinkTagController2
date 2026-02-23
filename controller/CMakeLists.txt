@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.10.2)
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread")
 
 set(Boost_USE_MULTITHREADED ON)
-find_package(Boost REQUIRED COMPONENTS system filesystem)
+find_package(Boost REQUIRED)
 
 add_executable(MavlinkTagController2
     main.cpp
@@ -32,6 +32,8 @@ add_executable(MavlinkTagController2
 target_include_directories(MavlinkTagController2
     PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/uavrt_interfaces/include/uavrt_interfaces
+    SYSTEM
+    ${Boost_INCLUDE_DIRS}
 )
 
 target_link_libraries(MavlinkTagController2

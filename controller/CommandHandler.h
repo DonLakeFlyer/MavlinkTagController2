@@ -2,8 +2,7 @@
 
 #include "TunnelProtocol.h"
 #include "TagDatabase.h"
-
-#include <boost/process.hpp>
+#include "boost_process_compat.h"
 
 #include <string>
 

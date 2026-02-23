@@ -28,6 +28,7 @@ else (LIBAIRSPYHF_INCLUDE_DIR AND LIBAIRSPYHF_LIBRARIES)
     PATHS /usr/local/include/libairspyhf /usr/include/libairspyhf /usr/local/include /usr/include
     ${CMAKE_SOURCE_DIR}/../libairspyhf/src
     /opt/local/include/libairspyhf
+    /opt/homebrew/include/libairspyhf
     ${LIBAIRSPYHF_INCLUDE_DIR}
   )
 
@@ -36,7 +37,7 @@ else (LIBAIRSPYHF_INCLUDE_DIR AND LIBAIRSPYHF_LIBRARIES)
   FIND_LIBRARY(LIBAIRSPYHF_LIBRARIES
     NAMES ${libairspyhf_library_names}
     HINTS $ENV{LIBAIRSPYHF_DIR}/lib ${PC_LIBAIRSPYHF_LIBDIR}
-    PATHS /usr/local/lib /usr/lib /opt/local/lib ${PC_LIBAIRSPYHF_LIBDIR} ${PC_LIBAIRSPYHF_LIBRARY_DIRS} ${CMAKE_SOURCE_DIR}/../libairspyhf/src
+    PATHS /usr/local/lib /usr/lib /opt/local/lib /opt/homebrew/lib ${PC_LIBAIRSPYHF_LIBDIR} ${PC_LIBAIRSPYHF_LIBRARY_DIRS} ${CMAKE_SOURCE_DIR}/../libairspyhf/src
   )
 
   if(LIBAIRSPYHF_INCLUDE_DIR)
