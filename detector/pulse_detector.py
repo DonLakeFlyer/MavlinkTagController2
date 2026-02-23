@@ -3,7 +3,7 @@
 Simplified VHF Pulse Detector for Sirtrack Crystal-Oscillator Collars
 
 Reads decimated IQ data from the airspyhf_zeromq + decimator pipeline via UDP.
-Assumes crystal-oscillator timing (tipu=0, tipj=0) — no uncertainty or jitter.
+Assumes crystal-oscillator timing (ti_pu=0, ti_pj=0) — no uncertainty or jitter.
 Performs K=5 pulse folding and resets completely after each cycle.
 
 Pipeline:

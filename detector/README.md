@@ -360,11 +360,11 @@ At 3840 Hz decimated rate with default parameters:
 
 ### False Alarm Rate
 
-With `--pf 1e-4` and 20-second cycles:
+With `--pf 1e-4` and ~10-second cycles (K=5, tip=2.0s):
 
 ```
-FA_rate = (3600 s/hour) / (20 s/cycle) × 1e-4 = 0.018 FA/hour
-        ≈ 1 false alarm every 6 hours
+FA_rate = (3600 s/hour) / (10 s/cycle) × 1e-4 = 0.036 FA/hour
+        ≈ 1 false alarm every 28 hours
 ```
 
 Actual rate may be higher in non-Gaussian noise environments (power lines, urban RF).
