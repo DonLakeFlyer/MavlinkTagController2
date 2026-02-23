@@ -7,8 +7,6 @@
 
 #include "boost_process_compat.h"
 
-namespace bp = boost::process;
-
 class MavlinkSystem;
 
 class MonitoredProcess
@@ -40,7 +38,7 @@ private:
 	std::string 					_command;
 	std::string						_logPath;
 	std::thread*					_thread			= NULL;
-	boost::process::child*			_childProcess 	= NULL;
+	bp::child*						_childProcess 	= NULL;
 	bool							_stopped		= false;
 	IntermediatePipeType			_intermediatePipeType;
 	bp::pipe*						_intermediatePipe;
