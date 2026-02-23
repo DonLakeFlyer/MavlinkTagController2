@@ -11,7 +11,16 @@ permissions:
 jobs:
   # ── Controller build ───────────────────────────────────────────────
   controller:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            install_deps: sudo apt-get update && sudo apt-get install -y libboost-system-dev libboost-thread-dev
+          - os: macos-latest
+            install_deps: brew install boost
+
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,7 +28,7 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libboost-system-dev libboost-thread-dev
+        run: ${{ matrix.install_deps }}
 
       - name: Configure
         run: cmake --preset controller
@@ -29,24 +38,52 @@ jobs:
 
   # ── Decimator build + test ─────────────────────────────────────────
   decimator:
-    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        build_type: [Debug, Release]
-        compiler: [gcc, clang]
         include:
-          - compiler: gcc
+          # Ubuntu: gcc + clang, Debug + Release
+          - os: ubuntu-24.04
+            build_type: Debug
+            compiler: gcc
             cxx: g++
-          - compiler: clang
+            install_deps: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+          - os: ubuntu-24.04
+            build_type: Release
+            compiler: gcc
+            cxx: g++
+            install_deps: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+          - os: ubuntu-24.04
+            build_type: Debug
+            compiler: clang
             cxx: clang++
+            install_deps: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+          - os: ubuntu-24.04
+            build_type: Release
+            compiler: clang
+            cxx: clang++
+            install_deps: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+          # macOS: Apple Clang, Debug + Release
+          - os: macos-latest
+            build_type: Debug
+            compiler: clang
+            cxx: clang++
+            install_deps: brew install zeromq pkg-config
+          - os: macos-latest
+            build_type: Release
+            compiler: clang
+            cxx: clang++
+            install_deps: brew install zeromq pkg-config
+
+    name: decimator (${{ matrix.os }}, ${{ matrix.compiler }}, ${{ matrix.build_type }})
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+        run: ${{ matrix.install_deps }}
 
       - name: Configure
         run: >
@@ -72,6 +109,11 @@ jobs:
               set -euxo pipefail
               sudo apt-get update
               sudo apt-get install -y build-essential cmake libusb-1.0-0-dev libzmq3-dev pkg-config
+            ldconfig: sudo ldconfig
+          - os: macos-latest
+            name: macOS
+            install_deps: brew install libusb zeromq pkg-config
+            ldconfig: "true"
 
     name: airspyhf-zeromq (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -88,7 +130,7 @@ jobs:
           cmake -S airspyhf_zeromq/libairspyhf -B build-lib -DCMAKE_BUILD_TYPE=Release
           cmake --build build-lib --parallel
           sudo cmake --install build-lib
-          sudo ldconfig
+          ${{ matrix.ldconfig }}
 
       - name: Configure
         run: cmake --preset airspyhf-zeromq
@@ -98,7 +140,12 @@ jobs:
 
   # ── Wire-format header tests ───────────────────────────────────────
   wireformat-tests:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -114,11 +161,13 @@ jobs:
 
   # ── Pulse detector validation ──────────────────────────────────────
   detector:
-    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        os: [ubuntu-24.04, macos-latest]
+        python-version: ['3.11', '3.12']
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
