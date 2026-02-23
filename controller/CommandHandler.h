@@ -8,8 +8,6 @@
 
 #include <mavlink.h>
 
-namespace bp = boost::process;
-
 class MavlinkSystem;
 class MonitoredProcess;
 class LogFileManager;
