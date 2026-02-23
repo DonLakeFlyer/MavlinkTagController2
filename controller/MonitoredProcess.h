@@ -5,7 +5,7 @@
 #include <chrono>
 #include <memory>
 
-#include <boost/process.hpp>
+#include "boost_process_compat.h"
 
 namespace bp = boost::process;
 
@@ -22,9 +22,9 @@ public:
 
 	MonitoredProcess(
 		MavlinkSystem*					mavlink,
-		const char* 					name, 
-		const char* 					command, 
-		const char* 					logPath, 
+		const char* 					name,
+		const char* 					command,
+		const char* 					logPath,
 		IntermediatePipeType			intermediatePipeType,
 		bp::pipe* 						intermediatePipe,
 		bool							rawCaptureProcess = false);
