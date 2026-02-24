@@ -186,7 +186,7 @@ def compute_stft_power(iq, n_w, n_ol, nfft, W=None):
 # ---------------------------------------------------------------------------
 
 def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
-                           W=None, n_trials=100):
+                           W=None, n_trials=100, debug=False):
     """Generate detection threshold via Extreme Value Theory.
 
     Runs Monte Carlo simulation with synthetic complex Gaussian noise through
@@ -243,8 +243,16 @@ def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
     try:
         loc, scale = gumbel_r.fit(max_scores)
         threshold = gumbel_r.ppf(1.0 - pf, loc=loc, scale=scale)
+        if debug:
+            print(f'[DEBUG EVT] {len(max_scores)} trials  '
+                  f'max_scores: min={np.min(max_scores):.4e}  '
+                  f'max={np.max(max_scores):.4e}  mean={np.mean(max_scores):.4e}')
+            print(f'[DEBUG EVT] Gumbel fit: loc={loc:.4e}  scale={scale:.4e}  '
+                  f'threshold(pf={pf:.0e})={threshold:.4e}')
     except Exception:
         threshold = np.percentile(max_scores, 100.0 * (1.0 - pf))
+        if debug:
+            print(f'[DEBUG EVT] Gumbel fit failed, using percentile: {threshold:.4e}')
 
     return max(threshold, 0.0)
 
@@ -254,7 +262,7 @@ def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
 # ---------------------------------------------------------------------------
 
 def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
-                evt_threshold_cache, W=None, Wf=None):
+                evt_threshold_cache, W=None, Wf=None, debug=False):
     """Fold power spectrogram at PRI and detect pulses.
 
     With tipu=0, tipj=0 the only free parameter is the first-pulse offset
@@ -317,12 +325,24 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
 
     noise_power = np.maximum(noise_power, 1e-30)
 
+    if debug:
+        n_outlier = np.sum(outlier_mask)
+        n_total = outlier_mask.size
+        n_all_masked_bins = np.sum(all_masked) if np.any(all_masked) else 0
+        print(f'[DEBUG NOISE] noise_power: min={noise_power.min():.6e}  '
+              f'max={noise_power.max():.6e}  mean={noise_power.mean():.6e}  '
+              f'std={noise_power.std():.6e}')
+        print(f'[DEBUG NOISE] outlier mask: {n_outlier}/{n_total} '
+              f'({100.0*n_outlier/n_total:.1f}%) masked  |  '
+              f'{n_all_masked_bins} freq bins fully masked')
+
     # EVT threshold (Monte Carlo-derived, cached)
     # Generate or retrieve from cache
     if evt_threshold_cache.get('threshold') is None:
         print('  [Generating EVT threshold via 100 noise trials...]', flush=True)
         base_threshold = generate_evt_threshold(
-            n_w, n_ol, nfft, samples_needed, N, K, pf, W=W, n_trials=100
+            n_w, n_ol, nfft, samples_needed, N, K, pf, W=W, n_trials=100,
+            debug=debug
         )
         if np.isinf(base_threshold):
             print(f'ERROR: Insufficient data for EVT threshold. '
@@ -335,6 +355,25 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
 
     # Scale threshold by per-bin noise power (frequency-dependent)
     threshold = base_threshold * noise_power
+
+    if debug:
+        score_thresh_ratio = best_scores / np.maximum(threshold, 1e-30)
+        print(f'[DEBUG THRESH] base_threshold={base_threshold:.6e}')
+        print(f'[DEBUG THRESH] scaled threshold: min={threshold.min():.6e}  '
+              f'max={threshold.max():.6e}  mean={threshold.mean():.6e}')
+        print(f'[DEBUG THRESH] best_scores: min={best_scores.min():.6e}  '
+              f'max={best_scores.max():.6e}  mean={best_scores.mean():.6e}')
+        print(f'[DEBUG THRESH] score/threshold ratio: max={score_thresh_ratio.max():.4f}  '
+              f'({"DETECT" if score_thresh_ratio.max() > 1.0 else "NO DETECT"})')
+
+        freq_axis_dbg = Wf if Wf is not None else np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / Fs))
+        top5_idx = np.argsort(score_thresh_ratio)[::-1][:5]
+        print(f'[DEBUG TOP5] Top 5 freq bins by score/threshold ratio:')
+        for rank, idx in enumerate(top5_idx):
+            print(f'  #{rank+1}: freq={freq_axis_dbg[idx]:+8.1f} Hz  '
+                  f'score={best_scores[idx]:.4e}  thresh={threshold[idx]:.4e}  '
+                  f'ratio={score_thresh_ratio[idx]:.4f}  '
+                  f'noise={noise_power[idx]:.4e}')
 
     det_bins = np.where(best_scores > threshold)[0]
     if len(det_bins) == 0:
@@ -393,6 +432,8 @@ def main():
                     help='False-alarm probability per cycle via EVT (default: 1e-4)')
     ap.add_argument('--center-freq', type=float, default=0.0,
                     help='Channel center frequency in MHz (display only)')
+    ap.add_argument('--debug', action='store_true', default=False,
+                    help='Print diagnostic info at each pipeline stage')
     args = ap.parse_args()
 
     # --- Validate parameters ---
@@ -429,6 +470,18 @@ def main():
     # Spectral weighting matrix (sub-bin matched filter, uavrt_detection style)
     W, Wf = build_weighting_matrix(n_w, args.fs)
     nfft = W.shape[1]   # output frequency bins (= 2*n_w for default zetas)
+
+    if args.debug:
+        col_norms = np.linalg.norm(W, axis=0)
+        print(f'[DEBUG W] shape={W.shape}  dtype={W.dtype}')
+        print(f'[DEBUG W] column norms: min={col_norms.min():.6f}  max={col_norms.max():.6f}  '
+              f'mean={col_norms.mean():.6f}  std={col_norms.std():.6f}')
+        print(f'[DEBUG W] max/min column norm ratio={col_norms.max()/col_norms.min():.4f}')
+        print(f'[DEBUG W] row norms: min={np.linalg.norm(W, axis=1).min():.6f}  '
+              f'max={np.linalg.norm(W, axis=1).max():.6f}')
+        dead_cols = np.sum(col_norms < 1e-10)
+        if dead_cols > 0:
+            print(f'[DEBUG W] WARNING: {dead_cols} columns have near-zero norm!')
 
     samples_needed = n_ws * (K * N + 1) + n_ol
     seg_sec  = samples_needed / args.fs
@@ -619,6 +672,18 @@ def main():
 
             power, n_win = compute_stft_power(segment, n_w, n_ol, nfft, W=W)
 
+            if args.debug:
+                seg_mag = np.abs(segment)
+                print(f'[DEBUG STFT] IQ: len={len(segment)}  '
+                      f'mean_mag={seg_mag.mean():.6e}  max_mag={seg_mag.max():.6e}')
+                print(f'[DEBUG STFT] power: shape={power.shape}  '
+                      f'min={power.min():.6e}  max={power.max():.6e}  '
+                      f'mean={power.mean():.6e}  median={np.median(power):.6e}')
+                pwr_per_freq = power.mean(axis=1)
+                print(f'[DEBUG STFT] per-freq mean power: min={pwr_per_freq.min():.6e}  '
+                      f'max={pwr_per_freq.max():.6e}  '
+                      f'ratio={pwr_per_freq.max()/max(pwr_per_freq.min(), 1e-30):.1f}')
+
             # Invalidate EVT cache if geometry changed
             n_freq_cur = power.shape[0]
             n_time_cur = power.shape[1]
@@ -630,7 +695,8 @@ def main():
 
             detections = fold_detect(power, N, args.pf, args.fs, nfft,
                                      n_w, n_ol, samples_needed,
-                                     evt_threshold_cache, W=W, Wf=Wf)
+                                     evt_threshold_cache, W=W, Wf=Wf,
+                                     debug=args.debug)
             proc_ms = (time.monotonic() - t0) * 1000.0
 
             # Timestamp string (UTC) for the start of this segment
