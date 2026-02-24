@@ -89,5 +89,6 @@ python3 -u "$DET" \
     --tip "$TIP" \
     --port "$UDP_PORT" \
     --center-freq "$TAG_CENTER" \
+    "$@" \
     2>&1 | sed -u 's/^/[det] /'
 
