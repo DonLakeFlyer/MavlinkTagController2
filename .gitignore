@@ -83,3 +83,7 @@ airspyhf_channelize
 *.asv
 double2singlecomplex.m
 singlecomplex2double.m
+
+# Python
+__pycache__/
+*.pyc
