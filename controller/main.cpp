@@ -4,7 +4,6 @@
 #include "TunnelProtocol.h"
 #include "TelemetryCache.h"
 #include "MavlinkSystem.h"
-#include "PulseSimulator.h"
 #include "MavlinkFtpServer.h"
 #include "PulseHandler.h"
 #include "formatString.h"
@@ -30,24 +29,9 @@ int main(int argc, char** argv)
     // Check that TunnelProtocol hasn't exceed limits
     static_assert(TunnelProtocolValidateSizes, "TunnelProtocolValidateSizes failed");
 
-    bool simulatePulse 		= false;
-	int32_t antennaOffset	= 0;
 	std::string connectionUrl = "udp://127.0.0.1:14540";    // default to SITL
     if (argc == 2) {
-		std::string strArg = argv[1];
-		std::string simulatePulsePrefix = "--simulate-pulse:";
-        if (strArg.starts_with(simulatePulsePrefix)) {
-			std::string strArg = argv[1];
-			strArg.erase(strArg.find(simulatePulsePrefix), simulatePulsePrefix.length());
-
-            simulatePulse = true;
-			antennaOffset = std::stoi(strArg);
-
-			logInfo() << "Simulating pulses - antenna offset:" << antennaOffset;
-
-        } else {
-            connectionUrl = strArg;
-        }
+        connectionUrl = argv[1];
     }
     logInfo() << "Connecting to" << connectionUrl;
 
@@ -62,12 +46,7 @@ int main(int argc, char** argv)
 
 	globalMavlinkSystem		= mavlink;
 
-	PulseSimulator* pulseSimulator = nullptr;
-	if (simulatePulse) {
-		pulseSimulator = new PulseSimulator(pulseHandler, mavlink, telemetryCache, antennaOffset);
-	}
-
-    auto commandHandler 	= CommandHandler { mavlink, pulseSimulator };
+    auto commandHandler 	= CommandHandler { mavlink };
 
     udpPulseReceiver.start();
 
@@ -128,8 +107,6 @@ int main(int argc, char** argv)
 		// Do nothing -- message subscription callbacks are asynchronous and run in the connection receiver thread
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
-
-	delete pulseSimulator;
 
 	logInfo() << "Exiting...";
 
