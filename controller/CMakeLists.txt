@@ -22,7 +22,6 @@ add_executable(MavlinkTagController2
     SerialConnection.cpp SerialConnection.h
     UdpConnection.cpp UdpConnection.h
     Telemetry.cpp Telemetry.h
-    PulseSimulator.cpp PulseSimulator.h
     timeHelpers.cpp timeHelpers.h
     LogFileManager.cpp LogFileManager.h
     MavlinkFtpServer.cpp MavlinkFtpServer.h
