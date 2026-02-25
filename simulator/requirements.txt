@@ -1,0 +1,4 @@
+numpy>=2.0
+pyzmq>=25.0
+# scipy is required by detector/pulse_detector.py (not by the simulator itself)
+scipy>=1.12
