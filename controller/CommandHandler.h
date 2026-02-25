@@ -11,11 +11,10 @@
 class MavlinkSystem;
 class MonitoredProcess;
 class LogFileManager;
-class PulseSimulator;
 
 class CommandHandler {
 public:
-    CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimulator);
+    explicit CommandHandler(MavlinkSystem* mavlink);
 
 private:
     enum class AirSpyDeviceType {
@@ -44,7 +43,6 @@ private:
     std::string _tunnelCommandResultToString(uint32_t result);
 
     MavlinkSystem*                  _mavlink                = nullptr;
-    PulseSimulator*                 _pulseSimulator         = nullptr;
     TagDatabase                     _tagDatabase;
     bool                            _receivingTags          = false;
     char*                           _homePath               = nullptr;

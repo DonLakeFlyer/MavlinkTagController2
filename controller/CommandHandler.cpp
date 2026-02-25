@@ -21,13 +21,10 @@
 #include "channelizerTuner.h"
 #include "MavlinkSystem.h"
 #include "LogFileManager.h"
-#include "PulseSimulator.h"
-
 using namespace TunnelProtocol;
 
-CommandHandler::CommandHandler(MavlinkSystem* mavlink, PulseSimulator* pulseSimulator)
+CommandHandler::CommandHandler(MavlinkSystem* mavlink)
     : _mavlink          (mavlink)
-    , _pulseSimulator   (pulseSimulator)
     , _homePath         (getenv("HOME"))
 {
     if (strcmp(_homePath, "/home/pi") == 0) {
@@ -184,10 +181,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         logInfo() << "\tradio_center_frequency_hz:" << startDetection.radio_center_frequency_hz;
         const double centerFrequencyMhz = (double)startDetection.radio_center_frequency_hz / 1000000.0;
 
-        if (_pulseSimulator) {
-            _pulseSimulator->startSendingTagPulses(startDetection.radio_center_frequency_hz);
-        } else {
-            std::string sdrPathStatus;
+        std::string sdrPathStatus;
             if (deviceType == AirSpyDeviceType::HF) {
                 // HF Pipeline: airspyhf_zeromq_rx --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
                 airspyReceiverProcessName = "airspyhf_zeromq_rx";
@@ -292,7 +286,6 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                     _startDetector(logFileManager, tagInfo, true /* secondaryChannel */);
                 }
             }
-        }
 
         std::string startedStr = formatString("All processes started at center hz: %.3f", (double)startDetection.radio_center_frequency_hz / 1000000.0);
         _mavlink->sendStatusText(startedStr.c_str(), MAV_SEVERITY_INFO);
@@ -313,17 +306,13 @@ bool CommandHandler::_handleStopDetection(void)
     }
 
     std::thread([this]() {
-        if (_pulseSimulator) {
-            _pulseSimulator->stopSendingTagPulses();
-        } else {
-            for (MonitoredProcess* process: _processes) {
-                process->stop();
-            }
-            _processes.clear();
-
-            delete _airspyPipe;
-            _airspyPipe = NULL;
+        for (MonitoredProcess* process: _processes) {
+            process->stop();
         }
+        _processes.clear();
+
+        delete _airspyPipe;
+        _airspyPipe = NULL;
 
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
 
