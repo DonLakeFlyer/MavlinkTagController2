@@ -18,10 +18,67 @@ include(CTest)
 # ── CPM package manager ──────────────────────────────────────────────
 include(cmake/CPM.cmake)
 
-# ── Options to selectively build components ──────────────────────────
-option(BUILD_CONTROLLER     "Build the MAVLink tag controller"       ON)
-option(BUILD_DECIMATOR      "Build the ZeroMQ→UDP decimator"        ON)
-option(BUILD_AIRSPYHF_ZMQ   "Build the Airspy HF+ ZeroMQ receiver" ON)
+# ── Build dependency preflight (all components are always built) ─────
+set(Boost_USE_MULTITHREADED ON)
+find_package(Boost QUIET)
+if(NOT Boost_FOUND)
+    message(FATAL_ERROR
+        "Missing dependency: Boost\n"
+        "Install development package(s), e.g.:\n"
+        "  Ubuntu/Debian: sudo apt install libboost-all-dev\n"
+        "  macOS (Homebrew): brew install boost"
+    )
+endif()
+
+find_package(Threads QUIET)
+if(NOT Threads_FOUND)
+    message(FATAL_ERROR
+        "Missing dependency: POSIX threads (pthreads)\n"
+        "This is normally provided by libc; ensure a C toolchain is installed, e.g.:\n"
+        "  Ubuntu/Debian: sudo apt install build-essential"
+    )
+endif()
+
+find_package(PkgConfig QUIET)
+if(NOT PKG_CONFIG_FOUND)
+    message(FATAL_ERROR
+        "Missing dependency: pkg-config\n"
+        "Install it, e.g.:\n"
+        "  Ubuntu/Debian: sudo apt install pkg-config\n"
+        "  macOS (Homebrew): brew install pkg-config"
+    )
+endif()
+
+pkg_check_modules(TOPLEVEL_ZMQ QUIET libzmq)
+if(NOT TOPLEVEL_ZMQ_FOUND)
+    message(FATAL_ERROR
+        "Missing dependency: libzmq\n"
+        "Install development package(s), e.g.:\n"
+        "  Ubuntu/Debian: sudo apt install libzmq3-dev\n"
+        "  macOS (Homebrew): brew install zeromq"
+    )
+endif()
+
+pkg_check_modules(TOPLEVEL_LIBUSB QUIET libusb-1.0)
+if(NOT TOPLEVEL_LIBUSB_FOUND)
+    message(FATAL_ERROR
+        "Missing dependency: libusb-1.0\n"
+        "Install development package(s), e.g.:\n"
+        "  Ubuntu/Debian: sudo apt install libusb-1.0-0-dev\n"
+        "  macOS (Homebrew): brew install libusb"
+    )
+endif()
+
+set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/airspyhf_zeromq/cmake/modules ${CMAKE_MODULE_PATH})
+find_package(LIBAIRSPYHF QUIET)
+if(NOT LIBAIRSPYHF_FOUND)
+    message(FATAL_ERROR
+        "Missing dependency: libairspyhf\n"
+        "Install development package(s), e.g.:\n"
+        "  Ubuntu/Debian: sudo apt install libairspyhf-dev\n"
+        "  macOS (Homebrew): brew install airspyhf"
+    )
+endif()
 
 # ── MAVLink C headers (fetched via CPM) ──────────────────────────────
 CPMAddPackage(
@@ -51,14 +108,6 @@ if(BUILD_TESTING)
 endif()
 
 # ── Components ───────────────────────────────────────────────────────
-if(BUILD_CONTROLLER)
-    add_subdirectory(controller)
-endif()
-
-if(BUILD_DECIMATOR)
-    add_subdirectory(decimator)
-endif()
-
-if(BUILD_AIRSPYHF_ZMQ)
-    add_subdirectory(airspyhf_zeromq)
-endif()
+add_subdirectory(controller)
+add_subdirectory(decimator)
+add_subdirectory(airspyhf_zeromq)

@@ -34,18 +34,21 @@ add_executable(airspyhf_zeromq_rx airspyhf_rx.c)
 target_include_directories(airspyhf_zeromq_rx PRIVATE
     ${CMAKE_SOURCE_DIR}/shared
 )
+# Third-party C source — suppress warnings that conflict with top-level -Werror
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(airspyhf_zeromq_rx PRIVATE
+        -Wno-error
+        -Wno-unused-parameter
+        -Wno-sign-compare
+    )
+endif()
 install(TARGETS airspyhf_zeromq_rx RUNTIME DESTINATION ${INSTALL_DEFAULT_BINDIR})
 
 set_target_properties(airspyhf_zeromq_rx PROPERTIES
     INSTALL_RPATH_USE_LINK_PATH TRUE
 )
 
-if(NOT libairspyhf_SOURCE_DIR)
-include_directories(${LIBAIRSPYHF_INCLUDE_DIR})
 LIST(APPEND TOOLS_LINK_LIBS ${LIBAIRSPYHF_LIBRARIES})
-else()
-LIST(APPEND TOOLS_LINK_LIBS airspyhf)
-endif()
 
 if(MSVC)
 LIST(APPEND TOOLS_LINK_LIBS libgetopt_static)

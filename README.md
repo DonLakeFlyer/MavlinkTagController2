@@ -53,6 +53,29 @@ cmake/                         Build utilities
 setup/                         Raspberry Pi setup and boot scripts
 ```
 
+## Build prerequisites
+
+Top-level CMake now checks these at configure time:
+
+- Boost
+- Threads (pthreads)
+- pkg-config
+- libzmq
+- libusb-1.0
+- libairspyhf (system-installed)
+
+Install on Ubuntu/Debian:
+
+```bash
+sudo apt install build-essential cmake pkg-config libboost-all-dev libzmq3-dev libusb-1.0-0-dev libairspyhf-dev
+```
+
+Install on macOS (Homebrew):
+
+```bash
+brew install cmake pkg-config boost zeromq libusb airspyhf
+```
+
 ## Quick start
 
 ### Build controller + decimator (default)
@@ -66,7 +89,7 @@ make
 ```bash
 make controller
 make decimator
-make airspyhf_zeromq   # requires libairspyhf + libusb on the system
+make airspyhf_zeromq
 ```
 
 ### Run tests
@@ -79,9 +102,6 @@ make test
 
 ```bash
 cmake -S . -B build \
-    -DBUILD_CONTROLLER=ON \
-    -DBUILD_DECIMATOR=ON \
-    -DBUILD_AIRSPYHF_ZMQ=OFF \
     -DBUILD_TESTING=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
@@ -91,9 +111,6 @@ ctest --test-dir build --output-on-failure
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `BUILD_CONTROLLER` | `ON` | Build the MAVLink tag controller |
-| `BUILD_DECIMATOR` | `ON` | Build the ZeroMQ→UDP decimator |
-| `BUILD_AIRSPYHF_ZMQ` | `OFF` | Build the Airspy HF+ ZeroMQ receiver (needs system libairspyhf + libusb) |
 | `BUILD_TESTING` | `OFF` | Build and register tests |
 
 ## Component details
@@ -116,7 +133,7 @@ See [decimator usage details](#decimator-usage) below.
 
 Streams Airspy HF+ SDR IQ data over ZeroMQ PUB. Each message contains a fixed 40-byte header followed by interleaved float32 IQ payload.
 
-**Dependencies:** libairspyhf, libusb-1.0, libzmq
+**Dependencies:** system `libairspyhf`, libusb-1.0, libzmq
 
 ## Decimator usage
 
