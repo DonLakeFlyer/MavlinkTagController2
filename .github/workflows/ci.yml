@@ -9,18 +9,36 @@ permissions:
   contents: read
 
 jobs:
-  # ── Controller build ───────────────────────────────────────────────
-  controller:
+  # ── Full build + test ──────────────────────────────────────────────
+  build:
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            install_deps: sudo apt-get update && sudo apt-get install -y libboost-system-dev libboost-thread-dev
+            preset: debug
+            install_deps: >-
+              sudo apt-get update && sudo apt-get install -y
+              build-essential cmake pkg-config
+              libboost-system-dev libboost-thread-dev libboost-filesystem-dev
+              libzmq3-dev libusb-1.0-0-dev libairspyhf-dev
+          - os: ubuntu-24.04
+            preset: release
+            install_deps: >-
+              sudo apt-get update && sudo apt-get install -y
+              build-essential cmake pkg-config
+              libboost-system-dev libboost-thread-dev libboost-filesystem-dev
+              libzmq3-dev libusb-1.0-0-dev libairspyhf-dev
           - os: macos-latest
-            install_deps: brew install boost
+            preset: debug
+            install_deps: brew install cmake pkg-config boost zeromq libusb airspyhf
+          - os: macos-latest
+            preset: release
+            install_deps: brew install cmake pkg-config boost zeromq libusb airspyhf
 
+    name: build (${{ matrix.os }}, ${{ matrix.preset }})
     runs-on: ${{ matrix.os }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,133 +49,14 @@ jobs:
         run: ${{ matrix.install_deps }}
 
       - name: Configure
-        run: cmake --preset controller
-
-      - name: Build controller
-        run: cmake --build --preset controller
-
-  # ── Decimator build + test ─────────────────────────────────────────
-  decimator:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Ubuntu: gcc + clang, Debug + Release
-          - os: ubuntu-24.04
-            build_type: Debug
-            compiler: gcc
-            cxx: g++
-            install_deps: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
-          - os: ubuntu-24.04
-            build_type: Release
-            compiler: gcc
-            cxx: g++
-            install_deps: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
-          - os: ubuntu-24.04
-            build_type: Debug
-            compiler: clang
-            cxx: clang++
-            install_deps: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
-          - os: ubuntu-24.04
-            build_type: Release
-            compiler: clang
-            cxx: clang++
-            install_deps: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
-          # macOS: Apple Clang, Debug + Release
-          - os: macos-latest
-            build_type: Debug
-            compiler: clang
-            cxx: clang++
-            install_deps: brew install zeromq pkg-config
-          - os: macos-latest
-            build_type: Release
-            compiler: clang
-            cxx: clang++
-            install_deps: brew install zeromq pkg-config
-
-    name: decimator (${{ matrix.os }}, ${{ matrix.compiler }}, ${{ matrix.build_type }})
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: ${{ matrix.install_deps }}
-
-      - name: Configure
-        run: >
-          cmake --preset decimator
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
-
-      - name: Build decimator
-        run: cmake --build --preset decimator
-
-      - name: Test
-        run: ctest --preset decimator
-
-  # ── Airspy HF+ ZeroMQ build ───────────────────────────────────────
-  airspyhf-zeromq:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            name: Ubuntu
-            install_deps: |
-              set -euxo pipefail
-              sudo apt-get update
-              sudo apt-get install -y build-essential cmake libusb-1.0-0-dev libzmq3-dev pkg-config
-            ldconfig: sudo ldconfig
-          - os: macos-latest
-            name: macOS
-            install_deps: brew install libusb zeromq pkg-config
-            ldconfig: "true"
-
-    name: airspyhf-zeromq (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: ${{ matrix.install_deps }}
-
-      - name: Install system libairspyhf
-        run: |
-          cmake -S airspyhf_zeromq/libairspyhf -B build-lib -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-lib --parallel
-          sudo cmake --install build-lib
-          ${{ matrix.ldconfig }}
-
-      - name: Configure
-        run: cmake --preset airspyhf-zeromq
+        run: cmake --preset ${{ matrix.preset }}
 
       - name: Build
-        run: cmake --build --preset airspyhf-zeromq
-
-  # ── Wire-format header tests ───────────────────────────────────────
-  wireformat-tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure
-        run: cmake --preset wireformat-tests
-
-      - name: Build
-        run: cmake --build --preset wireformat-tests
+        run: cmake --build --preset ${{ matrix.preset }}
 
       - name: Test
-        run: ctest --preset wireformat-tests
+        if: matrix.preset == 'debug'
+        run: ctest --preset debug
 
   # ── Pulse detector validation ──────────────────────────────────────
   detector:

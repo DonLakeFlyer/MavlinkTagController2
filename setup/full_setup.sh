@@ -4,7 +4,7 @@ set -e
 # wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/full_setup.sh
 
 echo "*** Install tools"
-sudo apt install build-essential git cmake libboost-all-dev airspy libfftw3-dev libzmq3-dev libusb-1.0-0-dev pkg-config -y
+sudo apt install build-essential git cmake libboost-all-dev libairspyhf-dev libfftw3-dev libzmq3-dev libusb-1.0-0-dev pkg-config -y
 git config --global pull.rebase false
 
 echo "*** Create repos directory"
@@ -22,14 +22,8 @@ fi
 cd ~/repos/MavlinkTagController2
 git pull origin main
 
-echo "*** Build and install libairspyhf"
-cmake -S airspyhf_zeromq/libairspyhf -B build-lib -DCMAKE_BUILD_TYPE=Release
-cmake --build build-lib --parallel
-sudo cmake --install build-lib
-sudo ldconfig
-
 echo "*** Build all components"
-cmake -Bbuild -H. -DCMAKE_BUILD_TYPE=Debug -DBUILD_CONTROLLER=ON -DBUILD_DECIMATOR=ON -DBUILD_AIRSPYHF_ZMQ=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
 
 echo "*** Install airspyhf_zeromq"

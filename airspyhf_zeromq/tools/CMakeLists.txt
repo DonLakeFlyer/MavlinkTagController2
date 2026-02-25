@@ -39,12 +39,8 @@ else()
 add_definitions(-Wall)
 endif()
 
-if(NOT libairspyhf_SOURCE_DIR)
 find_package(LIBAIRSPYHF REQUIRED)
 include_directories(${LIBAIRSPYHF_INCLUDE_DIR})
-else()
-include_directories(${libairspyhf_SOURCE_DIR}/src)
-endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PC_ZMQ REQUIRED IMPORTED_TARGET libzmq)

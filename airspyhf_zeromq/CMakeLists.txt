@@ -7,7 +7,6 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules)
 
-message(STATUS "Using system libairspyhf")
 add_subdirectory(tools)
 
 if(BUILD_TESTING)
