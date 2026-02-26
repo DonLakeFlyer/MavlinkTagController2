@@ -343,31 +343,42 @@ def generate_packet(
     for i, tag in enumerate(cfg.tags):
         effective_snr_db = tag.snr_db
         if i == 0 and telem_state is not None:
+            pose_snapshot = None
             with telem_state.lock:
                 if telem_state.has_pose and telem_state.tx_initialized:
-                    distance_m = _haversine_distance_m(
+                    pose_snapshot = (
                         telem_state.vehicle_lat_deg,
                         telem_state.vehicle_lon_deg,
+                        telem_state.vehicle_yaw_deg,
                         telem_state.tx_lat_deg,
                         telem_state.tx_lon_deg,
                     )
-                    bearing_to_tx = _initial_bearing_deg(
-                        telem_state.vehicle_lat_deg,
-                        telem_state.vehicle_lon_deg,
-                        telem_state.tx_lat_deg,
-                        telem_state.tx_lon_deg,
-                    )
-                    off_boresight = _normalize_angle_deg(bearing_to_tx - telem_state.vehicle_yaw_deg)
-                    antenna_gain_db = _ra2ahs_relative_gain_db(
-                        off_boresight,
-                        cfg.ra2ahs_hpbw_deg,
-                        cfg.ra2ahs_front_to_back_db,
-                    )
-                    effective_snr_db = snr_at_distance(
-                        tag.snr_db,
-                        max(1.0, distance_m),
-                        ref_distance_m=max(1.0, cfg.tx_offset_north_m),
-                    ) + antenna_gain_db
+
+            if pose_snapshot is not None:
+                vehicle_lat_deg, vehicle_lon_deg, vehicle_yaw_deg, tx_lat_deg, tx_lon_deg = pose_snapshot
+                distance_m = _haversine_distance_m(
+                    vehicle_lat_deg,
+                    vehicle_lon_deg,
+                    tx_lat_deg,
+                    tx_lon_deg,
+                )
+                bearing_to_tx = _initial_bearing_deg(
+                    vehicle_lat_deg,
+                    vehicle_lon_deg,
+                    tx_lat_deg,
+                    tx_lon_deg,
+                )
+                off_boresight = _normalize_angle_deg(bearing_to_tx - vehicle_yaw_deg)
+                antenna_gain_db = _ra2ahs_relative_gain_db(
+                    off_boresight,
+                    cfg.ra2ahs_hpbw_deg,
+                    cfg.ra2ahs_front_to_back_db,
+                )
+                effective_snr_db = snr_at_distance(
+                    tag.snr_db,
+                    max(1.0, distance_m),
+                    ref_distance_m=max(1.0, cfg.tx_offset_north_m),
+                ) + antenna_gain_db
 
         # Amplitude from SNR: snr_linear = (amp^2) / (noise_sigma^2)
         snr_linear = 10.0 ** (effective_snr_db / 10.0)
