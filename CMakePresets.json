@@ -30,6 +30,21 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo"
             }
+        },
+        {
+            "name": "controller",
+            "displayName": "Controller (Debug)",
+            "inherits": "debug"
+        },
+        {
+            "name": "decimator",
+            "displayName": "Decimator (Debug)",
+            "inherits": "debug"
+        },
+        {
+            "name": "airspyhf-zeromq",
+            "displayName": "AirSpy HF ZeroMQ (Debug)",
+            "inherits": "debug"
         }
     ],
     "buildPresets": [
@@ -47,6 +62,24 @@
             "name": "relwithdebinfo",
             "configurePreset": "relwithdebinfo",
             "jobs": 0
+        },
+        {
+            "name": "controller",
+            "configurePreset": "controller",
+            "jobs": 0,
+            "targets": ["MavlinkTagController2"]
+        },
+        {
+            "name": "decimator",
+            "configurePreset": "decimator",
+            "jobs": 0,
+            "targets": ["airspyhf_decimator"]
+        },
+        {
+            "name": "airspyhf-zeromq",
+            "configurePreset": "airspyhf-zeromq",
+            "jobs": 0,
+            "targets": ["airspyhf_zeromq_rx"]
         }
     ],
     "testPresets": [

@@ -14,13 +14,14 @@ class LogFileManager;
 
 class CommandHandler {
 public:
-    explicit CommandHandler(MavlinkSystem* mavlink);
+    explicit CommandHandler(MavlinkSystem* mavlink, bool simulatorMode = false, const std::string& simulatorPreset = "strong");
 
 private:
     enum class AirSpyDeviceType {
         NONE,
         MINI,
-        HF
+        HF,
+        SIMULATOR
     };
 
 
@@ -42,6 +43,8 @@ private:
     std::string _tunnelCommandIdToString    (uint32_t command);
     std::string _tunnelCommandResultToString(uint32_t result);
 
+    std::string _simulatorCommand(uint32_t radioCenterFrequencyHz) const;
+
     MavlinkSystem*                  _mavlink                = nullptr;
     TagDatabase                     _tagDatabase;
     bool                            _receivingTags          = false;
@@ -50,6 +53,8 @@ private:
     bp::pipe*                       _airspyPipe             = nullptr;
     std::string                     _airspyPath;
     int                            _rawCaptureCount         = 0;
+    bool                            _simulatorMode          = false;
+    std::string                     _simulatorPreset;
 
     static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3840 Hz outgoing
 };
