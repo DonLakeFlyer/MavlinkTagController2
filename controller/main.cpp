@@ -6,6 +6,7 @@
 #include "MavlinkSystem.h"
 #include "MavlinkFtpServer.h"
 #include "PulseHandler.h"
+#include "SimulatorTelemetryPublisher.h"
 #include "formatString.h"
 
 #include <chrono>
@@ -33,6 +34,7 @@ int main(int argc, char** argv)
 	std::string connectionUrl = "udp://127.0.0.1:14540";    // default to SITL
     bool        simulatorMode = false;
     std::string simulatorPreset = "strong";
+	std::string simulatorTelemetryEndpoint = "tcp://127.0.0.1:6001";
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--simulator") == 0) {
@@ -41,6 +43,10 @@ int main(int argc, char** argv)
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 simulatorPreset = argv[++i];
             }
+		} else if (strcmp(argv[i], "--sim-telemetry-endpoint") == 0) {
+			if (i + 1 < argc) {
+				simulatorTelemetryEndpoint = argv[++i];
+			}
         } else {
             // Treat any other argument as the connection URL
             connectionUrl = argv[i];
@@ -49,11 +55,21 @@ int main(int argc, char** argv)
 
     if (simulatorMode) {
         logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << ")";
+		logInfo() << "Simulator telemetry endpoint:" << simulatorTelemetryEndpoint;
     }
     logInfo() << "Connecting to" << connectionUrl;
 
 	MavlinkSystem* mavlink = MavlinkSystem::instance();
 	mavlink->init(connectionUrl);
+
+	std::unique_ptr<SimulatorTelemetryPublisher> simulatorTelemetryPublisher;
+	if (simulatorMode) {
+		simulatorTelemetryPublisher = std::make_unique<SimulatorTelemetryPublisher>(mavlink, simulatorTelemetryEndpoint, 200);
+		if (!simulatorTelemetryPublisher->start()) {
+			logWarn() << "Failed to start simulator telemetry publisher; simulator will run without vehicle pose feed";
+			simulatorTelemetryPublisher.reset();
+		}
+	}
 
 
     auto ftpServer 			= MavlinkFtpServer { mavlink };

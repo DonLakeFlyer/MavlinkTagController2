@@ -24,10 +24,12 @@ Wire format: shared/tagtracker_wireformat/zmq_iq_packet.h
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import struct
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import List
@@ -91,6 +93,23 @@ class SimConfig:
     gap_seconds: float = 0.0          # Inject a gap of this duration every gap_interval
     gap_interval: float = 0.0         # Seconds between gap injections (0 = disabled)
     seed: int | None = None           # RNG seed for reproducibility
+    telemetry_sub_endpoint: str = "tcp://127.0.0.1:6001"  # ZMQ SUB endpoint for controller telemetry
+    telemetry_topic: str = "vehicle_pose"
+    tx_offset_north_m: float = 1000.0
+    ra2ahs_hpbw_deg: float = 100.0
+    ra2ahs_front_to_back_db: float = 12.0
+
+
+@dataclass
+class DirectionalTelemetryState:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    has_pose: bool = False
+    vehicle_lat_deg: float = 0.0
+    vehicle_lon_deg: float = 0.0
+    vehicle_yaw_deg: float = 0.0
+    tx_lat_deg: float = 0.0
+    tx_lon_deg: float = 0.0
+    tx_initialized: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +151,119 @@ PRESETS = {
         gap_interval=10.0,
     ),
 }
+
+
+def _normalize_angle_deg(angle: float) -> float:
+    return ((angle + 180.0) % 360.0) - 180.0
+
+
+def _offset_latlon_north_east(lat_deg: float, lon_deg: float, north_m: float, east_m: float) -> tuple[float, float]:
+    meters_per_deg_lat = 111320.0
+    lat_rad = math.radians(lat_deg)
+    meters_per_deg_lon = max(1e-6, 111320.0 * math.cos(lat_rad))
+    dlat = north_m / meters_per_deg_lat
+    dlon = east_m / meters_per_deg_lon
+    return lat_deg + dlat, lon_deg + dlon
+
+
+def _haversine_distance_m(lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2_deg: float) -> float:
+    r = 6371000.0
+    lat1 = math.radians(lat1_deg)
+    lon1 = math.radians(lon1_deg)
+    lat2 = math.radians(lat2_deg)
+    lon2 = math.radians(lon2_deg)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2.0) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2.0) ** 2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+    return r * c
+
+
+def _initial_bearing_deg(lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2_deg: float) -> float:
+    lat1 = math.radians(lat1_deg)
+    lon1 = math.radians(lon1_deg)
+    lat2 = math.radians(lat2_deg)
+    lon2 = math.radians(lon2_deg)
+    dlon = lon2 - lon1
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    bearing = math.degrees(math.atan2(x, y))
+    return (bearing + 360.0) % 360.0
+
+
+def _ra2ahs_relative_gain_db(off_boresight_deg: float, hpbw_deg: float, front_to_back_db: float) -> float:
+    off = min(180.0, abs(_normalize_angle_deg(off_boresight_deg)))
+    half_power_angle = max(1.0, hpbw_deg / 2.0)
+    cos_at_half = max(1e-6, math.cos(math.radians(half_power_angle)))
+    exponent = math.log(0.5) / math.log(cos_at_half)
+    front_lobe = max(0.0, math.cos(math.radians(off))) ** exponent
+    back_floor = 10.0 ** (-abs(front_to_back_db) / 10.0)
+    gain_linear = back_floor + (1.0 - back_floor) * front_lobe
+    return 10.0 * math.log10(max(1e-9, gain_linear))
+
+
+def _start_telemetry_subscriber(cfg: SimConfig, telem_state: DirectionalTelemetryState) -> tuple[threading.Event, threading.Thread] | tuple[None, None]:
+    if not cfg.telemetry_sub_endpoint:
+        return None, None
+
+    stop_event = threading.Event()
+
+    def _run() -> None:
+        ctx = zmq.Context.instance()
+        sub = ctx.socket(zmq.SUB)
+        sub.setsockopt(zmq.RCVHWM, 16)
+        sub.connect(cfg.telemetry_sub_endpoint)
+        sub.setsockopt_string(zmq.SUBSCRIBE, cfg.telemetry_topic)
+
+        print(
+            f"iq_simulator: subscribed to telemetry at {cfg.telemetry_sub_endpoint} topic={cfg.telemetry_topic}",
+            file=sys.stderr,
+        )
+
+        try:
+            while not stop_event.is_set():
+                try:
+                    msg = sub.recv_string(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    time.sleep(0.02)
+                    continue
+
+                if not msg.startswith(cfg.telemetry_topic):
+                    continue
+                payload = msg[len(cfg.telemetry_topic):].strip()
+                if not payload:
+                    continue
+
+                try:
+                    obj = json.loads(payload)
+                    lat = float(obj["lat_deg"])
+                    lon = float(obj["lon_deg"])
+                    yaw = float(obj["yaw_deg"])
+                except Exception:
+                    continue
+
+                with telem_state.lock:
+                    telem_state.vehicle_lat_deg = lat
+                    telem_state.vehicle_lon_deg = lon
+                    telem_state.vehicle_yaw_deg = yaw
+                    telem_state.has_pose = True
+
+                    if not telem_state.tx_initialized:
+                        tx_lat, tx_lon = _offset_latlon_north_east(lat, lon, cfg.tx_offset_north_m, 0.0)
+                        telem_state.tx_lat_deg = tx_lat
+                        telem_state.tx_lon_deg = tx_lon
+                        telem_state.tx_initialized = True
+                        print(
+                            "iq_simulator: initialized transmitter location "
+                            f"{cfg.tx_offset_north_m:.0f}m north of first vehicle pose",
+                            file=sys.stderr,
+                        )
+        finally:
+            sub.close(linger=0)
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    return stop_event, th
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +319,7 @@ def generate_packet(
     cfg: SimConfig,
     sample_offset: int,
     rng: np.random.Generator,
+    telem_state: DirectionalTelemetryState | None,
 ) -> np.ndarray:
     """
     Generate one packet of complex IQ samples.
@@ -207,9 +340,37 @@ def generate_packet(
 
     # Accumulate tag signals
     signal = np.zeros(n, dtype=np.complex128)
-    for tag in cfg.tags:
+    for i, tag in enumerate(cfg.tags):
+        effective_snr_db = tag.snr_db
+        if i == 0 and telem_state is not None:
+            with telem_state.lock:
+                if telem_state.has_pose and telem_state.tx_initialized:
+                    distance_m = _haversine_distance_m(
+                        telem_state.vehicle_lat_deg,
+                        telem_state.vehicle_lon_deg,
+                        telem_state.tx_lat_deg,
+                        telem_state.tx_lon_deg,
+                    )
+                    bearing_to_tx = _initial_bearing_deg(
+                        telem_state.vehicle_lat_deg,
+                        telem_state.vehicle_lon_deg,
+                        telem_state.tx_lat_deg,
+                        telem_state.tx_lon_deg,
+                    )
+                    off_boresight = _normalize_angle_deg(bearing_to_tx - telem_state.vehicle_yaw_deg)
+                    antenna_gain_db = _ra2ahs_relative_gain_db(
+                        off_boresight,
+                        cfg.ra2ahs_hpbw_deg,
+                        cfg.ra2ahs_front_to_back_db,
+                    )
+                    effective_snr_db = snr_at_distance(
+                        tag.snr_db,
+                        max(1.0, distance_m),
+                        ref_distance_m=max(1.0, cfg.tx_offset_north_m),
+                    ) + antenna_gain_db
+
         # Amplitude from SNR: snr_linear = (amp^2) / (noise_sigma^2)
-        snr_linear = 10.0 ** (tag.snr_db / 10.0)
+        snr_linear = 10.0 ** (effective_snr_db / 10.0)
         amp = noise_sigma * math.sqrt(snr_linear)
 
         # Pulsed CW: tone at freq_offset_hz, keyed on/off
@@ -243,6 +404,8 @@ def run(cfg: SimConfig) -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
 
     rng = np.random.default_rng(cfg.seed)
+    telemetry_state = DirectionalTelemetryState() if cfg.telemetry_sub_endpoint else None
+    telem_stop_event, telem_thread = _start_telemetry_subscriber(cfg, telemetry_state) if telemetry_state is not None else (None, None)
 
     endpoint = f"tcp://{cfg.zmq_host}:{cfg.zmq_port}"
     ctx = zmq.Context()
@@ -311,7 +474,7 @@ def run(cfg: SimConfig) -> None:
                 continue
 
             # Generate IQ samples
-            samples = generate_packet(cfg, sample_offset, rng)
+            samples = generate_packet(cfg, sample_offset, rng, telemetry_state)
 
             # Encode wire-format packet
             payload = samples.view(np.float32).tobytes()
@@ -347,6 +510,11 @@ def run(cfg: SimConfig) -> None:
                 _sleep_until(start_wall, sample_offset / cfg.sample_rate)
 
     finally:
+        if telem_stop_event is not None:
+            telem_stop_event.set()
+        if telem_thread is not None:
+            telem_thread.join(timeout=1.0)
+
         elapsed = time.monotonic() - start_wall
         print(f"\niq_simulator: stopped after {elapsed:.1f}s wall time, "
               f"{sample_offset / cfg.sample_rate:.1f}s sim time, "
@@ -448,6 +616,16 @@ Examples:
                     help="Inject a gap every N seconds (0 = disabled)")
     p.add_argument("--seed", type=int, default=None,
                     help="RNG seed for reproducible runs")
+    p.add_argument("--telemetry-sub-endpoint", type=str, default="tcp://127.0.0.1:6001",
+                    help="ZMQ SUB endpoint for vehicle telemetry, e.g. tcp://127.0.0.1:6001")
+    p.add_argument("--telemetry-topic", type=str, default="vehicle_pose",
+                    help="Telemetry topic prefix (default: vehicle_pose)")
+    p.add_argument("--tx-offset-north-m", type=float, default=1000.0,
+                    help="Fixed transmitter offset north of first vehicle pose (default: 1000m)")
+    p.add_argument("--ra2ahs-hpbw-deg", type=float, default=100.0,
+                    help="RA-2AHS horizontal half-power beamwidth in degrees (default: 100)")
+    p.add_argument("--ra2ahs-front-to-back-db", type=float, default=12.0,
+                    help="RA-2AHS front-to-back ratio in dB (default: 12)")
 
     args = p.parse_args()
 
@@ -494,6 +672,11 @@ Examples:
         cfg.gap_interval = args.gap_interval
     if args.seed is not None:
         cfg.seed = args.seed
+    cfg.telemetry_sub_endpoint = args.telemetry_sub_endpoint
+    cfg.telemetry_topic = args.telemetry_topic
+    cfg.tx_offset_north_m = args.tx_offset_north_m
+    cfg.ra2ahs_hpbw_deg = args.ra2ahs_hpbw_deg
+    cfg.ra2ahs_front_to_back_db = args.ra2ahs_front_to_back_db
 
     # Build tags from CLI if --freq-offset-hz was given
     if args.freq_offset_hz is not None:
@@ -536,4 +719,10 @@ def _pad_list(lst: list | None, n: int, default: float) -> list:
 
 if __name__ == "__main__":
     cfg = parse_args()
+    if cfg.telemetry_sub_endpoint:
+        print(
+            "iq_simulator: directional antenna mode enabled "
+            f"(endpoint={cfg.telemetry_sub_endpoint}, tx_offset_north={cfg.tx_offset_north_m:.0f}m)",
+            file=sys.stderr,
+        )
     run(cfg)
