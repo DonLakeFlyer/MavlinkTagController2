@@ -4,6 +4,8 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread")
 
 set(Boost_USE_MULTITHREADED ON)
 find_package(Boost REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CONTROLLER_ZMQ REQUIRED IMPORTED_TARGET libzmq)
 
 add_executable(MavlinkTagController2
     main.cpp
@@ -26,6 +28,7 @@ add_executable(MavlinkTagController2
     LogFileManager.cpp LogFileManager.h
     MavlinkFtpServer.cpp MavlinkFtpServer.h
     PulseHandler.cpp PulseHandler.h
+    SimulatorTelemetryPublisher.cpp SimulatorTelemetryPublisher.h
 )
 
 target_include_directories(MavlinkTagController2
@@ -39,4 +42,5 @@ target_link_libraries(MavlinkTagController2
     PRIVATE
     ${Boost_LIBRARIES}
     mavlink
+    PkgConfig::CONTROLLER_ZMQ
 )
