@@ -115,6 +115,37 @@ source .venv/bin/activate
 python simulator/iq_simulator.py --preset strong -P 5555
 ```
 
+## Controller-integrated mode
+
+The controller binary supports a `--simulator` flag that replaces the SDR
+hardware with `iq_simulator.py` inside the managed pipeline. No separate
+script is needed — the controller spawns the simulator, decimator, and
+detectors automatically when detection is started via the MAVLink tunnel.
+
+```bash
+# Build the controller
+make controller
+
+# Start with default preset ("strong")
+./build/controller/MavlinkTagController2 --simulator
+
+# Start with a specific preset
+./build/controller/MavlinkTagController2 --simulator weak
+
+# Combine with a connection URL
+./build/controller/MavlinkTagController2 --simulator two-tags serial:///dev/ttyACM0:115200
+```
+
+In this mode:
+- SDR hardware detection is bypassed
+- `iq_simulator.py` publishes IQ on ZMQ PUB port 5555
+- The decimator uses `--shift-khz 0` (no DC-spur offset)
+- `uavrt_detection` processes run unchanged
+- Tag parameters from the MAVLink tag database are mapped to simulator
+  `--freq-offset-hz`, `--tp`, and `--tip` arguments
+- If no tags are configured when detection starts, the selected preset is used
+- The Python venv at `$REPO/.venv` is preferred; falls back to system `python3`
+
 ## Signal model
 
 - **Noise**: Complex Gaussian white noise at configurable power level

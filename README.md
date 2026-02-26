@@ -47,6 +47,13 @@ airspyhf_zeromq/               Airspy HF+ ZeroMQ publisher (was airspyhf-zeromq)
 libs/                          Third-party dependencies
   uavrt_interfaces/            TunnelProtocol.h (git submodule)
 
+simulator/                     IQ signal simulator (drop-in SDR replacement)
+  iq_simulator.py              Synthetic IQ generator (ZMQ PUB, wire-format compatible)
+  run_sim_pipeline.sh          Standalone sim → decimator → detector pipeline
+  pulse_detector.py            Standalone pulse detector for simulation use
+
+detector/                      Python pulse detector (standalone / simulation)
+
 cmake/                         Build utilities
   CPM.cmake                    CPM.cmake package manager (downloads mavlink at configure time)
 
@@ -107,6 +114,19 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
+### CMake presets
+
+| Preset | Description |
+| --- | --- |
+| `debug` | Full build with tests enabled |
+| `release` | Optimised release build |
+| `relwithdebinfo` | Release with debug info |
+| `controller` | Build only `MavlinkTagController2` |
+| `decimator` | Build only `airspyhf_decimator` |
+| `airspyhf-zeromq` | Build only `airspyhf_zeromq_rx` |
+
+Per-component presets inherit from `debug` and filter to a single target.
+
 ### CMake options
 
 | Option | Default | Description |
@@ -118,6 +138,34 @@ ctest --test-dir build --output-on-failure
 ### Controller (MavlinkTagController2)
 
 The MAVLink controller receives tag definitions over a MAVLink tunnel, writes per-tag detector configurations, spawns `uavrt_detection` processes, and relays pulse detections back over MAVLink.
+
+**Usage:**
+
+```bash
+# Default SITL connection
+./build/controller/MavlinkTagController2
+
+# Custom connection
+./build/controller/MavlinkTagController2 serial:///dev/ttyACM0:115200
+
+# Simulator mode (replaces SDR hardware with iq_simulator.py)
+./build/controller/MavlinkTagController2 --simulator
+
+# Simulator mode with a specific preset
+./build/controller/MavlinkTagController2 --simulator weak
+
+# Simulator mode with a custom connection URL
+./build/controller/MavlinkTagController2 --simulator two-tags serial:///dev/ttyACM0:115200
+```
+
+| CLI argument | Description |
+| --- | --- |
+| `[connection_url]` | MAVLink connection URL (default: `udp://127.0.0.1:14540`) |
+| `--simulator [preset]` | Enable simulator mode; optional preset (default: `strong`) |
+
+Available simulator presets: `strong`, `weak`, `noise-only`, `two-tags`, `distant`, `dropout`, `gap`. See [simulator/README.md](simulator/README.md) for details.
+
+In simulator mode the controller bypasses SDR hardware detection, spawns `iq_simulator.py` as the IQ source (ZMQ PUB on port 5555), and runs the decimator with `--shift-khz 0` (no DC-spur offset needed). Tag parameters from the MAVLink tag database are mapped to simulator `--freq-offset-hz`, `--tp`, and `--tip` arguments. If no tags are configured, the selected preset is used.
 
 **Dependencies:** libboost (system, filesystem)
 
@@ -212,8 +260,14 @@ ps -aux | grep Mav
 1. Follow [PX4 getting started](https://docs.px4.io/main/en/dev_setup/getting_started.html) for SITL.
 2. Start the controller:
    ```bash
-   ./build/MavlinkTagController2
+   ./build/controller/MavlinkTagController2
    ```
+3. To test without SDR hardware, use simulator mode:
+   ```bash
+   ./build/controller/MavlinkTagController2 --simulator
+   ```
+   This spawns the IQ simulator, decimator, and detectors automatically when
+   detection is started via the MAVLink tunnel. See [simulator/README.md](simulator/README.md).
 
 ## Migration from multi-repo
 

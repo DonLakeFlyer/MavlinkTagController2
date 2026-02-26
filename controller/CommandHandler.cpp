@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include <mavlink.h>
 
@@ -24,9 +25,11 @@
 
 using namespace TunnelProtocol;
 
-CommandHandler::CommandHandler(MavlinkSystem* mavlink)
+CommandHandler::CommandHandler(MavlinkSystem* mavlink, bool simulatorMode, const std::string& simulatorPreset)
     : _mavlink          (mavlink)
     , _homePath         (getenv("HOME"))
+    , _simulatorMode    (simulatorMode)
+    , _simulatorPreset  (simulatorPreset)
 {
     if (strcmp(_homePath, "/home/pi") == 0) {
         // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
@@ -153,7 +156,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
     }
 
     std::string airspyError;
-    auto deviceType = _connectedAirSpyType(&airspyError);
+    auto deviceType = _simulatorMode ? AirSpyDeviceType::SIMULATOR : _connectedAirSpyType(&airspyError);
     if (deviceType == AirSpyDeviceType::NONE) {
         logError() << "COMMAND_ID_START_DETECTION - ERROR: AirSpy detection failed: " << airspyError;
         return std::string("AirSpy detection failed: ") + airspyError;
@@ -161,7 +164,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
 
     auto logFileManager = LogFileManager::instance();
     logFileManager->detectorsStarted();
-    bool isHFMode = (deviceType == AirSpyDeviceType::HF);
+    bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
     if (!_tagDatabase.writeDetectorConfigs(isHFMode)) {
         logError() << "CommandHandler::_handleEndTags: writeDetectorConfigs failed";
         _mavlink->sendStatusText("Write Detector Configs failed", MAV_SEVERITY_ALERT);
@@ -183,7 +186,44 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         const double centerFrequencyMhz = (double)startDetection.radio_center_frequency_hz / 1000000.0;
 
         std::string sdrPathStatus;
-        if (deviceType == AirSpyDeviceType::HF) {
+        if (deviceType == AirSpyDeviceType::SIMULATOR) {
+                // Simulator Pipeline: iq_simulator.py --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
+                // The simulator generates IQ at 768 kHz on ZMQ PUB, identical to airspyhf_zeromq_rx.
+                // Tags are generated at DC (freq_offset_hz=0), so the decimator uses --shift-khz 0.
+                sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
+
+                commandStr = _simulatorCommand(startDetection.radio_center_frequency_hz);
+                logInfo() << "COMMAND_ID_START_DETECTION - using IQ Simulator stream source";
+                logInfo() << "  command:" << commandStr;
+
+                _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
+
+                logPath = logFileManager->filename(LogFileManager::DETECTORS, "iq_simulator", "log");
+                MonitoredProcess* simProc = new MonitoredProcess(
+                                                        _mavlink,
+                                                        "iq_simulator",
+                                                        commandStr.c_str(),
+                                                        logPath.c_str(),
+                                                        MonitoredProcess::NoPipe,
+                                                        NULL);
+                simProc->start();
+                _processes.push_back(simProc);
+
+                // Start airspyhf_decimator (subscribes to ZMQ, decimates by 200 to get 3840 Hz)
+                // --shift-khz 0 because the simulator generates tags at DC (no hardware DC spur to avoid)
+                commandStr = formatString("%s/repos/MavlinkTagController2/build/decimator/airspyhf_decimator --input-rate 768000 --shift-khz 0 --ports 10000,10001",
+                                    _homePath);
+                logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
+                MonitoredProcess* decimatorProc = new MonitoredProcess(
+                                                        _mavlink,
+                                                        "airspyhf_decimator",
+                                                        commandStr.c_str(),
+                                                        logPath.c_str(),
+                                                        MonitoredProcess::NoPipe,
+                                                        NULL);
+                decimatorProc->start();
+                _processes.push_back(decimatorProc);
+            } else if (deviceType == AirSpyDeviceType::HF) {
                 // HF Pipeline: airspyhf_zeromq_rx --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
                 airspyReceiverProcessName = "airspyhf_zeromq_rx";
                 sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
@@ -339,10 +379,15 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
     }
 
     std::string airspyError;
-    auto deviceType = _connectedAirSpyType(&airspyError);
+    auto deviceType = _simulatorMode ? AirSpyDeviceType::SIMULATOR : _connectedAirSpyType(&airspyError);
     if (deviceType == AirSpyDeviceType::NONE) {
         logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: AirSpy device detection failed: " << airspyError;
         return airspyError;
+    }
+
+    if (deviceType == AirSpyDeviceType::SIMULATOR) {
+        logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: Raw capture is not supported in simulator mode";
+        return "Raw capture not supported in simulator mode";
     }
 
     if (_tagDatabase.size() == 0) {
@@ -538,6 +583,10 @@ std::string CommandHandler::_checkForAirSpy(void)
 
 std::string CommandHandler::_sdrPathStatusText(AirSpyDeviceType deviceType, double frequencyMhz) const
 {
+    if (deviceType == AirSpyDeviceType::SIMULATOR) {
+        return formatString("SDR path selected: IQ Simulator @ %.3f MHz", frequencyMhz);
+    }
+
     if (deviceType == AirSpyDeviceType::HF) {
         return formatString("SDR path selected: AirSpy HF @ %.3f MHz", frequencyMhz);
     }
@@ -547,6 +596,55 @@ std::string CommandHandler::_sdrPathStatusText(AirSpyDeviceType deviceType, doub
     }
 
     return formatString("SDR path selected: Unknown AirSpy @ %.3f MHz", frequencyMhz);
+}
+
+std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz) const
+{
+    // Build the iq_simulator.py command line.
+    // The simulator is a drop-in replacement for airspyhf_zeromq_rx, publishing
+    // IQ data at 768 kHz over ZMQ PUB on port 5555.
+    //
+    // We derive per-tag simulator parameters from the TagDatabase entries:
+    //   --freq-offset-hz : tag frequency relative to radio center
+    //   --tp             : pulse width (pulse_width_msecs / 1000)
+    //   --tip            : inter-pulse interval (intra_pulse1_msecs / 1000)
+    //   --snr            : default 20 dB (not available in TagInfo_t)
+    //
+    // The venv Python is preferred so numpy/pyzmq are available.
+
+    std::string repoDir = formatString("%s/repos/MavlinkTagController2", _homePath);
+    std::string venvPython = formatString("%s/.venv/bin/python3", repoDir.c_str());
+    std::string simScript  = formatString("%s/simulator/iq_simulator.py", repoDir.c_str());
+
+    // Check if venv python exists; fall back to system python3
+    std::string pythonCmd = venvPython;
+    if (access(venvPython.c_str(), X_OK) != 0) {
+        logInfo() << "_simulatorCommand: venv python not found, using system python3";
+        pythonCmd = "python3";
+    }
+
+    // If no tags configured, use the preset
+    if (_tagDatabase.size() == 0) {
+        return formatString("%s -u %s --preset %s -P 5555",
+                            pythonCmd.c_str(),
+                            simScript.c_str(),
+                            _simulatorPreset.c_str());
+    }
+
+    // Build per-tag arguments
+    std::string tagArgs;
+    for (const auto& tagInfo : _tagDatabase) {
+        int32_t freqOffsetHz = static_cast<int32_t>(tagInfo.frequency_hz) - static_cast<int32_t>(radioCenterFrequencyHz);
+        double tp  = tagInfo.pulse_width_msecs / 1000.0;
+        double tip = tagInfo.intra_pulse1_msecs / 1000.0;
+        tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
+                                freqOffsetHz, tp, tip);
+    }
+
+    return formatString("%s -u %s -P 5555%s",
+                        pythonCmd.c_str(),
+                        simScript.c_str(),
+                        tagArgs.c_str());
 }
 
 CommandHandler::AirSpyDeviceType CommandHandler::_connectedAirSpyType(std::string* errorMessage)

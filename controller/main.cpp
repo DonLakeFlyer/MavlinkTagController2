@@ -14,6 +14,7 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <cstring>
 #include <ifaddrs.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -30,8 +31,24 @@ int main(int argc, char** argv)
     static_assert(TunnelProtocolValidateSizes, "TunnelProtocolValidateSizes failed");
 
 	std::string connectionUrl = "udp://127.0.0.1:14540";    // default to SITL
-    if (argc == 2) {
-        connectionUrl = argv[1];
+    bool        simulatorMode = false;
+    std::string simulatorPreset = "strong";
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--simulator") == 0) {
+            simulatorMode = true;
+            // Optional preset argument following --simulator
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                simulatorPreset = argv[++i];
+            }
+        } else {
+            // Treat any other argument as the connection URL
+            connectionUrl = argv[i];
+        }
+    }
+
+    if (simulatorMode) {
+        logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << ")";
     }
     logInfo() << "Connecting to" << connectionUrl;
 
@@ -46,7 +63,7 @@ int main(int argc, char** argv)
 
 	globalMavlinkSystem		= mavlink;
 
-    auto commandHandler 	= CommandHandler { mavlink };
+    auto commandHandler 	= CommandHandler { mavlink, simulatorMode, simulatorPreset };
 
     udpPulseReceiver.start();
 
