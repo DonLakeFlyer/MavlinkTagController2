@@ -95,7 +95,7 @@ class SimConfig:
     seed: int | None = None           # RNG seed for reproducibility
     telemetry_sub_endpoint: str = "tcp://127.0.0.1:6001"  # ZMQ SUB endpoint for controller telemetry
     telemetry_topic: str = "vehicle_pose"
-    tx_offset_north_m: float = 1000.0
+    tx_offset_north_m: float = 4000.0
     ra2ahs_hpbw_deg: float = 100.0
     ra2ahs_front_to_back_db: float = 12.0
 
@@ -631,8 +631,8 @@ Examples:
                     help="ZMQ SUB endpoint for vehicle telemetry, e.g. tcp://127.0.0.1:6001")
     p.add_argument("--telemetry-topic", type=str, default="vehicle_pose",
                     help="Telemetry topic prefix (default: vehicle_pose)")
-    p.add_argument("--tx-offset-north-m", type=float, default=1000.0,
-                    help="Fixed transmitter offset north of first vehicle pose (default: 1000m)")
+    p.add_argument("--tx-offset-north-m", type=float, default=4000.0,
+                    help="Fixed transmitter offset north of first vehicle pose (default: 4000m)")
     p.add_argument("--ra2ahs-hpbw-deg", type=float, default=100.0,
                     help="RA-2AHS horizontal half-power beamwidth in degrees (default: 100)")
     p.add_argument("--ra2ahs-front-to-back-db", type=float, default=12.0,
