@@ -67,6 +67,6 @@ The top-level CMakeLists.txt supports selective builds:
 ## Dependencies
 
 - **MAVLink C headers** — fetched via CPM at configure time from `mavlink/c_library_v2`. Pinned to a specific commit in the top-level `CMakeLists.txt`. To update: change the `GIT_TAG` in the `CPMAddPackage(NAME mavlink ...)` call.
-- `libs/uavrt_interfaces/` — TunnelProtocol.h. Git submodule from `dynamic-and-active-systems-lab/uavrt_interfaces`.
+- `tunnel-protocol/` — TunnelProtocol.h. Git submodule from `DonLakeFlyer/TagTrackerTunnelProtocol`.
 
-`uavrt_interfaces` is a git submodule — clone with `--recurse-submodules`. CPM caches downloads in `~/.cache/CPM` by default.
+`tunnel-protocol` is a git submodule — clone with `--recurse-submodules`. CPM caches downloads in `~/.cache/CPM` by default.

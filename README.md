@@ -44,8 +44,7 @@ airspyhf_zeromq/               Airspy HF+ ZeroMQ publisher (was airspyhf-zeromq)
   tools/                       airspyhf_zeromq_rx source
   tests/                       Integration tests (require hardware)
 
-libs/                          Third-party dependencies
-  uavrt_interfaces/            TunnelProtocol.h (git submodule)
+tunnel-protocol/               TunnelProtocol.h (git submodule)
 
 simulator/                     IQ signal simulator (drop-in SDR replacement)
   iq_simulator.py              Synthetic IQ generator (ZMQ PUB, wire-format compatible)
@@ -280,6 +279,6 @@ This repo consolidates what were previously three separate repositories:
 | ZeroMQ publisher | `airspyhf-zeromq` | `airspyhf_zeromq/` |
 | Wire format | `TagTrackerWireFormat` (submodule) | `shared/tagtracker_wireformat/` |
 | MAVLink headers | `c_library_v2` (submodule) | CPM package (auto-downloaded at configure time) |
-| uavrt_interfaces | `uavrt_interfaces` (submodule) | `libs/uavrt_interfaces/` (git submodule) |
+| Tunnel protocol | `TagTrackerTunnelProtocol` (submodule) | `tunnel-protocol/` (git submodule) |
 
-MAVLink headers are fetched automatically via CPM — no manual download needed. `uavrt_interfaces` remains a git submodule; clone with `--recurse-submodules` or run `git submodule update --init --recursive` after cloning.
+MAVLink headers are fetched automatically via CPM — no manual download needed. `TagTrackerTunnelProtocol` remains a git submodule at `tunnel-protocol`; clone with `--recurse-submodules` or run `git submodule update --init --recursive` after cloning.
