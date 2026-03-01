@@ -33,7 +33,7 @@ add_executable(MavlinkTagController2
 
 target_include_directories(MavlinkTagController2
     PRIVATE
-    ${CMAKE_SOURCE_DIR}/libs/uavrt_interfaces/include/uavrt_interfaces
+    ${CMAKE_SOURCE_DIR}/tunnel-protocol
     SYSTEM
     ${Boost_INCLUDE_DIRS}
 )
