@@ -36,6 +36,7 @@ private:
     bool _handleCleanLogs       (void);
     void _handleTunnelMessage   (const mavlink_message_t& message);
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
+    void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode);
     AirSpyDeviceType _connectedAirSpyType(std::string* errorMessage = nullptr);
     std::string _sdrPathStatusText(AirSpyDeviceType deviceType, double frequencyMhz) const;
     std::string _checkForAirSpy  (void);

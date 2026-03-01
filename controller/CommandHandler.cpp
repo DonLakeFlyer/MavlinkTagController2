@@ -143,6 +143,46 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
     _processes.push_back(detectorProc);
 }
 
+void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode)
+{
+    int     secondaryChannelIncrement   = secondaryChannel ? 1 : 0;
+    int     tagId                       = tagInfo.id + secondaryChannelIncrement;
+    int     portData                    = isHFMode ? (10000 + secondaryChannelIncrement) : (20000 + ((tagInfo.channelizer_channel_number - 1) * 2) + secondaryChannelIncrement);
+    int     sampleRate                  = isHFMode ? 3840 : 3750;
+    double  tip                         = (secondaryChannel ? tagInfo.intra_pulse2_msecs : tagInfo.intra_pulse1_msecs) / 1000.0;
+    double  tp                          = tagInfo.pulse_width_msecs / 1000.0;
+    double  centerFreqMhz              = double(tagInfo.channelizer_channel_center_frequency_hz) / 1000000.0;
+
+    std::string repoDir     = formatString("%s/repos/MavlinkTagController2", _homePath);
+    std::string venvPython  = formatString("%s/.venv/bin/python3", repoDir.c_str());
+    std::string pythonCmd   = (access(venvPython.c_str(), X_OK) == 0) ? venvPython : std::string("python3");
+
+    std::string commandStr  = formatString("%s -u %s/detector/pulse_detector.py"
+                                           " --tp %f --tip %f --fs %d --port %d"
+                                           " --tag-id %d --freq %u --pulse-port 50000"
+                                           " --center-freq %f",
+                                pythonCmd.c_str(),
+                                repoDir.c_str(),
+                                tp, tip, sampleRate, portData,
+                                tagId, tagInfo.frequency_hz,
+                                centerFreqMhz);
+
+    std::string root    = formatString("py_detector_%d", tagId);
+    std::string logPath = logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "log");
+
+    logInfo() << "Starting Python pulse detector:" << commandStr;
+
+    MonitoredProcess* detectorProc = new MonitoredProcess(
+                                                _mavlink,
+                                                "pulse_detector",
+                                                commandStr.c_str(),
+                                                logPath.c_str(),
+                                                MonitoredProcess::NoPipe,
+                                                NULL);
+    detectorProc->start();
+    _processes.push_back(detectorProc);
+}
+
 std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
 {
    if (tunnel.payload_length != sizeof(StartDetectionInfo_t)) {
@@ -321,10 +361,19 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 _processes.push_back(channelizeProc);
             }
 
+        bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
+
         for (const TunnelProtocol::TagInfo_t& tagInfo: _tagDatabase) {
-            _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
-            if (tagInfo.intra_pulse2_msecs != 0) {
-                _startDetector(logFileManager, tagInfo, true /* secondaryChannel */);
+            if (startDetection.detection_mode == DETECTION_MODE_PYTHON) {
+                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode);
+                if (tagInfo.intra_pulse2_msecs != 0) {
+                    _startPythonDetector(logFileManager, tagInfo, true /* secondaryChannel */, isHFMode);
+                }
+            } else {
+                _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
+                if (tagInfo.intra_pulse2_msecs != 0) {
+                    _startDetector(logFileManager, tagInfo, true /* secondaryChannel */);
+                }
             }
         }
 

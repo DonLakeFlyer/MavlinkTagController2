@@ -48,6 +48,60 @@ def _signal_handler(signum, frame):
 
 
 # ---------------------------------------------------------------------------
+# Pulse reporting (UDP → controller)
+# ---------------------------------------------------------------------------
+
+def send_pulse_udp(pulse_sock, dest_addr, tag_id, frequency_hz,
+                   start_time_seconds, predict_next_start_seconds,
+                   snr, stft_score, group_seq_counter, group_ind,
+                   group_snr, detection_status, confirmed_status,
+                   noise_psd):
+    """Send a detected pulse to the controller as a UDPPulseInfo_T packet.
+
+    The controller's UDPPulseReceiver expects 12 consecutive IEEE-754
+    double-precision floats (96 bytes) in little-endian byte order.
+    """
+    packet = struct.pack('<12d',
+                         float(tag_id),
+                         float(frequency_hz),
+                         start_time_seconds,
+                         predict_next_start_seconds,
+                         snr,
+                         stft_score,
+                         float(group_seq_counter),
+                         float(group_ind),
+                         group_snr,
+                         float(detection_status),
+                         float(confirmed_status),
+                         noise_psd)
+    pulse_sock.sendto(packet, dest_addr)
+
+
+def send_heartbeat_udp(pulse_sock, dest_addr, tag_id):
+    """Send a detector heartbeat to the controller.
+
+    A heartbeat is a UDPPulseInfo_T packet with frequency_hz = 0.
+    The controller recognises frequency_hz == 0 as a heartbeat rather
+    than a real pulse (see PulseHandler::handlePulse).
+    """
+    send_pulse_udp(
+        pulse_sock, dest_addr,
+        tag_id=tag_id,
+        frequency_hz=0,
+        start_time_seconds=0.0,
+        predict_next_start_seconds=0.0,
+        snr=0.0,
+        stft_score=0.0,
+        group_seq_counter=0,
+        group_ind=0,
+        group_snr=0.0,
+        detection_status=0,
+        confirmed_status=0,
+        noise_psd=0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # UDP packet decoding
 # ---------------------------------------------------------------------------
 
@@ -434,6 +488,12 @@ def main():
                     help='Channel center frequency in MHz (display only)')
     ap.add_argument('--debug', action='store_true', default=False,
                     help='Print diagnostic info at each pipeline stage')
+    ap.add_argument('--tag-id', type=int, default=0,
+                    help='Tag ID sent with pulse reports (default: 0)')
+    ap.add_argument('--freq', type=int, default=0,
+                    help='Absolute tag frequency in Hz for pulse reports (default: 0)')
+    ap.add_argument('--pulse-port', type=int, default=0,
+                    help='UDP port to send detected pulses to (0 = disabled)')
     args = ap.parse_args()
 
     # --- Validate parameters ---
@@ -522,6 +582,18 @@ def main():
     sock.bind(('0.0.0.0', args.port))
     sock.settimeout(2.0)
 
+    # Pulse reporting socket (separate from IQ receive)
+    pulse_sock = None
+    pulse_dest = None
+    if args.pulse_port > 0:
+        pulse_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        pulse_dest = ('127.0.0.1', args.pulse_port)
+        print(f'  Pulse reports  → 127.0.0.1:{args.pulse_port}')
+        if args.tag_id:
+            print(f'  Tag ID          {args.tag_id}')
+        if args.freq:
+            print(f'  Tag frequency   {args.freq} Hz')
+
     # Install signal handler for graceful shutdown
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -547,6 +619,10 @@ def main():
 
     # EVT threshold cache (regenerated if geometry changes)
     evt_threshold_cache = {}
+
+    # Heartbeat timing — send a heartbeat every ~1 second
+    heartbeat_interval = 1.0  # seconds
+    last_heartbeat_time = time.monotonic()
 
     print('Gap handling:')
     print(f'  < {gap_threshold_reset*1000:.1f} ms: zero-fill missing samples')
@@ -662,6 +738,11 @@ def main():
             cycle += 1
             t0 = time.monotonic()
 
+            # Send periodic heartbeat so the controller knows we're alive
+            if pulse_sock is not None and (t0 - last_heartbeat_time) >= heartbeat_interval:
+                send_heartbeat_udp(pulse_sock, pulse_dest, args.tag_id)
+                last_heartbeat_time = t0
+
             segment = np.concatenate(buf_parts)[:samples_needed]
             buf_parts.clear()
             buf_len = 0
@@ -724,6 +805,28 @@ def main():
                     last_detection_ts = current_ts
 
                 for freq_hz, snr_db, offset in detections:
+                    # Send pulse to controller via UDP if configured
+                    if pulse_sock is not None:
+                        start_time_s = current_ts / 1e9 if current_ts else time.time()
+                        predict_next_s = start_time_s + args.tip
+                        report_freq_hz = args.freq if args.freq else int(freq_hz)
+
+                        send_pulse_udp(
+                            pulse_sock, pulse_dest,
+                            tag_id=args.tag_id,
+                            frequency_hz=report_freq_hz,
+                            start_time_seconds=start_time_s,
+                            predict_next_start_seconds=predict_next_s,
+                            snr=snr_db,
+                            stft_score=snr_db,
+                            group_seq_counter=cycle,
+                            group_ind=0,
+                            group_snr=snr_db,
+                            detection_status=1,
+                            confirmed_status=1,
+                            noise_psd=0.0,
+                        )
+
                     if args.center_freq > 0:
                         abs_mhz = args.center_freq + freq_hz / 1e6
                         print(f'[{cycle:4d} {ts_str}]  DETECTED  '
@@ -750,6 +853,8 @@ def main():
         print(f'  Reset gaps:        {gap_reset_count} (≥ {gap_threshold_reset*1000:.1f} ms, segments discarded)', flush=True)
         print(f'  Total gap events:  {gap_zerofill_count + gap_reset_count}', flush=True)
         sock.close()
+        if pulse_sock is not None:
+            pulse_sock.close()
 
 
 if __name__ == '__main__':
