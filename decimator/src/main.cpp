@@ -608,7 +608,7 @@ class ZmqIqReceiver {
 
     void *context_ = nullptr;
     void *socket_ = nullptr;
-    uint64_t malformedPackets_ = 0;
+    std::atomic<uint64_t> malformedPackets_ = 0;
 };
 
 class PacketQueue {
@@ -766,27 +766,53 @@ int main(int argc, char **argv) {
 
         // Reader thread: receives ZMQ packets and pushes them to the queue.
         std::thread readerThread([&]() {
-            while (gShouldStop == 0) {
-                ZmqPacket pkt;
-                bool timedOut = false;
-                if (!receiver.receive(pkt, timedOut)) {
-                    if (timedOut) {
+            try {
+                while (gShouldStop == 0) {
+                    ZmqPacket pkt;
+                    bool timedOut = false;
+                    if (!receiver.receive(pkt, timedOut)) {
+                        if (timedOut) {
+                            continue;
+                        }
+                        if (receiver.malformedPackets() == 1 ||
+                            (receiver.malformedPackets() % 100) == 0) {
+                            std::cerr << "airspyhf_decimator: malformed ZMQ packets="
+                                      << receiver.malformedPackets() << "\n";
+                        }
                         continue;
                     }
-                    if (receiver.malformedPackets() == 1 ||
-                        (receiver.malformedPackets() % 100) == 0) {
-                        std::cerr << "airspyhf_decimator: malformed ZMQ packets="
-                                  << receiver.malformedPackets() << "\n";
+                    if (!queue.push(std::move(pkt))) {
+                        auto drops = queue.dropped();
+                        if (drops == 1 || (drops % 100) == 0) {
+                            std::cerr << "airspyhf_decimator: queue full, packet dropped"
+                                         " total_queue_drops=" << drops << "\n";
+                        }
                     }
-                    continue;
                 }
-                if (!queue.push(std::move(pkt))) {
-                    std::cerr << "airspyhf_decimator: queue full, packet dropped"
-                                 " total_queue_drops=" << queue.dropped() << "\n";
-                }
+            } catch (const std::exception &e) {
+                std::cerr << "airspyhf_decimator: reader thread fatal: " << e.what() << "\n";
+                gShouldStop = 1;
             }
             queue.stop();
         });
+
+        // Scope guard: ensure the reader thread is always joined, even if the
+        // decimation loop throws, so we never destroy a joinable std::thread
+        // (which would call std::terminate).
+        struct ReaderGuard {
+            std::thread &t;
+            PacketQueue &q;
+            bool joined = false;
+            void join() {
+                if (!joined) {
+                    gShouldStop = 1;
+                    q.stop();
+                    if (t.joinable()) t.join();
+                    joined = true;
+                }
+            }
+            ~ReaderGuard() { join(); }
+        } readerGuard{readerThread, queue};
 
         // Decimation loop: pops packets from the queue and processes them.
         ZmqPacket packet;
@@ -1013,7 +1039,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        readerThread.join();
+        readerGuard.join();
 
         std::cerr << "airspyhf_decimator: stopping packets="
                   << zmqPacketsReceived

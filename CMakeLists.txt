@@ -16,10 +16,13 @@ add_compile_options(
 # ── Speed optimisation for Release builds ────────────────────────────
 # CMake's Release type already applies -O3 -DNDEBUG.
 # -march=native additionally targets the host CPU's instruction set.
-add_compile_options(
-    $<$<CONFIG:Release>:-march=native>
-    $<$<CONFIG:RelWithDebInfo>:-march=native>
-)
+# Skipped when cross-compiling, since the build host ISA differs from the target.
+if(NOT CMAKE_CROSSCOMPILING)
+    add_compile_options(
+        $<$<CONFIG:Release>:-march=native>
+        $<$<CONFIG:RelWithDebInfo>:-march=native>
+    )
+endif()
 
 include(CTest)
 
