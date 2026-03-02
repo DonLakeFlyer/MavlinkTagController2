@@ -23,6 +23,10 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace {
 
@@ -33,6 +37,7 @@ constexpr double kTwoPi = 6.28318530717958647692;
 [[maybe_unused]] constexpr uint32_t kZmqMagic = TTWF_ZMQ_IQ_MAGIC;
 [[maybe_unused]] constexpr uint16_t kZmqVersion = TTWF_ZMQ_IQ_VERSION;
 constexpr uint16_t kZmqHeaderSizeBytes = TTWF_ZMQ_IQ_HEADER_SIZE;
+constexpr std::size_t kMaxQueuePackets = 64;
 
 struct Options {
     double inputRate = 0.0;
@@ -606,6 +611,97 @@ class ZmqIqReceiver {
     uint64_t malformedPackets_ = 0;
 };
 
+class PacketQueue {
+  public:
+    explicit PacketQueue(std::size_t maxDepth) : maxDepth_(maxDepth) {}
+
+    // Returns false if the queue is full; caller should warn and drop.
+    bool push(ZmqPacket &&pkt) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (queue_.size() >= maxDepth_) {
+            ++dropped_;
+            return false;
+        }
+        queue_.push_back(std::move(pkt));
+        cv_.notify_one();
+        return true;
+    }
+
+    // Blocks until a packet is available or stop() is called.
+    // Returns false (and leaves pkt unchanged) when stopped and queue is empty.
+    bool pop(ZmqPacket &pkt) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return !queue_.empty() || stop_; });
+        if (queue_.empty()) {
+            return false;
+        }
+        pkt = std::move(queue_.front());
+        queue_.pop_front();
+        return true;
+    }
+
+    void stop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        stop_ = true;
+        cv_.notify_all();
+    }
+
+    std::size_t size() const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return queue_.size();
+    }
+
+    uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
+
+  private:
+    std::deque<ZmqPacket> queue_;
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::size_t maxDepth_;
+    std::atomic<uint64_t> dropped_{0};
+    bool stop_ = false;
+};
+
+// Sliding-window rate estimator: avoids the startup-transient bias of a
+// cumulative average.  Only entries within the last kWindowSec seconds
+// contribute, so the measurement converges immediately after the first
+// two packets instead of slowly diluting out over minutes.
+class RateWindow {
+  public:
+    static constexpr double kWindowSec = 3.0;
+
+    void update(uint64_t samples, double nowSec) {
+        entries_.push_back({samples, nowSec});
+        while (entries_.size() > 1 &&
+               (nowSec - entries_.front().timeSec) > kWindowSec) {
+            entries_.pop_front();
+        }
+    }
+
+    double rate() const {
+        if (entries_.size() < 2) {
+            return 0.0;
+        }
+        const double dt =
+            entries_.back().timeSec - entries_.front().timeSec;
+        if (dt <= 0.0) {
+            return 0.0;
+        }
+        uint64_t totalSamples = 0;
+        for (std::size_t i = 1; i < entries_.size(); ++i) {
+            totalSamples += entries_[i].samples;
+        }
+        return static_cast<double>(totalSamples) / dt;
+    }
+
+  private:
+    struct Entry {
+        uint64_t samples;
+        double timeSec;
+    };
+    std::deque<Entry> entries_;
+};
+
 volatile std::sig_atomic_t gShouldStop = 0;
 
 void handleTerminationSignal(int) { gShouldStop = 1; }
@@ -632,6 +728,7 @@ int main(int argc, char **argv) {
         FirDecimator stage3(5, 5 * 16, 0.45f / 5.0f);
 
         ZmqIqReceiver receiver(opts.zmqEndpoint);
+        PacketQueue queue(kMaxQueuePackets);
         std::unique_ptr<TimestampEncoder> timestampEncoder;
         UdpStreamer streamer(opts.ip, opts.ports);
         std::unique_ptr<FrequencyShifter> frequencyShifter;
@@ -661,21 +758,39 @@ int main(int argc, char **argv) {
         auto runStart = std::chrono::steady_clock::now();
         auto lastPerfLog = runStart;
         std::chrono::steady_clock::duration processingTime{};
+        // Clock that starts on the first received packet so that elapsed-time
+        // rate calculations are not biased by ZMQ connect / startup latency.
+        bool firstPacketReceived = false;
+        std::chrono::steady_clock::time_point firstPacketTime;
+        RateWindow inputRateWindow;
 
-        while (gShouldStop == 0) {
-            ZmqPacket packet;
-            bool timedOut = false;
-            if (!receiver.receive(packet, timedOut)) {
-                if (timedOut) {
+        // Reader thread: receives ZMQ packets and pushes them to the queue.
+        std::thread readerThread([&]() {
+            while (gShouldStop == 0) {
+                ZmqPacket pkt;
+                bool timedOut = false;
+                if (!receiver.receive(pkt, timedOut)) {
+                    if (timedOut) {
+                        continue;
+                    }
+                    if (receiver.malformedPackets() == 1 ||
+                        (receiver.malformedPackets() % 100) == 0) {
+                        std::cerr << "airspyhf_decimator: malformed ZMQ packets="
+                                  << receiver.malformedPackets() << "\n";
+                    }
                     continue;
                 }
-                if (receiver.malformedPackets() == 1 ||
-                    (receiver.malformedPackets() % 100) == 0) {
-                    std::cerr << "airspyhf_decimator: malformed ZMQ packets="
-                              << receiver.malformedPackets() << "\n";
+                if (!queue.push(std::move(pkt))) {
+                    std::cerr << "airspyhf_decimator: queue full, packet dropped"
+                                 " total_queue_drops=" << queue.dropped() << "\n";
                 }
-                continue;
             }
+            queue.stop();
+        });
+
+        // Decimation loop: pops packets from the queue and processes them.
+        ZmqPacket packet;
+        while (queue.pop(packet)) {
             ++zmqPacketsReceived;
             zmqBytesRead += static_cast<uint64_t>(kZmqHeaderSizeBytes +
                                                   packet.payloadBytes);
@@ -775,7 +890,14 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            auto processStart = std::chrono::steady_clock::now();
+            const auto processStart = std::chrono::steady_clock::now();
+            if (!firstPacketReceived) {
+                firstPacketReceived = true;
+                firstPacketTime = processStart;
+            }
+            inputRateWindow.update(
+                stageInput.size(),
+                std::chrono::duration<double>(processStart - runStart).count());
             frequencyShifter->mix(stageInput);
             auto afterStage1 = stage1.process(stageInput);
             auto afterStage2 = stage2.process(afterStage1);
@@ -801,8 +923,11 @@ int main(int argc, char **argv) {
 
             auto now = std::chrono::steady_clock::now();
             if (now - lastPerfLog >= std::chrono::seconds(1)) {
+                // Use first-packet time so startup latency doesn't bias rates.
                 const double elapsedSec =
-                    std::chrono::duration<double>(now - runStart).count();
+                    firstPacketReceived
+                        ? std::chrono::duration<double>(now - firstPacketTime).count()
+                        : 0.0;
                 const double processingSec =
                     std::chrono::duration<double>(processingTime).count();
                 const double inputRate =
@@ -819,11 +944,9 @@ int main(int argc, char **argv) {
                     (elapsedSec > 0.0)
                         ? (static_cast<double>(zmqBytesRead) / elapsedSec)
                         : 0.0;
-                const double zmqComplexPerSec =
-                    (elapsedSec > 0.0)
-                        ? (static_cast<double>(inputSamplesProcessed) /
-                           elapsedSec)
-                        : 0.0;
+                // Sliding-window rate: converges in ~3 s instead of
+                // asymptotically over the entire run.
+                const double zmqComplexPerSec = inputRateWindow.rate();
                 const double frameRate =
                     (elapsedSec > 0.0)
                         ? (static_cast<double>(framesSent) / elapsedSec)
@@ -867,7 +990,9 @@ int main(int argc, char **argv) {
                           << " zmq_packets=" << zmqPacketsReceived
                           << " malformed=" << receiver.malformedPackets()
                           << " dropped=" << droppedPackets
-                          << " out_of_order=" << outOfOrderPackets << "\n";
+                          << " out_of_order=" << outOfOrderPackets
+                          << " queue_depth=" << queue.size()
+                          << " queue_drops=" << queue.dropped() << "\n";
 
                 if (haveSequence && lastZmqTimestampUs > firstZmqTimestampUs) {
                     const double streamDurationSec =
@@ -888,13 +1013,16 @@ int main(int argc, char **argv) {
             }
         }
 
+        readerThread.join();
+
         std::cerr << "airspyhf_decimator: stopping packets="
                   << zmqPacketsReceived
                   << " malformed=" << receiver.malformedPackets()
                   << " dropped=" << droppedPackets
                   << " out_of_order=" << outOfOrderPackets
                   << " sample_rate_field_warnings=" << sampleRateFieldWarnings
-                  << " measured_rate_warnings=" << measuredRateWarnings << "\n";
+                  << " measured_rate_warnings=" << measuredRateWarnings
+                  << " queue_drops=" << queue.dropped() << "\n";
     } catch (const ArgsError &err) {
         std::cerr << "Argument error: " << err.what() << "\n";
         printUsage(argv[0]);

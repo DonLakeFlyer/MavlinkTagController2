@@ -13,6 +13,14 @@ add_compile_options(
     -Wno-address-of-packed-member
 )
 
+# ── Speed optimisation for Release builds ────────────────────────────
+# CMake's Release type already applies -O3 -DNDEBUG.
+# -march=native additionally targets the host CPU's instruction set.
+add_compile_options(
+    $<$<CONFIG:Release>:-march=native>
+    $<$<CONFIG:RelWithDebInfo>:-march=native>
+)
+
 include(CTest)
 
 # ── CPM package manager ──────────────────────────────────────────────
