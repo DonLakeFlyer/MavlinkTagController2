@@ -439,10 +439,17 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     # Frequency axis (DC-centred)
     freq_axis = Wf if Wf is not None else np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / Fs))
 
+    # Convert noise power per STFT bin to power spectral density (W/Hz).
+    # The unnormalised |FFT|² scales as (Fs × n_w) relative to true PSD
+    # for a rectangular window with sum(w²) = n_w.  This matches the
+    # normalisation used by uavrt_detection's wfmstft.
+    psd_scale = float(Fs * n_w)
+
     results = []
     for b in det_bins:
         snr_db = 10.0 * np.log10(best_scores[b] / (K * noise_power[b]))
-        results.append((freq_axis[b], snr_db, int(best_offsets[b])))
+        results.append((freq_axis[b], snr_db, int(best_offsets[b]),
+                         float(noise_power[b] / psd_scale)))
 
     results.sort(key=lambda x: -x[1])
 
@@ -453,11 +460,11 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     min_sep = max(15, nfft // 4)
     merged = []
     used_bins = []
-    for freq_hz, snr_db, offset in results:
+    for freq_hz, snr_db, offset, noise_psd in results:
         b = int(np.argmin(np.abs(freq_axis - freq_hz)))
         if any(abs(b - ub) <= min_sep for ub in used_bins):
             continue
-        merged.append((freq_hz, snr_db, offset))
+        merged.append((freq_hz, snr_db, offset, noise_psd))
         used_bins.append(b)
         # Report only the strongest detection
         if len(merged) >= 1:
@@ -812,7 +819,7 @@ def main():
                 if current_ts is not None:
                     last_detection_ts = current_ts
 
-                for freq_hz, snr_db, offset in detections:
+                for freq_hz, snr_db, offset, noise_psd in detections:
                     # Send pulse to controller via UDP if configured
                     if pulse_sock is not None:
                         start_time_s = current_ts / 1e9 if current_ts else time.time()
@@ -832,7 +839,7 @@ def main():
                             group_snr=snr_db,
                             detection_status=1,
                             confirmed_status=1,
-                            noise_psd=0.0,
+                            noise_psd=noise_psd,
                         )
 
                     if args.center_freq > 0:
@@ -841,11 +848,13 @@ def main():
                               f'{abs_mhz:.6f} MHz  '
                               f'({freq_hz:+.1f} Hz)  '
                               f'SNR {snr_db:.1f} dB  '
+                              f'noise {noise_psd:.3e}  '
                               f'{proc_ms:.0f} ms{delta_str}{gap_flag}')
                     else:
                         print(f'[{cycle:4d} {ts_str}]  DETECTED  '
                               f'{freq_hz:+.1f} Hz  '
                               f'SNR {snr_db:.1f} dB  '
+                              f'noise {noise_psd:.3e}  '
                               f'{proc_ms:.0f} ms{delta_str}{gap_flag}')
             else:
                 print(f'[{cycle:4d} {ts_str}]  no detection  '
