@@ -447,9 +447,14 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
 
     results = []
     for b in det_bins:
-        snr_db = 10.0 * np.log10(best_scores[b] / (K * noise_power[b]))
+        # SNR: K-fold integrated detection SNR — fold score vs single-bin
+        # noise floor.  Matches uavrt_detection's reporting convention
+        # (fold_score / noise, NOT fold_score / (K * noise)).
+        snr_db = 10.0 * np.log10(best_scores[b] / noise_power[b])
+        # Raw fold score for the stft_score field (proportional to pulse PSD)
+        stft_score = float(best_scores[b] / psd_scale)
         results.append((freq_axis[b], snr_db, int(best_offsets[b]),
-                         float(noise_power[b] / psd_scale)))
+                         float(noise_power[b] / psd_scale), stft_score))
 
     results.sort(key=lambda x: -x[1])
 
@@ -460,11 +465,11 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     min_sep = max(15, nfft // 4)
     merged = []
     used_bins = []
-    for freq_hz, snr_db, offset, noise_psd in results:
+    for freq_hz, snr_db, offset, noise_psd, stft_score in results:
         b = int(np.argmin(np.abs(freq_axis - freq_hz)))
         if any(abs(b - ub) <= min_sep for ub in used_bins):
             continue
-        merged.append((freq_hz, snr_db, offset, noise_psd))
+        merged.append((freq_hz, snr_db, offset, noise_psd, stft_score))
         used_bins.append(b)
         # Report only the strongest detection
         if len(merged) >= 1:
@@ -819,7 +824,7 @@ def main():
                 if current_ts is not None:
                     last_detection_ts = current_ts
 
-                for freq_hz, snr_db, offset, noise_psd in detections:
+                for freq_hz, snr_db, offset, noise_psd, stft_score in detections:
                     # Send pulse to controller via UDP if configured
                     if pulse_sock is not None:
                         start_time_s = current_ts / 1e9 if current_ts else time.time()
@@ -833,7 +838,7 @@ def main():
                             start_time_seconds=start_time_s,
                             predict_next_start_seconds=predict_next_s,
                             snr=snr_db,
-                            stft_score=snr_db,
+                            stft_score=stft_score,
                             group_seq_counter=cycle,
                             group_ind=0,
                             group_snr=snr_db,

@@ -122,12 +122,14 @@ det_bins = where(fold_scores > threshold)
 For each detected frequency bin:
 
 ```python
-signal = fold_score[f]
-noise  = K × noise_power[f]
+signal = fold_score[f]          # sum of K pulse-window powers
+noise  = noise_power[f]          # per-window noise estimate
 SNR_dB = 10 × log10(signal / noise)
 ```
 
-The SNR reflects the **K-fold integration gain**—expect 7 dB improvement for K=5 compared to single-pulse detection (10×log10(5) ≈ 7 dB).
+This matches uavrt_detection's convention: the fold score naturally scales with K (more folds → higher numerator → higher reported SNR). Expect roughly `10×log10(K)` dB improvement over single-pulse detection (≈ 7 dB for K=5).
+
+> **Note:** The denominator is the single-window noise estimate, *not* `K × noise_power`. This means the reported SNR includes the integration gain and is directly comparable to uavrt_detection's output.
 
 ## Gap Handling (Conservative Strategy)
 
@@ -348,9 +350,10 @@ At 3840 Hz decimated rate with default parameters:
 
 ### Detection Sensitivity
 
-**Theoretical SNR improvement from K=5 folding:**
-- Single pulse: SNR_in
-- K=5 fold: SNR_out = SNR_in + 10×log10(5) ≈ **SNR_in + 7 dB**
+**Theoretical SNR improvement from K-fold integration:**
+- Single pulse: SNR_in = 10×log10(pulse_power / noise_power)
+- K-fold: SNR_out = SNR_in + 10×log10(K)
+- K=5: **SNR_in + 7.0 dB**, K=3: SNR_in + 4.8 dB
 
 **Practical detection limits:**
 - Strong tags (local): 60-80 dB SNR (easily detected)
