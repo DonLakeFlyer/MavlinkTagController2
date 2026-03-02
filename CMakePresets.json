@@ -20,7 +20,8 @@
             "displayName": "Release",
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "BUILD_TESTING": "ON"
             }
         },
         {
@@ -37,14 +38,29 @@
             "inherits": "debug"
         },
         {
+            "name": "controller-release",
+            "displayName": "Controller (Release)",
+            "inherits": "release"
+        },
+        {
             "name": "decimator",
             "displayName": "Decimator (Debug)",
             "inherits": "debug"
         },
         {
+            "name": "decimator-release",
+            "displayName": "Decimator (Release)",
+            "inherits": "release"
+        },
+        {
             "name": "airspyhf-zeromq",
             "displayName": "AirSpy HF ZeroMQ (Debug)",
             "inherits": "debug"
+        },
+        {
+            "name": "airspyhf-zeromq-release",
+            "displayName": "AirSpy HF ZeroMQ (Release)",
+            "inherits": "release"
         }
     ],
     "buildPresets": [
@@ -70,8 +86,20 @@
             "targets": ["MavlinkTagController2"]
         },
         {
+            "name": "controller-release",
+            "configurePreset": "controller-release",
+            "jobs": 0,
+            "targets": ["MavlinkTagController2"]
+        },
+        {
             "name": "decimator",
             "configurePreset": "decimator",
+            "jobs": 0,
+            "targets": ["airspyhf_decimator"]
+        },
+        {
+            "name": "decimator-release",
+            "configurePreset": "decimator-release",
             "jobs": 0,
             "targets": ["airspyhf_decimator"]
         },
@@ -80,12 +108,25 @@
             "configurePreset": "airspyhf-zeromq",
             "jobs": 0,
             "targets": ["airspyhf_zeromq_rx"]
+        },
+        {
+            "name": "airspyhf-zeromq-release",
+            "configurePreset": "airspyhf-zeromq-release",
+            "jobs": 0,
+            "targets": ["airspyhf_zeromq_rx"]
         }
     ],
     "testPresets": [
         {
             "name": "debug",
             "configurePreset": "debug",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "release",
+            "configurePreset": "release",
             "output": {
                 "outputOnFailure": true
             }

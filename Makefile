@@ -4,24 +4,24 @@
 all: controller decimator airspyhf_zeromq
 
 controller:
-	cmake --preset controller
-	cmake --build --preset controller
+	cmake --preset controller-release
+	cmake --build --preset controller-release
 
 decimator:
-	cmake --preset decimator
-	cmake --build --preset decimator
+	cmake --preset decimator-release
+	cmake --build --preset decimator-release
 
 airspyhf_zeromq:
-	cmake --preset airspyhf-zeromq
-	cmake --build --preset airspyhf-zeromq
+	cmake --preset airspyhf-zeromq-release
+	cmake --build --preset airspyhf-zeromq-release
 
 install: airspyhf_zeromq
 	cmake --install build
 
 test:
-	cmake --preset debug
-	cmake --build --preset debug
-	ctest --preset debug
+	cmake --preset release
+	cmake --build --preset release
+	ctest --preset release
 
 clean:
 	@if [ -d build ]; then cmake --build build --target clean; else echo "No build/ directory"; fi
