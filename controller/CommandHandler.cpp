@@ -157,14 +157,14 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     std::string venvPython  = formatString("%s/.venv/bin/python3", repoDir.c_str());
     std::string pythonCmd   = (access(venvPython.c_str(), X_OK) == 0) ? venvPython : std::string("python3");
 
-    std::string commandStr  = formatString("%s -u %s/detector/pulse_detector.py"
+    std::string commandStr  = formatString("\"%s\" -u \"%s/detector/pulse_detector.py\""
                                            " --tp %f --tip %f --fs %d --port %d"
-                                           " --tag-id %d --freq %u --pulse-port 50000"
+                                           " --tag-id %d --freq %u --pulse-port %d"
                                            " --center-freq %f",
                                 pythonCmd.c_str(),
                                 repoDir.c_str(),
                                 tp, tip, sampleRate, portData,
-                                tagId, tagInfo.frequency_hz,
+                                tagId, tagInfo.frequency_hz, kPulseUdpPort,
                                 centerFreqMhz);
 
     std::string root    = formatString("py_detector_%d", tagId);
@@ -172,9 +172,10 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
 
     logInfo() << "Starting Python pulse detector:" << commandStr;
 
+    std::string procName = formatString("pulse_detector_%d", tagId);
     MonitoredProcess* detectorProc = new MonitoredProcess(
                                                 _mavlink,
-                                                "pulse_detector",
+                                                procName.c_str(),
                                                 commandStr.c_str(),
                                                 logPath.c_str(),
                                                 MonitoredProcess::NoPipe,

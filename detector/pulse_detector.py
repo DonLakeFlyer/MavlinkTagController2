@@ -74,7 +74,10 @@ def send_pulse_udp(pulse_sock, dest_addr, tag_id, frequency_hz,
                          float(detection_status),
                          float(confirmed_status),
                          noise_psd)
-    pulse_sock.sendto(packet, dest_addr)
+    try:
+        pulse_sock.sendto(packet, dest_addr)
+    except OSError as e:
+        print(f'Warning: pulse send failed: {e}', file=sys.stderr, flush=True)
 
 
 def send_heartbeat_udp(pulse_sock, dest_addr, tag_id):
@@ -635,6 +638,11 @@ def main():
             try:
                 data = sock.recv(65536)
             except socket.timeout:
+                # Send heartbeat even while waiting for data so the controller
+                # knows we're alive during long buffering periods or stream stalls
+                if pulse_sock is not None and (time.monotonic() - last_heartbeat_time) >= heartbeat_interval:
+                    send_heartbeat_udp(pulse_sock, pulse_dest, args.tag_id)
+                    last_heartbeat_time = time.monotonic()
                 continue
             if len(data) < 16:
                 continue
