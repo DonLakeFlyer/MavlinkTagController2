@@ -75,7 +75,7 @@ int main(int argc, char** argv)
     auto ftpServer 			= MavlinkFtpServer { mavlink };
     auto telemetryCache     = new TelemetryCache(mavlink);
 	auto pulseHandler 		= new PulseHandler(mavlink, telemetryCache);
-    auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), 50000, pulseHandler };
+    auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), CommandHandler::kPulseUdpPort, pulseHandler };
 
 	globalMavlinkSystem		= mavlink;
 

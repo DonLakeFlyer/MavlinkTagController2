@@ -16,6 +16,8 @@ class CommandHandler {
 public:
     explicit CommandHandler(MavlinkSystem* mavlink, bool simulatorMode = false, const std::string& simulatorPreset = "strong");
 
+    static constexpr int kPulseUdpPort = 50000; // UDP port for pulse/heartbeat reports from detectors
+
 private:
     enum class AirSpyDeviceType {
         NONE,
