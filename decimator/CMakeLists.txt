@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZeroMQ REQUIRED IMPORTED_TARGET libzmq)
+find_package(Threads REQUIRED)
 
 add_executable(airspyhf_decimator
     src/main.cpp
@@ -11,7 +12,7 @@ target_include_directories(airspyhf_decimator PRIVATE
     ${CMAKE_SOURCE_DIR}/shared
 )
 
-target_link_libraries(airspyhf_decimator PRIVATE PkgConfig::ZeroMQ)
+target_link_libraries(airspyhf_decimator PRIVATE PkgConfig::ZeroMQ Threads::Threads)
 
 
 
