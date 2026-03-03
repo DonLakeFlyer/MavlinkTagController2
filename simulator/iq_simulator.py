@@ -96,8 +96,8 @@ class SimConfig:
     telemetry_sub_endpoint: str = "tcp://127.0.0.1:6001"  # ZMQ SUB endpoint for controller telemetry
     telemetry_topic: str = "vehicle_pose"
     tx_offset_north_m: float = 4000.0
-    ra2ahs_hpbw_deg: float = 100.0
-    ra2ahs_front_to_back_db: float = 12.0
+    ra2ahs_hpbw_deg: float = 60.0
+    ra2ahs_front_to_back_db: float = 50.0
 
 
 @dataclass
