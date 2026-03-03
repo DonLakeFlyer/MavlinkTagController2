@@ -30,6 +30,7 @@ import signal
 import socket
 import struct
 import sys
+import threading
 import time
 
 import numpy as np
@@ -652,9 +653,17 @@ def main():
     # EVT threshold cache (regenerated if geometry changes)
     evt_threshold_cache = {}
 
-    # Heartbeat timing — send a heartbeat every ~1 second
-    heartbeat_interval = 1.0  # seconds
-    last_heartbeat_time = time.monotonic()
+    # Start a dedicated heartbeat thread (pure timer, 1 Hz)
+    heartbeat_stop = threading.Event()
+    def _heartbeat_loop():
+        while not heartbeat_stop.wait(1.0):
+            if pulse_sock is not None:
+                send_heartbeat_udp(pulse_sock, pulse_dest, args.tag_id)
+    if pulse_sock is not None:
+        heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
+    else:
+        heartbeat_thread = None
 
     print('Gap handling:')
     print(f'  < {gap_threshold_reset*1000:.1f} ms: zero-fill missing samples')
@@ -667,11 +676,6 @@ def main():
             try:
                 data = sock.recv(65536)
             except socket.timeout:
-                # Send heartbeat even while waiting for data so the controller
-                # knows we're alive during long buffering periods or stream stalls
-                if pulse_sock is not None and (time.monotonic() - last_heartbeat_time) >= heartbeat_interval:
-                    send_heartbeat_udp(pulse_sock, pulse_dest, args.tag_id)
-                    last_heartbeat_time = time.monotonic()
                 continue
             if len(data) < 16:
                 continue
@@ -774,11 +778,6 @@ def main():
 
             cycle += 1
             t0 = time.monotonic()
-
-            # Send periodic heartbeat so the controller knows we're alive
-            if pulse_sock is not None and (t0 - last_heartbeat_time) >= heartbeat_interval:
-                send_heartbeat_udp(pulse_sock, pulse_dest, args.tag_id)
-                last_heartbeat_time = t0
 
             segment = np.concatenate(buf_parts)[:samples_needed]
             buf_parts.clear()
@@ -913,6 +912,9 @@ def main():
         print(f'  Zero-filled gaps:  {gap_zerofill_count} (< {gap_threshold_reset*1000:.1f} ms)', flush=True)
         print(f'  Reset gaps:        {gap_reset_count} (≥ {gap_threshold_reset*1000:.1f} ms, segments discarded)', flush=True)
         print(f'  Total gap events:  {gap_zerofill_count + gap_reset_count}', flush=True)
+        heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=2.0)
         sock.close()
         if pulse_sock is not None:
             pulse_sock.close()
