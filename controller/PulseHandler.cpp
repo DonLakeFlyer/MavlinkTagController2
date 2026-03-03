@@ -52,7 +52,7 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
     } else if (std::isfinite(udpPulseInfo.detection_status)
               && static_cast<uint8_t>(udpPulseInfo.detection_status) == DETECTION_STATUS_NO_DETECTION) {
         // No pulse detected this cycle — forward noise floor to GCS
-        pulseInfo.detection_status  = 3;
+        pulseInfo.detection_status  = DETECTION_STATUS_NO_DETECTION;
         pulseInfo.confirmed_status  = 0;
         pulseInfo.noise_psd         = udpPulseInfo.noise_psd;
         pulseInfo.start_time_seconds = udpPulseInfo.start_time_seconds;
