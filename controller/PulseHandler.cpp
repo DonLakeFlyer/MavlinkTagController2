@@ -45,6 +45,14 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
 
     if (pulseInfo.frequency_hz == 0) {
         logInfo() << "HEARTBEAT from Detector" << pulseInfo.tag_id;
+    } else if ((uint8_t)udpPulseInfo.detection_status == 3) {
+        // No pulse detected this cycle — forward noise floor to GCS
+        pulseInfo.detection_status  = 3;
+        pulseInfo.confirmed_status  = 0;
+        pulseInfo.noise_psd         = udpPulseInfo.noise_psd;
+        pulseInfo.start_time_seconds = udpPulseInfo.start_time_seconds;
+        logDebug() << "NO DETECTION from Detector" << pulseInfo.tag_id
+                   << "noise_psd" << pulseInfo.noise_psd;
     } else {
         auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
 
