@@ -338,7 +338,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     # Maximum valid first-pulse position
     max_start = n_time - (K - 1) * N
     if max_start <= 0:
-        return []
+        return [], None
     search_range = min(N, max_start)
 
     # Index matrix: (search_range, K) — each row is one candidate pattern
@@ -405,7 +405,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
             print(f'ERROR: Insufficient data for EVT threshold. '
                   f'Segment length ({n_time} samples) too short for K={K} folds.',
                   flush=True)
-            return []
+            return [], None
         evt_threshold_cache['threshold'] = base_threshold
     else:
         base_threshold = evt_threshold_cache['threshold']
@@ -432,10 +432,6 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                   f'ratio={score_thresh_ratio[idx]:.4f}  '
                   f'noise={noise_power[idx]:.4e}')
 
-    det_bins = np.where(best_scores > threshold)[0]
-    if len(det_bins) == 0:
-        return []
-
     # Frequency axis (DC-centred)
     freq_axis = Wf if Wf is not None else np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / Fs))
 
@@ -444,6 +440,12 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     # for a rectangular window with sum(w²) = n_w.  This matches the
     # normalisation used by uavrt_detection's wfmstft.
     psd_scale = float(Fs * n_w)
+
+    det_bins = np.where(best_scores > threshold)[0]
+    if len(det_bins) == 0:
+        # No detections — return median noise PSD so callers can report it
+        median_noise_psd = float(np.median(noise_power) / psd_scale)
+        return [], median_noise_psd
 
     results = []
     for b in det_bins:
@@ -475,7 +477,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         if len(merged) >= 1:
             break
 
-    return merged
+    return merged, None
 
 
 # ---------------------------------------------------------------------------
@@ -794,7 +796,8 @@ def main():
                 evt_threshold_cache['n_freq'] = n_freq_cur
                 evt_threshold_cache['n_time'] = n_time_cur
 
-            detections = fold_detect(power, N, args.pf, args.fs, nfft,
+            detections, nodet_noise_psd = fold_detect(
+                                     power, N, args.pf, args.fs, nfft,
                                      n_w, n_ol, samples_needed,
                                      evt_threshold_cache, W=W, Wf=Wf,
                                      debug=args.debug)
@@ -862,6 +865,27 @@ def main():
                               f'noise {noise_psd:.3e}  '
                               f'{proc_ms:.0f} ms{delta_str}{gap_flag}')
             else:
+                # Send a no-detection report so the controller/GCS knows
+                # we searched this cycle and found nothing.  Uses
+                # detection_status=3 (no pulse detected) — a dedicated
+                # status value that cannot be confused with a real pulse.
+                if pulse_sock is not None and args.freq:
+                    start_time_s = current_ts / 1e9 if current_ts else time.time()
+                    send_pulse_udp(
+                        pulse_sock, pulse_dest,
+                        tag_id=args.tag_id,
+                        frequency_hz=args.freq,
+                        start_time_seconds=start_time_s,
+                        predict_next_start_seconds=0.0,
+                        snr=0.0,
+                        stft_score=0.0,
+                        group_seq_counter=cycle,
+                        group_ind=0,
+                        group_snr=0.0,
+                        detection_status=3,
+                        confirmed_status=0,
+                        noise_psd=nodet_noise_psd if nodet_noise_psd is not None else 0.0,
+                    )
                 print(f'[{cycle:4d} {ts_str}]  no detection  '
                       f'{proc_ms:.0f} ms{gap_flag}')
 
