@@ -12,11 +12,15 @@
 #include <unistd.h> // for close()
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 #include <iostream>
 #include <string.h>
 #include <cstddef>
 #include <chrono>
+
+// Detection status values (mirrors TunnelProtocol.h detection_status field)
+static constexpr uint8_t DETECTION_STATUS_NO_DETECTION = 3;
 
 using namespace TunnelProtocol;
 
@@ -45,7 +49,8 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
 
     if (pulseInfo.frequency_hz == 0) {
         logInfo() << "HEARTBEAT from Detector" << pulseInfo.tag_id;
-    } else if ((uint8_t)udpPulseInfo.detection_status == 3) {
+    } else if (std::isfinite(udpPulseInfo.detection_status)
+              && static_cast<uint8_t>(udpPulseInfo.detection_status) == DETECTION_STATUS_NO_DETECTION) {
         // No pulse detected this cycle — forward noise floor to GCS
         pulseInfo.detection_status  = 3;
         pulseInfo.confirmed_status  = 0;

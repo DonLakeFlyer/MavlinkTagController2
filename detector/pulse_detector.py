@@ -38,6 +38,12 @@ from scipy.stats import gumbel_r
 
 K = 5  # Always 5-fold
 
+# Detection status values (mirrors TunnelProtocol.h detection_status field)
+DETECTION_STATUS_SUBTHRESHOLD  = 0  # Subthreshold pulse
+DETECTION_STATUS_SUPERTHRESHOLD = 1  # Superthreshold pulse
+DETECTION_STATUS_CONFIRMED     = 2  # Confirmed pulse
+DETECTION_STATUS_NO_DETECTION   = 3  # Searched but no pulse found
+
 # Global flag for graceful shutdown
 _should_stop = False
 
@@ -331,14 +337,19 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         evt_threshold_cache: dict with 'threshold' key (or None to regenerate)
 
     Returns:
-        List of (freq_hz, snr_db, phase_offset) sorted by SNR descending.
+        (detections, noise_psd) where:
+          detections: list of (freq_hz, snr_db, offset, noise_psd, stft_score)
+                      sorted by SNR descending.
+          noise_psd:  float — median noise PSD across frequency bins when no
+                      detections are found; None when detections are present;
+                      NaN on early-exit error paths (insufficient data).
     """
     _, n_time = power.shape
 
     # Maximum valid first-pulse position
     max_start = n_time - (K - 1) * N
     if max_start <= 0:
-        return [], None
+        return [], float('nan')
     search_range = min(N, max_start)
 
     # Index matrix: (search_range, K) — each row is one candidate pattern
@@ -405,7 +416,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
             print(f'ERROR: Insufficient data for EVT threshold. '
                   f'Segment length ({n_time} samples) too short for K={K} folds.',
                   flush=True)
-            return [], None
+            return [], float('nan')
         evt_threshold_cache['threshold'] = base_threshold
     else:
         base_threshold = evt_threshold_cache['threshold']
@@ -610,6 +621,10 @@ def main():
             print(f'  Tag ID          {args.tag_id}')
         if args.freq:
             print(f'  Tag frequency   {args.freq} Hz')
+        else:
+            print('  Warning: --freq not set; pulse and no-detection reports '
+                  'will not be sent to the controller', file=sys.stderr,
+                  flush=True)
 
     # Install signal handler for graceful shutdown
     signal.signal(signal.SIGINT, _signal_handler)
@@ -845,7 +860,7 @@ def main():
                             group_seq_counter=cycle,
                             group_ind=0,
                             group_snr=snr_db,
-                            detection_status=1,
+                            detection_status=DETECTION_STATUS_SUPERTHRESHOLD,
                             confirmed_status=1,
                             noise_psd=noise_psd,
                         )
@@ -882,9 +897,9 @@ def main():
                         group_seq_counter=cycle,
                         group_ind=0,
                         group_snr=0.0,
-                        detection_status=3,
+                        detection_status=DETECTION_STATUS_NO_DETECTION,
                         confirmed_status=0,
-                        noise_psd=nodet_noise_psd if nodet_noise_psd is not None else 0.0,
+                        noise_psd=nodet_noise_psd,
                     )
                 print(f'[{cycle:4d} {ts_str}]  no detection  '
                       f'{proc_ms:.0f} ms{gap_flag}')
