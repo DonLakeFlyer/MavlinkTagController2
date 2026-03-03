@@ -23,7 +23,7 @@ cd ~/repos/MavlinkTagController2
 git pull origin main
 git submodule update --init --recursive
 
-echo "*** Build controller"
+echo "*** Build all components (controller, decimator, airspyhf_zeromq)"
 rm -rf build
 make
 
