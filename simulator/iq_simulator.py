@@ -96,8 +96,7 @@ class SimConfig:
     telemetry_sub_endpoint: str = "tcp://127.0.0.1:6001"  # ZMQ SUB endpoint for controller telemetry
     telemetry_topic: str = "vehicle_pose"
     tx_offset_north_m: float = 4000.0
-    ra2ahs_hpbw_deg: float = 60.0
-    ra2ahs_front_to_back_db: float = 50.0
+    antenna_max_attenuation_db: float = 40.0  # dB lost when pointing directly away
 
 
 @dataclass
@@ -191,15 +190,15 @@ def _initial_bearing_deg(lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2
     return (bearing + 360.0) % 360.0
 
 
-def _ra2ahs_relative_gain_db(off_boresight_deg: float, hpbw_deg: float, front_to_back_db: float) -> float:
+def _antenna_attenuation_db(off_boresight_deg: float, max_attenuation_db: float) -> float:
+    """Linear antenna attenuation in dB.
+
+    0 dB at 0° off-boresight (pointing at transmitter).
+    -max_attenuation_db at 180° (pointing directly away).
+    Linear interpolation in between.
+    """
     off = min(180.0, abs(_normalize_angle_deg(off_boresight_deg)))
-    half_power_angle = max(1.0, hpbw_deg / 2.0)
-    cos_at_half = max(1e-6, math.cos(math.radians(half_power_angle)))
-    exponent = math.log(0.5) / math.log(cos_at_half)
-    front_lobe = max(0.0, math.cos(math.radians(off))) ** exponent
-    back_floor = 10.0 ** (-abs(front_to_back_db) / 10.0)
-    gain_linear = back_floor + (1.0 - back_floor) * front_lobe
-    return 10.0 * math.log10(max(1e-9, gain_linear))
+    return -max_attenuation_db * (off / 180.0)
 
 
 def _start_telemetry_subscriber(cfg: SimConfig, telem_state: DirectionalTelemetryState) -> tuple[threading.Event, threading.Thread] | tuple[None, None]:
@@ -369,16 +368,14 @@ def generate_packet(
                     tx_lon_deg,
                 )
                 off_boresight = _normalize_angle_deg(bearing_to_tx - vehicle_yaw_deg)
-                antenna_gain_db = _ra2ahs_relative_gain_db(
-                    off_boresight,
-                    cfg.ra2ahs_hpbw_deg,
-                    cfg.ra2ahs_front_to_back_db,
+                attenuation_db = _antenna_attenuation_db(
+                    off_boresight, cfg.antenna_max_attenuation_db
                 )
                 effective_snr_db = snr_at_distance(
                     tag.snr_db,
                     max(1.0, distance_m),
                     ref_distance_m=max(1.0, cfg.tx_offset_north_m),
-                ) + antenna_gain_db
+                ) + attenuation_db
 
         # Amplitude from SNR: snr_linear = (amp^2) / (noise_sigma^2)
         snr_linear = 10.0 ** (effective_snr_db / 10.0)
@@ -633,10 +630,8 @@ Examples:
                     help="Telemetry topic prefix (default: vehicle_pose)")
     p.add_argument("--tx-offset-north-m", type=float, default=4000.0,
                     help="Fixed transmitter offset north of first vehicle pose (default: 4000m)")
-    p.add_argument("--ra2ahs-hpbw-deg", type=float, default=100.0,
-                    help="RA-2AHS horizontal half-power beamwidth in degrees (default: 100)")
-    p.add_argument("--ra2ahs-front-to-back-db", type=float, default=12.0,
-                    help="RA-2AHS front-to-back ratio in dB (default: 12)")
+    p.add_argument("--antenna-max-attenuation-db", type=float, default=40.0,
+                    help="Max antenna attenuation in dB when pointing directly away (default: 40)")
 
     args = p.parse_args()
 
@@ -686,8 +681,7 @@ Examples:
     cfg.telemetry_sub_endpoint = args.telemetry_sub_endpoint
     cfg.telemetry_topic = args.telemetry_topic
     cfg.tx_offset_north_m = args.tx_offset_north_m
-    cfg.ra2ahs_hpbw_deg = args.ra2ahs_hpbw_deg
-    cfg.ra2ahs_front_to_back_db = args.ra2ahs_front_to_back_db
+    cfg.antenna_max_attenuation_db = args.antenna_max_attenuation_db
 
     # Build tags from CLI if --freq-offset-hz was given
     if args.freq_offset_hz is not None:
