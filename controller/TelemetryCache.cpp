@@ -69,7 +69,7 @@ void TelemetryCache::_pruneTelemetryCache()
     auto    nowMSecs            = std::chrono::duration_cast<std::chrono::milliseconds>(timeSince).count();
     double  nowSecs             = nowMSecs / 1000.0;
     double  maxIntraPulseSecs   = 5.0;
-    double  maxK                = 3.0;
+    double  maxK                = 5.0;
     double  pruneBeforeSecs     = nowSecs - (((maxK + 1) * maxIntraPulseSecs) * 2);
 
     while (_telemetryCache.size() > 0) {
