@@ -156,16 +156,19 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     std::string repoDir     = formatString("%s/repos/MavlinkTagController2", _homePath);
     std::string venvPython  = formatString("%s/.venv/bin/python3", repoDir.c_str());
     std::string pythonCmd   = (access(venvPython.c_str(), X_OK) == 0) ? venvPython : std::string("python3");
+    std::string cacheDir    = std::string(_homePath);
 
     std::string commandStr  = formatString("\"%s\" -u \"%s/detector/pulse_detector.py\""
                                            " --tp %f --tip %f --fs %d --port %d"
                                            " --tag-id %d --freq %u --pulse-port %d"
-                                           " --center-freq %f",
+                                           " --center-freq %f --pf %f"
+                                           " --threshold-cache-dir \"%s\"",
                                 pythonCmd.c_str(),
                                 repoDir.c_str(),
                                 tp, tip, sampleRate, portData,
                                 tagId, tagInfo.frequency_hz, kPulseUdpPort,
-                                centerFreqMhz);
+                                centerFreqMhz, tagInfo.false_alarm_probability,
+                                cacheDir.c_str());
 
     std::string root    = formatString("py_detector_%d", tagId);
     std::string logPath = logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "log");

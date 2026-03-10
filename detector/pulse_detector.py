@@ -26,6 +26,7 @@ Examples:
 
 import argparse
 import datetime
+import os
 import signal
 import socket
 import struct
@@ -269,8 +270,10 @@ def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
         n_trials:        Number of Monte Carlo noise trials
 
     Returns:
-        threshold: Detection threshold (scalar, normalised to unit-variance
-                   complex Gaussian noise)
+        (threshold, mu, sigma) where:
+          threshold: Detection threshold (scalar, normalised to 1W/bin)
+          mu:        Gumbel location parameter (or None if fit failed)
+          sigma:     Gumbel scale parameter (or None if fit failed)
     """
     max_scores = []
 
@@ -294,10 +297,17 @@ def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
                      + np.arange(K)[None, :] * N)
 
         fold_scores = np.sum(power[:, pulse_idx], axis=2)
-        max_scores.append(np.max(fold_scores))
+
+        # Normalize to 1W/bin reference: divide by median per-bin noise power.
+        # This matches uavrt_detection's medPowAllFreqBins=1 calibration so
+        # that base_threshold × noise_power gives the correct per-bin threshold.
+        noise_per_bin = np.mean(power, axis=1)
+        med_noise = np.median(noise_per_bin)
+        if med_noise > 0:
+            max_scores.append(np.max(fold_scores) / med_noise)
 
     if len(max_scores) < 10:
-        return np.inf
+        return np.inf, None, None
 
     max_scores = np.array(max_scores)
 
@@ -313,12 +323,53 @@ def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
                   f'max={np.max(max_scores):.4e}  mean={np.mean(max_scores):.4e}')
             print(f'[DEBUG EVT] Gumbel fit: loc={loc:.4e}  scale={scale:.4e}  '
                   f'threshold(pf={pf:.0e})={threshold:.4e}')
+        return max(threshold, 0.0), loc, scale
     except Exception:
         threshold = np.percentile(max_scores, 100.0 * (1.0 - pf))
         if debug:
             print(f'[DEBUG EVT] Gumbel fit failed, using percentile: {threshold:.4e}')
+        return max(threshold, 0.0), None, None
 
-    return max(threshold, 0.0)
+
+# ---------------------------------------------------------------------------
+# EVT threshold disk cache (matches uavrt_detection file naming convention)
+# ---------------------------------------------------------------------------
+
+def _evt_cache_path(cache_dir, N, K, n_trials=100):
+    """Build cache filename: N<val>-M0.000000-J0.000000-K<val>-Trials<n>.pythreshold"""
+    return os.path.join(cache_dir,
+                        f'N{float(N):.6f}-M0.000000-J0.000000-K{float(K):.6f}'
+                        f'-Trials{n_trials}.pythreshold')
+
+
+def load_evt_cache(cache_dir, N, K, n_trials=100):
+    """Load Gumbel mu/sigma from disk. Returns (mu, sigma) or (None, None)."""
+    if not cache_dir:
+        return None, None
+    path = _evt_cache_path(cache_dir, N, K, n_trials)
+    try:
+        with open(path, 'r') as f:
+            values = [float(line.strip()) for line in f if line.strip()]
+        if len(values) >= 2:
+            return values[0], values[1]
+    except (OSError, ValueError):
+        pass
+    return None, None
+
+
+def save_evt_cache(cache_dir, N, K, mu, sigma, n_trials=100):
+    """Save Gumbel mu/sigma to disk cache."""
+    if not cache_dir or mu is None or sigma is None:
+        return
+    os.makedirs(cache_dir, exist_ok=True)
+    path = _evt_cache_path(cache_dir, N, K, n_trials)
+    try:
+        with open(path, 'w') as f:
+            f.write(f'{mu:.15e}\n')
+            f.write(f'{sigma:.15e}\n')
+        print(f'  [Saved EVT cache: {path}]', flush=True)
+    except OSError as e:
+        print(f'WARNING: Failed to write EVT cache {path}: {e}', flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -405,19 +456,27 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
               f'({100.0*n_outlier/n_total:.1f}%) masked  |  '
               f'{n_all_masked_bins} freq bins fully masked')
 
-    # EVT threshold (Monte Carlo-derived, cached)
+    # EVT threshold (Monte Carlo-derived, cached in-memory and optionally on disk)
     # Generate or retrieve from cache
     if evt_threshold_cache.get('threshold') is None:
-        print('  [Generating EVT threshold via 100 noise trials...]', flush=True)
-        base_threshold = generate_evt_threshold(
-            n_w, n_ol, nfft, samples_needed, N, K, pf, W=W, n_trials=100,
-            debug=debug
-        )
-        if np.isinf(base_threshold):
-            print(f'ERROR: Insufficient data for EVT threshold. '
-                  f'Segment length ({n_time} samples) too short for K={K} folds.',
-                  flush=True)
-            return [], float('nan')
+        cache_dir = evt_threshold_cache.get('cache_dir')
+        mu, sigma = load_evt_cache(cache_dir, N, K)
+        if mu is not None and sigma is not None and np.isfinite(mu) and np.isfinite(sigma) and sigma > 0:
+            base_threshold = max(gumbel_r.ppf(1.0 - pf, loc=mu, scale=sigma), 0.0)
+            print(f'  [Loaded EVT cache: mu={mu:.4e}, sigma={sigma:.4e}, '
+                  f'threshold={base_threshold:.4e}]', flush=True)
+        else:
+            print('  [Generating EVT threshold via 100 noise trials...]', flush=True)
+            base_threshold, mu, sigma = generate_evt_threshold(
+                n_w, n_ol, nfft, samples_needed, N, K, pf, W=W, n_trials=100,
+                debug=debug
+            )
+            if np.isinf(base_threshold):
+                print(f'ERROR: Insufficient data for EVT threshold. '
+                      f'Segment length ({n_time} samples) too short for K={K} folds.',
+                      flush=True)
+                return [], float('nan')
+            save_evt_cache(cache_dir, N, K, mu, sigma)
         evt_threshold_cache['threshold'] = base_threshold
     else:
         base_threshold = evt_threshold_cache['threshold']
@@ -523,6 +582,8 @@ def main():
                     help='Absolute tag frequency in Hz for pulse reports (default: 0)')
     ap.add_argument('--pulse-port', type=int, default=0,
                     help='UDP port to send detected pulses to (0 = disabled)')
+    ap.add_argument('--threshold-cache-dir', type=str, default=None,
+                    help='Directory for EVT threshold cache files (default: no disk cache)')
     args = ap.parse_args()
 
     # --- Validate parameters ---
@@ -591,6 +652,8 @@ def main():
     print(f'  UDP port        {args.port}')
     if args.center_freq > 0:
         print(f'  Center freq     {args.center_freq:.6f} MHz')
+    if args.threshold_cache_dir:
+        print(f'  EVT cache dir   {args.threshold_cache_dir}')
     print()
 
     # --- UDP socket ---
@@ -652,6 +715,8 @@ def main():
 
     # EVT threshold cache (regenerated if geometry changes)
     evt_threshold_cache = {}
+    if args.threshold_cache_dir:
+        evt_threshold_cache['cache_dir'] = args.threshold_cache_dir
 
     # Start a dedicated heartbeat thread (pure timer, 1 Hz)
     heartbeat_stop = threading.Event()
