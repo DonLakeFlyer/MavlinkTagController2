@@ -122,18 +122,17 @@ std::list<std::string> LogFileManager::_listLogFileDirs()
 {
     std::list<std::string> logDirs;
 
-    logDebug() << "Listing log directories in " << _homeDir;
-
     fs::directory_iterator end_itr;
     for (fs::directory_iterator itr(_homeDir); itr != end_itr; ++itr) {
         if (fs::is_directory(itr->status())) {
-            logDebug() << "Found directory: " << itr->path().filename().string();
             std::string dirName = itr->path().filename().string();
             if (dirName.find(_logsDirPrefix) == 0) {
                 logDirs.push_back(dirName);
             }
         }
     }
+
+    logDebug() << "Found " << logDirs.size() << " log directories in " << _homeDir;
 
     return logDirs;
 }
@@ -235,4 +234,97 @@ void LogFileManager::cleanLocalLogs()
     }
 
     logInfo() << "Local logs deleted";
+}
+
+unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double targetFreePercent, unsigned int minKeepDirs)
+{
+    // Check free space on the filesystem containing the home directory
+    std::error_code ec;
+    auto spaceInfo = fs::space(_homeDir, ec);
+    if (ec || spaceInfo.capacity == 0) {
+        logWarn() << "LogRetention: unable to query disk space: " << ec.message();
+        return 0;
+    }
+
+    double freePercent = 100.0 * static_cast<double>(spaceInfo.available) / static_cast<double>(spaceInfo.capacity);
+    double totalGB     = static_cast<double>(spaceInfo.capacity) / (1024.0 * 1024.0 * 1024.0);
+    double freeGB      = static_cast<double>(spaceInfo.available) / (1024.0 * 1024.0 * 1024.0);
+
+    logInfo() << "LogRetention: disk " << std::fixed << std::setprecision(1)
+              << freeGB << " GB free / " << totalGB << " GB total (" << freePercent << "%)";
+
+    if (freePercent >= minFreePercent) {
+        logInfo() << "LogRetention: free space " << std::fixed << std::setprecision(1)
+                  << freePercent << "% >= " << minFreePercent << "% threshold, no cleanup needed";
+        return 0;
+    }
+
+    logWarn() << "LogRetention: free space " << std::fixed << std::setprecision(1)
+              << freePercent << "% < " << minFreePercent << "% threshold, starting cleanup";
+
+    // Get log directories sorted oldest-first by timestamp suffix.
+    // Names are e.g. "Logs-Detectors-2026-03-10_14-30-22" and
+    // "Logs-RawCapture-2026-03-09_08-00-00".  A plain lexicographic sort
+    // would interleave by prefix ("Detectors" < "RawCapture"), so we sort
+    // by the trailing YYYY-MM-DD_HH-MM-SS timestamp instead.
+    auto logDirs = _listLogFileDirs();
+    logDirs.sort([](const std::string& a, const std::string& b) {
+        // Timestamp suffix is always the last 19 characters (YYYY-MM-DD_HH-MM-SS)
+        const size_t tsLen = 19;  // strlen("2026-03-10_14-30-22")
+        std::string tsA = a.size() >= tsLen ? a.substr(a.size() - tsLen) : a;
+        std::string tsB = b.size() >= tsLen ? b.substr(b.size() - tsLen) : b;
+        return tsA < tsB;
+    });
+
+    unsigned int removed = 0;
+
+    while (!logDirs.empty() && logDirs.size() > minKeepDirs) {
+        // Re-check free space after each deletion
+        spaceInfo = fs::space(_homeDir, ec);
+        if (ec || spaceInfo.capacity == 0) {
+            break;
+        }
+        freePercent = 100.0 * static_cast<double>(spaceInfo.available) / static_cast<double>(spaceInfo.capacity);
+
+        if (freePercent >= targetFreePercent) {
+            logInfo() << "LogRetention: free space recovered to " << std::fixed << std::setprecision(1)
+                      << freePercent << "%, stopping cleanup";
+            break;
+        }
+
+        // Skip if this is the currently active detector or raw-capture directory
+        fs::path dirPath = _homeDir + "/" + logDirs.front();
+        if (dirPath.string() == _logDirDetectors || dirPath.string() == _logDirRawCapture) {
+            logDirs.pop_front();
+            continue;
+        }
+
+        logInfo() << "LogRetention: removing " << logDirs.front()
+                  << " (free space " << std::fixed << std::setprecision(1)
+                  << freePercent << "% < target " << targetFreePercent << "%)";
+
+        std::error_code removeEc;
+        fs::remove_all(dirPath, removeEc);
+        if (removeEc) {
+            logError() << "LogRetention: failed to remove " << dirPath << ": " << removeEc.message();
+            break;  // Don't loop on a broken directory
+        }
+
+        logDirs.pop_front();
+        removed++;
+    }
+
+    if (removed > 0) {
+        spaceInfo = fs::space(_homeDir, ec);
+        freePercent = (ec || spaceInfo.capacity == 0) ? 0.0
+                      : 100.0 * static_cast<double>(spaceInfo.available) / static_cast<double>(spaceInfo.capacity);
+        logInfo() << "LogRetention: pruned " << removed << " old log directories, free space now "
+                  << std::fixed << std::setprecision(1) << freePercent << "%";
+    } else if (freePercent < minFreePercent) {
+        logWarn() << "LogRetention: disk still under pressure (" << std::fixed << std::setprecision(1)
+                  << freePercent << "%) but only " << logDirs.size()
+                  << " log dirs remain (min keep: " << minKeepDirs << ")";
+    }
+
+    return removed;
 }

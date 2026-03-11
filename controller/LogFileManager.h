@@ -22,6 +22,13 @@ public:
 	void saveLogsToSDCard();
 	void cleanLocalLogs();
 
+	/// Check disk free space and prune oldest log directories if below threshold.
+	/// @param minFreePercent  Trigger cleanup when free space falls below this (default 25%)
+	/// @param targetFreePercent  Keep deleting until free space reaches this (default 30%)
+	/// @param minKeepDirs  Always keep at least this many log directories (default 5)
+	/// @return Number of directories removed
+	unsigned int pruneOnDiskPressure(double minFreePercent = 25.0, double targetFreePercent = 30.0, unsigned int minKeepDirs = 5);
+
 	std::string filename	(LogType_t logType, const char* root, const char* extension);
 	std::string logDir		(LogType_t logType) const;
 

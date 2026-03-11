@@ -8,6 +8,7 @@
 #include "PulseHandler.h"
 #include "SimulatorTelemetryPublisher.h"
 #include "formatString.h"
+#include "LogFileManager.h"
 
 #include <chrono>
 #include <cstdint>
@@ -27,6 +28,9 @@ int main(int argc, char** argv)
 	setbuf(stdout, NULL); // Disable stdout buffering
 
 	logDebug() << "**************** MavlinkTagController starting... ****************";
+
+	// Prune old log directories if disk space is low (< 25% free)
+	LogFileManager::instance()->pruneOnDiskPressure();
 
     // Check that TunnelProtocol hasn't exceed limits
     static_assert(TunnelProtocolValidateSizes, "TunnelProtocolValidateSizes failed");
