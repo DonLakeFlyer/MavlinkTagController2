@@ -526,8 +526,12 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         snr_db = 10.0 * np.log10(best_scores[b] / noise_power[b])
         # Raw fold score for the stft_score field (proportional to pulse PSD)
         stft_score = float(best_scores[b] / psd_scale)
+        # Score-to-threshold ratio: how far above threshold this detection is.
+        # Values near 1.0 are marginal (likely false alarm); >>1 is confident.
+        score_ratio = float(best_scores[b] / max(threshold[b], 1e-30))
         results.append((freq_axis[b], snr_db, int(best_offsets[b]),
-                         float(noise_power[b] / psd_scale), stft_score))
+                         float(noise_power[b] / psd_scale), stft_score,
+                         score_ratio))
 
     results.sort(key=lambda x: -x[1])
 
@@ -538,11 +542,11 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     min_sep = max(15, nfft // 4)
     merged = []
     used_bins = []
-    for freq_hz, snr_db, offset, noise_psd, stft_score in results:
+    for freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio in results:
         b = int(np.argmin(np.abs(freq_axis - freq_hz)))
         if any(abs(b - ub) <= min_sep for ub in used_bins):
             continue
-        merged.append((freq_hz, snr_db, offset, noise_psd, stft_score))
+        merged.append((freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio))
         used_bins.append(b)
         # Report only the strongest detection
         if len(merged) >= 1:
@@ -570,8 +574,8 @@ def main():
                     help='Decimated sample rate in Hz (default: 3840)')
     ap.add_argument('--port', type=int, default=10000,
                     help='UDP port for decimated IQ (default: 10000)')
-    ap.add_argument('--pf',  type=float, default=1e-4,
-                    help='False-alarm probability per cycle via EVT (default: 1e-4)')
+    ap.add_argument('--pf',  type=float, default=5e-2,
+                    help='False-alarm probability per cycle via EVT (default: 5e-2)')
     ap.add_argument('--center-freq', type=float, default=0.0,
                     help='Channel center frequency in MHz (display only)')
     ap.add_argument('--debug', action='store_true', default=False,
@@ -906,7 +910,17 @@ def main():
                 if current_ts is not None:
                     last_detection_ts = current_ts
 
-                for freq_hz, snr_db, offset, noise_psd, stft_score in detections:
+                # Score/threshold ratio < 2.0 indicates a marginal detection
+                # that is more likely to be a false alarm.  Report these as
+                # SUBTHRESHOLD so the GCS can display them differently.
+                CONFIDENCE_RATIO = 2.0
+
+                for freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio in detections:
+                    is_marginal = score_ratio < CONFIDENCE_RATIO
+                    det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
+                                  else DETECTION_STATUS_SUPERTHRESHOLD)
+                    confidence_flag = '  [LOW]' if is_marginal else ''
+
                     # Send pulse to controller via UDP if configured
                     if pulse_sock is not None:
                         start_time_s = current_ts / 1e9 if current_ts else time.time()
@@ -924,8 +938,8 @@ def main():
                             group_seq_counter=cycle,
                             group_ind=0,
                             group_snr=snr_db,
-                            detection_status=DETECTION_STATUS_SUPERTHRESHOLD,
-                            confirmed_status=1,
+                            detection_status=det_status,
+                            confirmed_status=1 if not is_marginal else 0,
                             noise_psd=noise_psd,
                         )
 
@@ -936,13 +950,13 @@ def main():
                               f'({freq_hz:+.1f} Hz)  '
                               f'SNR {snr_db:.1f} dB  '
                               f'noise {noise_psd:.3e}  '
-                              f'{proc_ms:.0f} ms{delta_str}{gap_flag}')
+                              f'{proc_ms:.0f} ms{delta_str}{gap_flag}{confidence_flag}')
                     else:
                         print(f'[{cycle:4d} {ts_str}]  DETECTED  '
                               f'{freq_hz:+.1f} Hz  '
                               f'SNR {snr_db:.1f} dB  '
                               f'noise {noise_psd:.3e}  '
-                              f'{proc_ms:.0f} ms{delta_str}{gap_flag}')
+                              f'{proc_ms:.0f} ms{delta_str}{gap_flag}{confidence_flag}')
             else:
                 # Send a no-detection report so the controller/GCS knows
                 # we searched this cycle and found nothing.  Uses
