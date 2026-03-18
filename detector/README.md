@@ -208,19 +208,24 @@ GAP < THRESHOLD: 15.3 ms (< 30.0 ms) - zero-filling 59 samples
 | `--tp` | `0.015` | Pulse duration (seconds) |
 | `--fs` | `3840.0` | Decimated sample rate (Hz) |
 | `--port` | `10000` | UDP port for IQ data |
-| `--pf` | `1e-4` | False-alarm probability (per cycle) |
+| `--pf` | `5e-2` | False-alarm probability (per cycle) |
 | `--center-freq` | `0.0` | Channel center freq (MHz, display only) |
 
 ### False Alarm Probability (P<sub>f</sub>)
 
-The `--pf` parameter controls detection sensitivity:
+The `--pf` parameter controls detection sensitivity. This system is designed for detecting weak tags at the edge of range (beyond omni antenna + handheld radio detection), so defaults favor maximum sensitivity.
 
-- **1e-4** (default): ~0.5 false alarms/hour at 20s cycles
-- **1e-5**: Conservative, 1 FA every 10 hours
-- **1e-6**: Very conservative, 1 FA every 100 hours
-- **1e-3**: Aggressive, 5 FA/hour (use for very weak signals)
+Three operational presets (matching TagTracker QGC dropdown):
 
-**Trade-off:** Lower P<sub>f</sub> reduces false alarms but increases risk of missing weak tags.
+| Preset | P<sub>f</sub> | `--pf` value | FA per rotation (8 headings) | Use case |
+|--------|-------------|-------------|------------------------------|----------|
+| **Aggressive** | 5% | `5e-2` | ~34% chance of ≥1 false dot | Maximum range, weak tags (default) |
+| **Moderate** | 1% | `1e-2` | ~8% chance of ≥1 false dot | Good balance for most flights |
+| **Conservative** | 0.1% | `1e-3` | ~0.8% chance of ≥1 false dot | Cleaner display, slight range loss |
+
+Marginal detections (score < 2× threshold) are flagged as `[LOW]` in console output and sent as `SUBTHRESHOLD` to the GCS, helping operators distinguish possible false alarms from confident detections.
+
+**Trade-off:** Lower P<sub>f</sub> reduces false alarms but increases risk of missing weak tags at range.
 
 ## Usage Examples
 
@@ -363,14 +368,14 @@ At 3840 Hz decimated rate with default parameters:
 
 ### False Alarm Rate
 
-With `--pf 1e-4` and ~10-second cycles (K=5, tip=2.0s):
+With `--pf 5e-2` (default, Aggressive) and ~10-second cycles (K=5, tip=2.0s):
 
 ```
-FA_rate = (3600 s/hour) / (10 s/cycle) × 1e-4 = 0.036 FA/hour
-        ≈ 1 false alarm every 28 hours
+FA_rate = (3600 s/hour) / (10 s/cycle) × 5e-2 = 18 FA/hour
+FA_per_rotation = 1 - (1 - 5e-2)^8 = ~34% chance of ≥1 false dot per rotation
 ```
 
-Actual rate may be higher in non-Gaussian noise environments (power lines, urban RF).
+In practice, false alarms are marginal detections near threshold (low SNR) and flagged as `[LOW]`/`SUBTHRESHOLD`, making them easy to distinguish from real tags which show consistent frequency and SNR patterns across multiple headings.
 
 ## Troubleshooting
 
