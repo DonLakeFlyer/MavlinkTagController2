@@ -131,6 +131,45 @@ This matches uavrt_detection's convention: the fold score naturally scales with 
 
 > **Note:** The denominator is the single-window noise estimate, *not* `K × noise_power`. This means the reported SNR includes the integration gain and is directly comparable to uavrt_detection's output.
 
+## Controller Reporting Protocol
+
+Every detection cycle the detector sends a UDP packet to the controller (UDPPulseInfo_T format, 12 little-endian doubles). The `detection_status` and `confirmed_status` fields tell the controller and GCS what happened:
+
+### Detection Status Values
+
+Defined in `TunnelProtocol.h` and mirrored in the detector:
+
+| Value | Name | Meaning |
+|-------|------|------|
+| `0` | SUBTHRESHOLD | Marginal detection (fold score < 2× threshold) |
+| `1` | SUPERTHRESHOLD | Confident detection (fold score ≥ 2× threshold) |
+| `2` | CONFIRMED | Reserved for stateful detectors (uavrt_detection); **never sent by pulse_detector.py** |
+| `3` | NO_DETECTION | Detector searched this cycle and found nothing |
+
+### Confirmed Status
+
+Binary (0 or 1). Since the Python detector is stateless (no cross-cycle confirmation), it uses the confidence ratio as a proxy:
+
+- `confirmed_status=1` — confident detection (score ≥ 2× threshold)
+- `confirmed_status=0` — everything else (marginal, no detection, heartbeat)
+
+The controller logs `confirmed_status=1` pulses at Info level and `confirmed_status=0` at Debug level. Both are forwarded to the GCS.
+
+### Per-Cycle Report Types
+
+| Scenario | `detection_status` | `confirmed_status` | Key fields |
+|----------|-------------------|--------------------|-----------|
+| **Strong detection** (score ≥ 2× threshold) | `1` (SUPERTHRESHOLD) | `1` | frequency, SNR, noise_psd, stft_score |
+| **Marginal detection** (score < 2× threshold) | `0` (SUBTHRESHOLD) | `0` | frequency, SNR, noise_psd, stft_score |
+| **No detection** | `3` (NO_DETECTION) | `0` | noise_psd, start_time (no frequency/SNR) |
+| **Heartbeat** (periodic keepalive) | `0` | `0` | frequency_hz=0 (controller recognises as heartbeat) |
+
+### No-Detection Reports
+
+When a cycle completes without finding a pulse above threshold, the detector sends a `detection_status=3` report carrying the observed `noise_psd`. This serves as a "rich heartbeat" — the GCS knows the detector is alive, actively searching, and can display the current noise floor. The controller forwards these to the GCS at debug log level.
+
+This is a Python detector addition; the uavrt_detection MATLAB/C++ detector does not send no-detection reports.
+
 ## Gap Handling (Conservative Strategy)
 
 The detector monitors timestamp continuity between UDP packets to detect data loss.
@@ -269,6 +308,11 @@ This script automatically starts:
 [   1 18:51:43]  DETECTED  -231.7 Hz  SNR 76.1 dB  11 ms  Δt=10.000s
 ```
 
+**Marginal detection (low confidence):**
+```
+[   1 18:51:43]  DETECTED  145.999768 MHz  (-231.7 Hz)  SNR 12.3 dB  10 ms  Δt=10.000s  [LOW]
+```
+
 **No detection:**
 ```
 [   1 18:51:43]  no detection  11 ms
@@ -289,6 +333,7 @@ This script automatically starts:
 | `SNR dB` | Signal-to-noise ratio after K-fold integration |
 | `proc_ms` | Processing time for this cycle |
 | `Δt` | Time since previous detection (cycle-to-cycle) |
+| `[LOW]` | Marginal detection (score < 2× threshold); sent as SUBTHRESHOLD/unconfirmed to GCS |
 | `[ZEROFILLED]` | Flag indicating segment had medium gaps |
 
 ### Interpreting Δt (Inter-Detection Time)
