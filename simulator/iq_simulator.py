@@ -368,14 +368,21 @@ def generate_packet(
                     tx_lon_deg,
                 )
                 off_boresight = _normalize_angle_deg(bearing_to_tx - vehicle_yaw_deg)
-                attenuation_db = _antenna_attenuation_db(
-                    off_boresight, cfg.antenna_max_attenuation_db
-                )
-                effective_snr_db = snr_at_distance(
-                    tag.snr_db,
-                    max(1.0, distance_m),
-                    ref_distance_m=max(1.0, cfg.tx_offset_north_m),
-                ) + attenuation_db
+
+                # Within 45° of pointing directly away: weaken signal to a
+                # fixed sub-threshold level so the detector produces only
+                # unconfirmed (confirmed=0) pulses rather than no detection.
+                if abs(off_boresight) > 135.0:
+                    effective_snr_db = 3.0
+                else:
+                    attenuation_db = _antenna_attenuation_db(
+                        off_boresight, cfg.antenna_max_attenuation_db
+                    )
+                    effective_snr_db = snr_at_distance(
+                        tag.snr_db,
+                        max(1.0, distance_m),
+                        ref_distance_m=max(1.0, cfg.tx_offset_north_m),
+                    ) + attenuation_db
 
         # Amplitude from SNR: snr_linear = (amp^2) / (noise_sigma^2)
         snr_linear = 10.0 ** (effective_snr_db / 10.0)

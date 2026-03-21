@@ -14,7 +14,7 @@ class TelemetryCache;
 class PulseHandler
 {
 public:
-	PulseHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache);
+	PulseHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode = false);
 	~PulseHandler();
 
 	// Enough for MTU 1500 bytes.
@@ -36,6 +36,9 @@ public:
 	void handlePulse(const UDPPulseInfo_T& udpPulseInfo);
 
 private:
+	static constexpr float kBackSectorMinDeg = 165.0f;
+
     MavlinkSystem*	_mavlink 		= nullptr;
 	TelemetryCache*	_telemetryCache	= nullptr;
+	bool			_simulatorMode	= false;
 };

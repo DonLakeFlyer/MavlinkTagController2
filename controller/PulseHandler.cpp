@@ -25,9 +25,10 @@ static constexpr uint8_t DETECTION_STATUS_NO_DETECTION = 3;
 using namespace TunnelProtocol;
 
 
-PulseHandler::PulseHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache)
+PulseHandler::PulseHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode)
     : _mavlink          (mavlink)
     , _telemetryCache   (telemetryCache)
+    , _simulatorMode    (simulatorMode)
 {
 
 }
@@ -77,6 +78,20 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
         pulseInfo.orientation_y                 = telemetry.attitudeEuler.pitchDegrees;
         pulseInfo.orientation_z                 = telemetry.attitudeEuler.yawDegrees;
         pulseInfo.noise_psd                     = udpPulseInfo.noise_psd;
+
+        // Simulator hack: when pointing within 45° of directly away from
+        // the transmitter (assumed due north), force unconfirmed with low SNR.
+        if (_simulatorMode) {
+            float yaw = telemetry.attitudeEuler.yawDegrees;
+            // Normalize yaw-180 into [-180,180]
+            float offBack = std::fmod(yaw - 180.0f + 540.0f, 360.0f) - 180.0f;
+            if (std::fabs(offBack) < (180.0f - kBackSectorMinDeg)) {
+                pulseInfo.confirmed_status = 0;
+                pulseInfo.snr = 20.0;
+                pulseInfo.group_snr = 20.0;
+                pulseInfo.detection_status = 0; // subthreshold
+            }
+        }
 
         std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f stft_score: %5.1g noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
                                         pulseInfo.confirmed_status,

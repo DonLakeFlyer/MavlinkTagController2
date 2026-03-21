@@ -611,6 +611,17 @@ void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
     case COMMAND_ID_CLEAN_LOGS:
         success = _handleCleanLogs();
         break;
+    case COMMAND_ID_AIRSPY_STATUS:
+        if (_simulatorMode) {
+            success = true;
+        } else {
+            std::string errorMessage = _checkForAirSpy();
+            success = errorMessage.empty();
+            if (!success) {
+                ackMessage = errorMessage;
+            }
+        }
+        break;
     }
 
     _sendCommandAck(headerInfo.command, success ? COMMAND_RESULT_SUCCESS : COMMAND_RESULT_FAILURE, ackMessage);
@@ -821,6 +832,9 @@ std::string CommandHandler::_tunnelCommandIdToString(uint32_t command)
         break;
     case COMMAND_ID_CLEAN_LOGS:
         commandStr = "CLEAN_LOGS";
+        break;
+    case COMMAND_ID_AIRSPY_STATUS:
+        commandStr = "AIRSPY_STATUS";
         break;
     }
 
