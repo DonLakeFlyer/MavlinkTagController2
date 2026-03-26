@@ -17,7 +17,7 @@ MavlinkSystem::MavlinkSystem()
 {
 	// Force all output to Mavlink V2
 	mavlink_status_t* mavlinkStatus = mavlink_get_channel_status(0);
-	mavlinkStatus->flags &= ~MAVLINK_STATUS_FLAG_OUT_MAVLINK1;	
+	mavlinkStatus->flags &= ~MAVLINK_STATUS_FLAG_OUT_MAVLINK1;
 }
 
 MavlinkSystem::~MavlinkSystem()
@@ -125,7 +125,7 @@ void MavlinkSystem::sendStatusText(std::string& text, MAV_SEVERITY severity)
 	logInfo() << "statustext:" << text;
 
 	mavlink_statustext_t statustext;
-	
+
 	memset(&statustext, 0, sizeof(statustext));
 	statustext.severity = severity;
 
@@ -165,7 +165,7 @@ void MavlinkSystem::sendTunnelMessage(void* tunnelPayload, size_t tunnelPayloadS
     sendMessage(message);
 }
 
-std::optional<uint8_t> MavlinkSystem::ourSystemId() const 
+std::optional<uint8_t> MavlinkSystem::ourSystemId() const
 {
 	if (_connection.get()) {
 		return _connection->autopilotSystemId();
@@ -174,7 +174,7 @@ std::optional<uint8_t> MavlinkSystem::ourSystemId() const
 	}
 }
 
-std::optional<uint8_t> MavlinkSystem::gcsSystemId() const 
+std::optional<uint8_t> MavlinkSystem::gcsSystemId() const
 {
 	if (_connection.get()) {
 		return _connection->gcsSystemId();
@@ -213,7 +213,7 @@ float MavlinkSystem::_cpuTemp()
 void MavlinkSystem::startTunnelHeartbeatSender()
 {
     std::thread heartbeatSenderThread([this]() {
-        int cpuWaitCount = 0;
+        int heartbeatCount = 0;
 
         while (true) {
             TunnelProtocol::Heartbeat_t heartbeat;
@@ -225,9 +225,9 @@ void MavlinkSystem::startTunnelHeartbeatSender()
 
             sendTunnelMessage(&heartbeat, sizeof(heartbeat));
 
-            if (cpuWaitCount-- <= 0) {
-                cpuWaitCount = 30;
-        		logInfo() << "CPU Temperature: " << _cpuTemp() << "°C";
+            if (++heartbeatCount >= 60) {
+        		logInfo() << "Sent" << heartbeatCount << "tunnel heartbeats, status:" << _heartbeatStatus << " cpu_temp:" << heartbeat.cpu_temp_c;
+                heartbeatCount = 0;
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));

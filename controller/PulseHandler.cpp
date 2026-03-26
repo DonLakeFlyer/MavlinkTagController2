@@ -93,7 +93,7 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
             }
         }
 
-        std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f stft_score: %5.1g noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+        std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f stft_score: %5.1g noise_psd: %5.1g freq: %9u seq: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
                                         pulseInfo.confirmed_status,
                                         pulseInfo.tag_id,
                                         pulseInfo.snr,
@@ -101,6 +101,7 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
                                         pulseInfo.stft_score,
                                         pulseInfo.noise_psd,
                                         pulseInfo.frequency_hz,
+                                        pulseInfo.group_seq_counter,
                                         telemetry.position.latitude,
                                         telemetry.position.longitude,
                                         telemetry.attitudeEuler.yawDegrees,
