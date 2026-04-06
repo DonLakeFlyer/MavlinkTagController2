@@ -149,7 +149,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     int     tagId                       = tagInfo.id + secondaryChannelIncrement;
     int     portData                    = isHFMode ? (10000 + secondaryChannelIncrement) : (20000 + ((tagInfo.channelizer_channel_number - 1) * 2) + secondaryChannelIncrement);
     int     sampleRate                  = isHFMode ? 3840 : 3750;
-    double  tip                         = (secondaryChannel ? tagInfo.intra_pulse2_msecs : tagInfo.intra_pulse1_msecs) / 1000.0;
+    double  tip                         = tagInfo.intra_pulse1_msecs / 1000.0;
     double  tp                          = tagInfo.pulse_width_msecs / 1000.0;
     double  centerFreqMhz              = double(tagInfo.channelizer_channel_center_frequency_hz) / 1000000.0;
 
@@ -169,6 +169,14 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                 tagId, tagInfo.frequency_hz, kPulseUdpPort,
                                 centerFreqMhz, tagInfo.false_alarm_probability,
                                 cacheDir.c_str());
+
+    // If the tag has a secondary PRI, pass it as --tip-secondary so the
+    // detector runs multi-hypothesis rate-switch detection in a single process
+    // instead of requiring a separate detector process for the second rate.
+    if (tagInfo.intra_pulse2_msecs != 0) {
+        double tipSecondary = tagInfo.intra_pulse2_msecs / 1000.0;
+        commandStr += formatString(" --tip-secondary %f --min-uniformity 0.25", tipSecondary);
+    }
 
     std::string root    = formatString("py_detector_%d", tagId);
     std::string logPath = logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "log");
@@ -369,10 +377,9 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
 
         for (const TunnelProtocol::TagInfo_t& tagInfo: _tagDatabase) {
             if (startDetection.detection_mode == DETECTION_MODE_PYTHON) {
+                // Python detector handles both rates in a single process via
+                // --tip-secondary, so only launch once per tag.
                 _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode);
-                if (tagInfo.intra_pulse2_msecs != 0) {
-                    _startPythonDetector(logFileManager, tagInfo, true /* secondaryChannel */, isHFMode);
-                }
             } else {
                 _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
                 if (tagInfo.intra_pulse2_msecs != 0) {
@@ -703,6 +710,10 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz) c
         double tip = tagInfo.intra_pulse1_msecs / 1000.0;
         tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
                                 freqOffsetHz, tp, tip);
+        if (tagInfo.intra_pulse2_msecs != 0) {
+            double tipSecondary = tagInfo.intra_pulse2_msecs / 1000.0;
+            tagArgs += formatString(" --tip-secondary %f --switch-time 15", tipSecondary);
+        }
     }
 
     return formatString("%s -u %s -P 5555%s",

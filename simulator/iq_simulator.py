@@ -70,12 +70,41 @@ class TagSignal:
     tp: float = 0.015                 # Pulse width in seconds
     tip: float = 2.0                  # Inter-pulse interval in seconds
     phase_offset: float = 0.0         # Initial pulse phase offset in seconds
+    tip_secondary: float | None = None  # Second PRI in seconds (None = no switch)
+    switch_time: float | None = None    # Sim-time in seconds to switch rate
 
     def pulse_on(self, t: np.ndarray) -> np.ndarray:
-        """Return a boolean mask: True where the pulse is active."""
-        # Time within the current pulse period
-        t_mod = (t - self.phase_offset) % self.tip
-        return t_mod < self.tp
+        """Return a boolean mask: True where the pulse is active.
+
+        When tip_secondary and switch_time are set, pulses before switch_time
+        fire at `tip` and pulses after switch_time fire at `tip_secondary`,
+        anchored to the last pre-switch pulse so there is no phase
+        discontinuity — matching real crystal-oscillator collar behavior.
+        """
+        if self.tip_secondary is None or self.switch_time is None:
+            t_mod = (t - self.phase_offset) % self.tip
+            return t_mod < self.tp
+
+        t_rel = t - self.phase_offset
+        switch_rel = self.switch_time - self.phase_offset
+
+        # Anchor: last pulse start at the old rate at or before the switch.
+        # When switch_time lands exactly on an old-rate pulse boundary,
+        # anchor equals switch_rel so that pulse fires and the post-switch
+        # schedule starts from it.
+        n_pre = max(0, int(switch_rel / self.tip))
+        anchor = n_pre * self.tip
+
+        pre = t_rel < switch_rel
+        post = ~pre
+
+        mask = np.zeros(len(t), dtype=bool)
+        if np.any(pre):
+            mask[pre] = (t_rel[pre] % self.tip) < self.tp
+        if np.any(post):
+            t_post = t_rel[post] - anchor
+            mask[post] = (t_post % self.tip_secondary) < self.tp
+        return mask
 
 
 @dataclass
@@ -148,6 +177,11 @@ PRESETS = {
         tags=[TagSignal(freq_offset_hz=0.0, snr_db=20.0, tp=0.015, tip=2.0)],
         gap_seconds=0.1,
         gap_interval=10.0,
+    ),
+    "rate-switch": SimConfig(
+        noise_power_dbfs=-40.0,
+        tags=[TagSignal(freq_offset_hz=0.0, snr_db=20.0, tp=0.015,
+                        tip=2.0, tip_secondary=1.5, switch_time=15.0)],
     ),
 }
 
@@ -430,10 +464,12 @@ def run(cfg: SimConfig) -> None:
           f"seed={cfg.seed}",
           file=sys.stderr)
     for i, tag in enumerate(cfg.tags):
-        print(f"iq_simulator: tag[{i}] freq_offset={tag.freq_offset_hz:+.1f} Hz "
-              f"snr={tag.snr_db:.1f} dB  tp={tag.tp*1000:.1f} ms  "
-              f"tip={tag.tip:.3f} s  phase_offset={tag.phase_offset:.3f} s",
-              file=sys.stderr)
+        tag_info = (f"iq_simulator: tag[{i}] freq_offset={tag.freq_offset_hz:+.1f} Hz "
+                    f"snr={tag.snr_db:.1f} dB  tp={tag.tp*1000:.1f} ms  "
+                    f"tip={tag.tip:.3f} s  phase_offset={tag.phase_offset:.3f} s")
+        if tag.tip_secondary is not None and tag.switch_time is not None:
+            tag_info += f"  tip2={tag.tip_secondary:.3f} s  switch@{tag.switch_time:.1f} s"
+        print(tag_info, file=sys.stderr)
 
     # Let subscribers connect
     time.sleep(0.5)
@@ -603,6 +639,13 @@ Examples:
                     help="Inter-pulse interval in seconds. Repeat for multiple tags.")
     p.add_argument("--phase-offset", type=float, action="append", default=None,
                     help="Pulse phase offset in seconds. Repeat for multiple tags.")
+    p.add_argument("--tip-secondary", type=float, action="append", default=None,
+                    help="Secondary inter-pulse interval in seconds. "
+                         "Tag switches from --tip to --tip-secondary at --switch-time. "
+                         "Repeat for multiple tags.")
+    p.add_argument("--switch-time", type=float, action="append", default=None,
+                    help="Sim-time in seconds when tag switches from --tip to "
+                         "--tip-secondary. Repeat for multiple tags.")
 
     # Distance model
     p.add_argument("--distance-m", type=float, default=0.0,
@@ -690,15 +733,25 @@ Examples:
         tps = _pad_list(args.tp, n_tags, 0.015)
         tips = _pad_list(args.tip, n_tags, 2.0)
         phases = _pad_list(args.phase_offset, n_tags, 0.0)
+        tips_secondary = _pad_list(args.tip_secondary, n_tags, None)
+        switch_times = _pad_list(args.switch_time, n_tags, None)
 
         cfg.tags = []
         for i in range(n_tags):
+            ts = tips_secondary[i]
+            sw = switch_times[i]
+            if (ts is None) != (sw is None):
+                p.error(f"Tag {i}: --tip-secondary and --switch-time must be "
+                        f"provided together (got tip-secondary={ts}, "
+                        f"switch-time={sw})")
             cfg.tags.append(TagSignal(
                 freq_offset_hz=args.freq_offset_hz[i],
                 snr_db=snrs[i],
                 tp=tps[i],
                 tip=tips[i],
                 phase_offset=phases[i],
+                tip_secondary=ts,
+                switch_time=sw,
             ))
 
     # Apply distance model to first tag
@@ -714,7 +767,7 @@ Examples:
     return cfg
 
 
-def _pad_list(lst: list | None, n: int, default: float) -> list:
+def _pad_list(lst: list | None, n: int, default: float | None) -> list:
     """Extend a list to length n, padding with the last value or default."""
     result = list(lst) if lst is not None else []
     while len(result) < n:
