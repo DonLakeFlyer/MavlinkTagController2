@@ -57,8 +57,16 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
         pulseInfo.confirmed_status  = 0;
         pulseInfo.noise_psd         = udpPulseInfo.noise_psd;
         pulseInfo.start_time_seconds = udpPulseInfo.start_time_seconds;
-        logDebug() << "NO DETECTION from Detector" << pulseInfo.tag_id
-                   << "noise_psd" << pulseInfo.noise_psd;
+
+        auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
+        logDebug() << formatString("NO DETECTION Id: %2u noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+                                   pulseInfo.tag_id,
+                                   pulseInfo.noise_psd,
+                                   pulseInfo.frequency_hz,
+                                   telemetry.position.latitude,
+                                   telemetry.position.longitude,
+                                   telemetry.attitudeEuler.yawDegrees,
+                                   telemetry.position.relativeAltitude);
     } else {
         auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
 

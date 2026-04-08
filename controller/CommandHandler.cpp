@@ -443,60 +443,107 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
         return "Raw capture not supported in simulator mode";
     }
 
-    if (_tagDatabase.size() == 0) {
-        logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: No tags configured";
-        return "No tags configured";
+    RawCaptureInfo_t rawCaptureCmd;
+    memcpy(&rawCaptureCmd, tunnel.payload, sizeof(rawCaptureCmd));
+
+    if (rawCaptureCmd.frequency_hz == 0 && _tagDatabase.size() == 0) {
+        logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: No frequency specified and no tags configured";
+        return "No frequency specified and no tags configured";
     }
 
-    std::thread([this, tunnel, deviceType]() {
-        RawCaptureInfo_t    rawCapture;
-        double              frequencyMhz = (double)_tagDatabase[0].frequency_hz / 1000000.0;
+    std::thread([this, rawCaptureCmd, deviceType]() {
+        RawCaptureInfo_t    rawCapture = rawCaptureCmd;
+        double              frequencyMhz = rawCapture.frequency_hz != 0
+                                            ? (double)rawCapture.frequency_hz / 1000000.0
+                                            : (double)_tagDatabase[0].frequency_hz / 1000000.0;
         auto                logFileManager = LogFileManager::instance();
 
         logFileManager->rawCaptureStarted();
         auto logDir = logFileManager->logDir(LogFileManager::RAW_CAPTURE);
 
-        memcpy(&rawCapture, tunnel.payload, sizeof(rawCapture));
-
         ++_rawCaptureCount;
 
         std::string commandStr;
         std::string captureLogPath;
+        std::string captureDataPath;
         std::string sdrPathStatus;
         std::string processName;
+        std::string sdrType;
+        int         sampleRate = 0;
+        int         gain = 0;
+        double      tuneFreqMhz = 0;
+        double      dcOffsetHz = 0;
 
-        const int sampleDurationSeconds = 8;
+        const int sampleDurationSeconds = 13;
         if (deviceType == AirSpyDeviceType::HF) {
             // AGC off, LNA on
-            const int sampleRate = 768000; // 768 ksps is the default sample rate for AirSpy HF
+            sampleRate = 768000; // 768 ksps is the default sample rate for AirSpy HF
             const int numSamples = sampleRate * sampleDurationSeconds;
+            dcOffsetHz = static_cast<double>(kAirSpyHfFrequencyOffsetHz);
+            tuneFreqMhz = frequencyMhz + (dcOffsetHz / 1000000.0);
             // Match start-detection tuning: capture 10 kHz above requested center to avoid the DC spike at baseband.
             // Post-processing can account for the same +10 kHz offset when interpreting frequency bins.
-            commandStr = formatString("%s/repos/MavlinkTagController2/build/airspyhf_zeromq/tools/src/airspyhf_zeromq_rx -r %s/airspy-hf.%d.dat -f %f -a 768000 -g off -m on -n %d",
+            captureDataPath = formatString("%s/airspy-hf.%d.dat", logDir.c_str(), _rawCaptureCount);
+            commandStr = formatString("%s/repos/MavlinkTagController2/build/airspyhf_zeromq/tools/src/airspyhf_zeromq_rx -r %s -f %f -a 768000 -g off -m on -n %d",
                                       _homePath,
-                                      logDir.c_str(),
-                                      _rawCaptureCount,
-                                      frequencyMhz + (static_cast<double>(kAirSpyHfFrequencyOffsetHz) / 1000000.0),
+                                      captureDataPath.c_str(),
+                                      tuneFreqMhz,
                                       numSamples);
             captureLogPath = formatString("%s/airspy-hf.%d.log", logDir.c_str(), _rawCaptureCount);
             sdrPathStatus = _sdrPathStatusText(deviceType, frequencyMhz);
             processName = "airspy-hf-capture";
+            sdrType = "airspy_hf";
             logInfo() << "COMMAND_ID_RAW_CAPTURE - using AirSpy HF ZeroMQ capture command";
         } else {
-            const int sampleRate = 3000000; // 3 Msps
+            sampleRate = 3000000; // 3 Msps
             const int numSamples = sampleRate * sampleDurationSeconds;
+            tuneFreqMhz = frequencyMhz;
+            gain = rawCapture.gain;
 
-            commandStr = formatString("%sairspy_rx -r %s/airspy-mini.%d.dat -f %f -a 3000000 -h %d -t 0 -n %d",
+            captureDataPath = formatString("%s/airspy-mini.%d.dat", logDir.c_str(), _rawCaptureCount);
+            commandStr = formatString("%sairspy_rx -r %s -f %f -a 3000000 -h %d -t 0 -n %d",
                                       _airspyPath.c_str(),
-                                      logDir.c_str(),
-                                      _rawCaptureCount,
-                                      frequencyMhz,
-                                      rawCapture.gain,
+                                      captureDataPath.c_str(),
+                                      tuneFreqMhz,
+                                      gain,
                                       numSamples);
             captureLogPath = formatString("%s/airspy-mini.%d.log", logDir.c_str(), _rawCaptureCount);
             sdrPathStatus = _sdrPathStatusText(deviceType, frequencyMhz);
             processName = "airspy-mini-capture";
+            sdrType = "airspy_mini";
             logInfo() << "COMMAND_ID_RAW_CAPTURE - using AirSpy Mini capture command";
+        }
+
+        // Write capture metadata JSON
+        {
+            auto now = std::chrono::system_clock::now();
+            auto epoch_s = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            std::time_t tt = std::chrono::system_clock::to_time_t(now);
+            char timeBuf[64];
+            std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&tt));
+
+            std::string metaPath = captureDataPath.substr(0, captureDataPath.size() - 4) + ".json";
+            std::ofstream metaFile(metaPath);
+            if (metaFile.is_open()) {
+                metaFile << "{\n";
+                metaFile << formatString("  \"sdr\": \"%s\",\n", sdrType.c_str());
+                metaFile << formatString("  \"requested_freq_mhz\": %.6f,\n", frequencyMhz);
+                metaFile << formatString("  \"tune_freq_mhz\": %.6f,\n", tuneFreqMhz);
+                metaFile << formatString("  \"dc_offset_hz\": %.0f,\n", dcOffsetHz);
+                metaFile << formatString("  \"sample_rate_hz\": %d,\n", sampleRate);
+                metaFile << formatString("  \"bandwidth_hz\": %d,\n", sampleRate);
+                metaFile << formatString("  \"duration_seconds\": %d,\n", sampleDurationSeconds);
+                metaFile << formatString("  \"gain\": %d,\n", gain);
+                metaFile << "  \"format\": \"complex_float32\",\n";
+                metaFile << formatString("  \"capture_utc\": \"%s\",\n", timeBuf);
+                metaFile << formatString("  \"capture_epoch\": %lld,\n", (long long)epoch_s);
+                metaFile << formatString("  \"data_file\": \"%s\"\n", captureDataPath.c_str());
+                metaFile << "}\n";
+                metaFile.close();
+                logInfo() << "COMMAND_ID_RAW_CAPTURE - metadata written to" << metaPath;
+            } else {
+                logError() << "COMMAND_ID_RAW_CAPTURE - failed to write metadata to" << metaPath;
+            }
         }
 
         _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
