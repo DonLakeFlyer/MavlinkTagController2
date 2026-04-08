@@ -389,19 +389,22 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         evt_threshold_cache: dict with 'threshold' key (or None to regenerate)
 
     Returns:
-        (detections, noise_psd) where:
+        (detections, noise_psd, best_candidate) where:
           detections: list of (freq_hz, snr_db, offset, noise_psd, stft_score)
                       sorted by SNR descending.
           noise_psd:  float — median noise PSD across frequency bins when no
                       detections are found; None when detections are present;
                       NaN on early-exit error paths (insufficient data).
+          best_candidate: dict with keys (freq_hz, snr_db, score_ratio,
+                      noise_psd) for the strongest sub-threshold bin when
+                      no detections; None otherwise.
     """
     _, n_time = power.shape
 
     # Maximum valid first-pulse position
     max_start = n_time - (K - 1) * N
     if max_start <= 0:
-        return [], float('nan')
+        return [], float('nan'), None
     search_range = min(N, max_start)
 
     # Index matrix: (search_range, K) — each row is one candidate pattern
@@ -516,7 +519,16 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     if len(det_bins) == 0:
         # No detections — return median noise PSD so callers can report it
         median_noise_psd = float(np.median(noise_power) / psd_scale)
-        return [], median_noise_psd
+        # Best sub-threshold candidate for diagnostics
+        score_ratios = best_scores / np.maximum(threshold, 1e-30)
+        best_idx = int(np.argmax(score_ratios))
+        best_cand = {
+            'freq_hz': float(freq_axis[best_idx]),
+            'snr_db': float(10.0 * np.log10(best_scores[best_idx] / noise_power[best_idx])),
+            'score_ratio': float(score_ratios[best_idx]),
+            'noise_psd': float(noise_power[best_idx] / psd_scale),
+        }
+        return [], median_noise_psd, best_cand
 
     results = []
     for b in det_bins:
@@ -552,7 +564,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         if len(merged) >= 1:
             break
 
-    return merged, None
+    return merged, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +663,7 @@ def main():
     print(f'  PRI (N)         {N} STFT windows')
     print(f'  Freq bins       {nfft}  ({freq_res:.1f} Hz resolution, W matrix)')
     print(f'  Segment         {samples_needed} samples  ({seg_sec:.1f} s)')
-    print(f'  Pf              {args.pf:.0e}  '
+    print(f'  False alarm %   {args.pf * 100:.2g}%  '
           f'(~{fa_per_hour:.2f} false alarms/hour)')
     print(f'  UDP port        {args.port}')
     if args.center_freq > 0:
@@ -879,7 +891,7 @@ def main():
                 evt_threshold_cache['n_freq'] = n_freq_cur
                 evt_threshold_cache['n_time'] = n_time_cur
 
-            detections, nodet_noise_psd = fold_detect(
+            detections, nodet_noise_psd, best_candidate = fold_detect(
                                      power, N, args.pf, args.fs, nfft,
                                      n_w, n_ol, samples_needed,
                                      evt_threshold_cache, W=W, Wf=Wf,
@@ -979,8 +991,19 @@ def main():
                         confirmed_status=0,
                         noise_psd=nodet_noise_psd,
                     )
+                cand_str = ''
+                if best_candidate is not None:
+                    cand_freq = best_candidate['freq_hz']
+                    if args.center_freq > 0:
+                        cand_freq_str = f'{args.center_freq + cand_freq / 1e6:.6f} MHz'
+                    else:
+                        cand_freq_str = f'{cand_freq:+.1f} Hz'
+                    cand_str = (f'  best={cand_freq_str} '
+                                f'SNR {best_candidate["snr_db"]:.1f} dB '
+                                f'ratio {best_candidate["score_ratio"]:.3f} '
+                                f'noise {best_candidate["noise_psd"]:.3e}')
                 print(f'[{cycle:4d} {ts_str}]  no detection  '
-                      f'{proc_ms:.0f} ms{gap_flag}')
+                      f'{proc_ms:.0f} ms{gap_flag}{cand_str}')
 
     except KeyboardInterrupt:
         pass  # Handled by signal handler
