@@ -143,7 +143,7 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
     _processes.push_back(detectorProc);
 }
 
-void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode)
+void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio)
 {
     int     secondaryChannelIncrement   = secondaryChannel ? 1 : 0;
     int     tagId                       = tagInfo.id + secondaryChannelIncrement;
@@ -162,12 +162,14 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                            " --tp %f --tip %f --fs %d --port %d"
                                            " --tag-id %d --freq %u --pulse-port %d"
                                            " --center-freq %f --pf %f"
+                                           " --detection-margin %f --confidence-ratio %f"
                                            " --threshold-cache-dir \"%s\"",
                                 pythonCmd.c_str(),
                                 repoDir.c_str(),
                                 tp, tip, sampleRate, portData,
                                 tagId, tagInfo.frequency_hz, kPulseUdpPort,
                                 centerFreqMhz, tagInfo.false_alarm_probability,
+                                detectionMargin, confidenceRatio,
                                 cacheDir.c_str());
 
     std::string root    = formatString("py_detector_%d", tagId);
@@ -227,6 +229,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
 
         logInfo() << "COMMAND_ID_START_DETECTION:";
         logInfo() << "\tradio_center_frequency_hz:" << startDetection.radio_center_frequency_hz;
+        logInfo() << "\tdetection_margin:" << startDetection.detection_margin << " confidence_ratio:" << startDetection.confidence_ratio;
         const double centerFrequencyMhz = (double)startDetection.radio_center_frequency_hz / 1000000.0;
 
         std::string sdrPathStatus;
@@ -367,11 +370,24 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
 
         bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
 
+        // Python detector thresholds — use defaults if not set (0 means use default)
+        double detectionMargin = startDetection.detection_margin > 0 ? startDetection.detection_margin : 0.90;
+        double confidenceRatio = startDetection.confidence_ratio > 0 ? startDetection.confidence_ratio : 1.3;
+        if (startDetection.detection_margin < 0) {
+            logError() << "Negative detection_margin (" << startDetection.detection_margin << "), using default:" << detectionMargin;
+        }
+        if (startDetection.confidence_ratio < 0) {
+            logError() << "Negative confidence_ratio (" << startDetection.confidence_ratio << "), using default:" << confidenceRatio;
+        }
+        if (startDetection.detection_mode == DETECTION_MODE_PYTHON) {
+            logInfo() << "Python detector thresholds: detectionMargin:" << detectionMargin << " confidenceRatio:" << confidenceRatio;
+        }
+
         for (const TunnelProtocol::TagInfo_t& tagInfo: _tagDatabase) {
             if (startDetection.detection_mode == DETECTION_MODE_PYTHON) {
-                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode);
+                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio);
                 if (tagInfo.intra_pulse2_msecs != 0) {
-                    _startPythonDetector(logFileManager, tagInfo, true /* secondaryChannel */, isHFMode);
+                    _startPythonDetector(logFileManager, tagInfo, true /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio);
                 }
             } else {
                 _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
