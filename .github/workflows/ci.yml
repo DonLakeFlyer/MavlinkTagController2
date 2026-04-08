@@ -60,6 +60,7 @@ jobs:
 
   # ── Pulse detector validation ──────────────────────────────────────
   detector:
+    name: detector (${{ matrix.os }}, py${{ matrix.python-version }})
     strategy:
       fail-fast: false
       matrix:
