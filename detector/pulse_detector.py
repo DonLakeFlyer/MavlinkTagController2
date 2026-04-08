@@ -377,7 +377,8 @@ def save_evt_cache(cache_dir, N, K, mu, sigma, n_trials=100):
 # ---------------------------------------------------------------------------
 
 def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
-                evt_threshold_cache, W=None, Wf=None, debug=False):
+                evt_threshold_cache, W=None, Wf=None, debug=False,
+                detection_margin=0.90):
     """Fold power spectrogram at PRI and detect pulses.
 
     With tipu=0, tipj=0 the only free parameter is the first-pulse offset
@@ -390,8 +391,8 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
 
     Returns:
         (detections, noise_psd, best_candidate) where:
-          detections: list of (freq_hz, snr_db, offset, noise_psd, stft_score)
-                      sorted by SNR descending.
+          detections: list of (freq_hz, snr_db, offset, noise_psd, stft_score,
+                      score_ratio) sorted by SNR descending.
           noise_psd:  float — median noise PSD across frequency bins when no
                       detections are found; None when detections are present;
                       NaN on early-exit error paths (insufficient data).
@@ -478,11 +479,20 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                 print(f'ERROR: Insufficient data for EVT threshold. '
                       f'Segment length ({n_time} samples) too short for K={K} folds.',
                       flush=True)
-                return [], float('nan')
+                return [], float('nan'), None
             save_evt_cache(cache_dir, N, K, mu, sigma)
         evt_threshold_cache['threshold'] = base_threshold
     else:
         base_threshold = evt_threshold_cache['threshold']
+
+    # Apply detection margin to lower the EVT threshold, increasing
+    # sensitivity at the cost of more near-threshold (marginal) detections.
+    # The two-tier confidence system classifies these via confidence_ratio.
+    base_threshold *= detection_margin
+    if detection_margin != 1.0 and not evt_threshold_cache.get('margin_logged'):
+        print(f'  [Detection margin={detection_margin:.2f} applied: '
+              f'effective threshold={base_threshold:.4e}]', flush=True)
+        evt_threshold_cache['margin_logged'] = True
 
     # Scale threshold by per-bin noise power (frequency-dependent)
     threshold = base_threshold * noise_power
@@ -600,6 +610,10 @@ def main():
                     help='UDP port to send detected pulses to (0 = disabled)')
     ap.add_argument('--threshold-cache-dir', type=str, default=None,
                     help='Directory for EVT threshold cache files (default: no disk cache)')
+    ap.add_argument('--detection-margin', type=float, default=0.90,
+                    help='EVT threshold multiplier, lower = more sensitive (default: 0.90)')
+    ap.add_argument('--confidence-ratio', type=float, default=1.3,
+                    help='Score/threshold ratio for confirmed status (default: 1.3)')
     args = ap.parse_args()
 
     # --- Validate parameters ---
@@ -613,6 +627,10 @@ def main():
         sys.exit(f'Error: --tip (inter-pulse interval) must be positive, got {args.tip}')
     if args.fs <= 0:
         sys.exit(f'Error: --fs (sample rate) must be positive, got {args.fs}')
+    if args.detection_margin <= 0:
+        sys.exit(f'Error: --detection-margin must be positive, got {args.detection_margin}')
+    if args.confidence_ratio <= 0:
+        sys.exit(f'Error: --confidence-ratio must be positive, got {args.confidence_ratio}')
 
     # --- STFT geometry ---
     n_w  = int(np.ceil(args.tp * args.fs))
@@ -888,6 +906,7 @@ def main():
             if (evt_threshold_cache.get('n_freq') != n_freq_cur or
                 evt_threshold_cache.get('n_time') != n_time_cur):
                 evt_threshold_cache['threshold'] = None
+                evt_threshold_cache['margin_logged'] = False
                 evt_threshold_cache['n_freq'] = n_freq_cur
                 evt_threshold_cache['n_time'] = n_time_cur
 
@@ -895,7 +914,8 @@ def main():
                                      power, N, args.pf, args.fs, nfft,
                                      n_w, n_ol, samples_needed,
                                      evt_threshold_cache, W=W, Wf=Wf,
-                                     debug=args.debug)
+                                     debug=args.debug,
+                                     detection_margin=args.detection_margin)
             proc_ms = (time.monotonic() - t0) * 1000.0
 
             # Timestamp string (UTC) for the start of this segment
@@ -911,6 +931,8 @@ def main():
             # Append gap warning to output if segment had discontinuities
             gap_flag = ' [ZEROFILLED]' if had_gap else ''
 
+            confidence_ratio = args.confidence_ratio
+
             if detections:
                 det_total += len(detections)
 
@@ -922,13 +944,12 @@ def main():
                 if current_ts is not None:
                     last_detection_ts = current_ts
 
-                # Score/threshold ratio < 2.0 indicates a marginal detection
-                # that is more likely to be a false alarm.  Report these as
-                # SUBTHRESHOLD so the GCS can display them differently.
-                CONFIDENCE_RATIO = 2.0
+                # Score/threshold ratio < confidence_ratio indicates a marginal
+                # detection that is more likely to be a false alarm.  Report
+                # these as SUBTHRESHOLD so the GCS can display them differently.
 
                 for freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio in detections:
-                    is_marginal = score_ratio < CONFIDENCE_RATIO
+                    is_marginal = score_ratio < confidence_ratio
                     det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
                                   else DETECTION_STATUS_SUPERTHRESHOLD)
                     confidence_flag = '  [LOW]' if is_marginal else ''

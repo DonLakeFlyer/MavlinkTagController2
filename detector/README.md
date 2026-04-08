@@ -141,8 +141,8 @@ Defined in `TunnelProtocol.h` and mirrored in the detector:
 
 | Value | Name | Meaning |
 |-------|------|------|
-| `0` | SUBTHRESHOLD | Marginal detection (fold score < 2× threshold) |
-| `1` | SUPERTHRESHOLD | Confident detection (fold score ≥ 2× threshold) |
+| `0` | SUBTHRESHOLD | Marginal detection (fold score < confidence_ratio × threshold) |
+| `1` | SUPERTHRESHOLD | Confident detection (fold score ≥ confidence_ratio × threshold) |
 | `2` | CONFIRMED | Reserved for stateful detectors (uavrt_detection); **never sent by pulse_detector.py** |
 | `3` | NO_DETECTION | Detector searched this cycle and found nothing |
 
@@ -150,7 +150,7 @@ Defined in `TunnelProtocol.h` and mirrored in the detector:
 
 Binary (0 or 1). Since the Python detector is stateless (no cross-cycle confirmation), it uses the confidence ratio as a proxy:
 
-- `confirmed_status=1` — confident detection (score ≥ 2× threshold)
+- `confirmed_status=1` — confident detection (score ≥ confidence_ratio × threshold; default ratio 1.3)
 - `confirmed_status=0` — everything else (marginal, no detection, heartbeat)
 
 The controller logs `confirmed_status=1` pulses at Info level and `confirmed_status=0` at Debug level. Both are forwarded to the GCS.
@@ -159,8 +159,8 @@ The controller logs `confirmed_status=1` pulses at Info level and `confirmed_sta
 
 | Scenario | `detection_status` | `confirmed_status` | Key fields |
 |----------|-------------------|--------------------|-----------|
-| **Strong detection** (score ≥ 2× threshold) | `1` (SUPERTHRESHOLD) | `1` | frequency, SNR, noise_psd, stft_score |
-| **Marginal detection** (score < 2× threshold) | `0` (SUBTHRESHOLD) | `0` | frequency, SNR, noise_psd, stft_score |
+| **Strong detection** (score ≥ confidence_ratio × threshold) | `1` (SUPERTHRESHOLD) | `1` | frequency, SNR, noise_psd, stft_score |
+| **Marginal detection** (score < confidence_ratio × threshold) | `0` (SUBTHRESHOLD) | `0` | frequency, SNR, noise_psd, stft_score |
 | **No detection** | `3` (NO_DETECTION) | `0` | noise_psd, start_time (no frequency/SNR) |
 | **Heartbeat** (periodic keepalive) | `0` | `0` | frequency_hz=0 (controller recognises as heartbeat) |
 
