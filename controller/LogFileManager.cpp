@@ -227,7 +227,8 @@ void LogFileManager::cleanLocalLogs()
         fs::path dirPath = _homeDir + "/" + logDir;
         std::error_code errorCode;
         logInfo() << "Removing directory " << dirPath;
-        if (!fs::remove_all(dirPath, errorCode)) {
+        fs::remove_all(dirPath, errorCode);
+        if (errorCode) {
             logError() << "Failed to remove directory " << dirPath << ": " << errorCode.message();
             MavlinkSystem::instance()->sendStatusText("#Error during log delete", MAV_SEVERITY_ERROR);
         }
