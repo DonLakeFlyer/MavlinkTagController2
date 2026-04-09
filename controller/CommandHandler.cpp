@@ -25,11 +25,12 @@
 
 using namespace TunnelProtocol;
 
-CommandHandler::CommandHandler(MavlinkSystem* mavlink, bool simulatorMode, const std::string& simulatorPreset)
+CommandHandler::CommandHandler(MavlinkSystem* mavlink, bool simulatorMode, const std::string& simulatorPreset, bool debugDetector)
     : _mavlink          (mavlink)
     , _homePath         (getenv("HOME"))
     , _simulatorMode    (simulatorMode)
     , _simulatorPreset  (simulatorPreset)
+    , _debugDetector    (debugDetector)
 {
     if (strcmp(_homePath, "/home/pi") == 0) {
         // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
@@ -163,14 +164,19 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                            " --tag-id %d --freq %u --pulse-port %d"
                                            " --center-freq %f --pf %f"
                                            " --detection-margin %f --confidence-ratio %f"
-                                           " --threshold-cache-dir \"%s\"",
+                                           " --threshold-cache-dir \"%s\""
+                                           " --k %u",
                                 pythonCmd.c_str(),
                                 repoDir.c_str(),
                                 tp, tip, sampleRate, portData,
                                 tagId, tagInfo.frequency_hz, kPulseUdpPort,
                                 centerFreqMhz, tagInfo.false_alarm_probability,
                                 detectionMargin, confidenceRatio,
-                                cacheDir.c_str());
+                                cacheDir.c_str(),
+                                tagInfo.k);
+    if (_debugDetector) {
+        commandStr += " --debug";
+    }
 
     std::string root    = formatString("py_detector_%d", tagId);
     std::string logPath = logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "log");

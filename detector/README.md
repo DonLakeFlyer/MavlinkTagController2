@@ -1,6 +1,6 @@
 # VHF Pulse Detector
 
-Python-based pulse detector for Sirtrack wildlife radio collars. Implements K-fold coherent integration with Extreme Value Theory (EVT) thresholding for robust detection under non-Gaussian noise conditions.
+Python-based pulse detector for crystal-oscillator wildlife radio collars. Implements K-fold coherent integration with Extreme Value Theory (EVT) thresholding for robust detection under non-Gaussian noise conditions.
 
 ## Overview
 
@@ -514,7 +514,7 @@ In clean RF environments, both methods perform similarly. In harsh environments,
 
 - **UAV-RT Detection System:** https://github.com/dynamic-and-active-systems-lab/uavrt_detection
 - **Extreme Value Theory:** Coles, S. (2001). *An Introduction to Statistical Modeling of Extreme Values*. Springer.
-- **Sirtrack Tags:** https://www.sirtrack.com/
+
 
 ## License
 

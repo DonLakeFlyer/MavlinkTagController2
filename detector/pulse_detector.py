@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Simplified VHF Pulse Detector for Sirtrack Crystal-Oscillator Collars
+VHF Pulse Detector for Crystal-Oscillator Radio Collars
 
 Reads decimated IQ data from the airspyhf_zeromq + decimator pipeline via UDP.
 Assumes crystal-oscillator timing (ti_pu=0, ti_pj=0) — no uncertainty or jitter.
-Performs K=5 pulse folding and resets completely after each cycle.
+Performs K-fold pulse integration (configurable via --k) and resets completely after each cycle.
 
 Pipeline:
   airspyhf_zeromq_rx ---> [ZMQ PUB] ---> decimator ---> [UDP] ---> this script
@@ -38,7 +38,7 @@ import numpy as np
 from scipy.linalg import toeplitz as scipy_toeplitz
 from scipy.stats import gumbel_r
 
-K = 5  # Always 5-fold
+K = 5  # Default fold count, overridden by --k
 
 # Detection status values (mirrors TunnelProtocol.h detection_status field)
 DETECTION_STATUS_SUBTHRESHOLD  = 0  # Subthreshold pulse
@@ -199,7 +199,7 @@ def build_weighting_matrix(n_w, Fs, zetas=None):
 # STFT
 # ---------------------------------------------------------------------------
 
-def compute_stft_power(iq, n_w, n_ol, nfft, W=None):
+def compute_stft_power(iq, n_w, n_ol, nfft, W=None, min_windows=None):
     """Compute power spectrogram via overlapped short-time FFT.
 
     When W (spectral weighting matrix) is provided, the FFT is computed at
@@ -208,21 +208,24 @@ def compute_stft_power(iq, n_w, n_ol, nfft, W=None):
     When W is None, a zero-padded FFT of size nfft is used directly.
 
     Args:
-        iq:   1-D complex64 array of IQ samples
-        n_w:  STFT window length (= pulse width in samples)
-        n_ol: overlap in samples
-        nfft: FFT length (used only when W is None)
-        W:    Optional (n_w, n_freq) spectral weighting matrix
+        iq:          1-D complex64 array of IQ samples
+        n_w:         STFT window length (= pulse width in samples)
+        n_ol:        overlap in samples
+        nfft:        FFT length (used only when W is None)
+        W:           Optional (n_w, n_freq) spectral weighting matrix
+        min_windows: Minimum number of STFT windows required (default: K)
 
     Returns:
         power:     (n_freq, n_windows) float32 power spectrogram, DC-centred
         n_windows: number of time windows
     """
+    if min_windows is None:
+        min_windows = K
     n_ws = n_w - n_ol
     n_windows = (len(iq) - n_ol) // n_ws
     n_freq = W.shape[1] if W is not None else nfft
 
-    if n_windows < K:
+    if n_windows < min_windows:
         return np.empty((n_freq, 0), dtype=np.float32), 0
 
     # Rectangular window — matched to rectangular VHF pulse shape (matches
@@ -251,7 +254,8 @@ def compute_stft_power(iq, n_w, n_ol, nfft, W=None):
 # ---------------------------------------------------------------------------
 
 def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
-                           W=None, n_trials=100, debug=False):
+                           fold_offsets=None, W=None, n_trials=100,
+                           debug=False):
     """Generate detection threshold via Extreme Value Theory.
 
     Runs Monte Carlo simulation with synthetic complex Gaussian noise through
@@ -288,13 +292,13 @@ def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
         if n_time == 0:
             continue
 
-        max_start = n_time - (K - 1) * N
+        _fo = fold_offsets if fold_offsets is not None else np.arange(K) * N
+        max_start = n_time - _fo[-1]
         if max_start <= 0:
             continue
         search_range = min(N, max_start)
 
-        pulse_idx = (np.arange(search_range)[:, None]
-                     + np.arange(K)[None, :] * N)
+        pulse_idx = np.arange(search_range)[:, None] + _fo[None, :]
 
         fold_scores = np.sum(power[:, pulse_idx], axis=2)
 
@@ -377,13 +381,13 @@ def save_evt_cache(cache_dir, N, K, mu, sigma, n_trials=100):
 # ---------------------------------------------------------------------------
 
 def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
-                evt_threshold_cache, W=None, Wf=None, debug=False,
-                detection_margin=0.90):
+                evt_threshold_cache, fold_offsets=None, W=None, Wf=None,
+                debug=False, detection_margin=0.90):
     """Fold power spectrogram at PRI and detect pulses.
 
     With tipu=0, tipj=0 the only free parameter is the first-pulse offset
     within one PRI (0 … N-1 STFT windows).  For each frequency bin we sum
-    K=5 power values spaced exactly N apart and compare against an
+    K power values at the precomputed fold offsets and compare against an
     EVT-derived threshold.
 
     Args:
@@ -404,15 +408,17 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     """
     _, n_time = power.shape
 
+    # Per-fold window offsets (fractional PRI, independently rounded)
+    _fo = fold_offsets if fold_offsets is not None else np.arange(K) * N
+
     # Maximum valid first-pulse position
-    max_start = n_time - (K - 1) * N
+    max_start = n_time - _fo[-1]
     if max_start <= 0:
         return [], float('nan'), None
     search_range = min(N, max_start)
 
     # Index matrix: (search_range, K) — each row is one candidate pattern
-    pulse_idx = (np.arange(search_range)[:, None]
-                 + np.arange(K)[None, :] * N)
+    pulse_idx = np.arange(search_range)[:, None] + _fo[None, :]
 
     # Fold across all frequencies at once: (n_freq, search_range)
     fold_scores = np.sum(power[:, pulse_idx], axis=2)
@@ -474,8 +480,8 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         else:
             print('  [Generating EVT threshold via 100 noise trials...]', flush=True)
             base_threshold, mu, sigma = generate_evt_threshold(
-                n_w, n_ol, nfft, samples_needed, N, K, pf, W=W, n_trials=100,
-                debug=debug
+                n_w, n_ol, nfft, samples_needed, N, K, pf,
+                fold_offsets=_fo, W=W, n_trials=100, debug=debug
             )
             if np.isinf(base_threshold):
                 print(f'ERROR: Insufficient data for EVT threshold. '
@@ -555,7 +561,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         score_ratio = float(best_scores[b] / max(threshold[b], 1e-30))
         # Per-fold diagnostics: individual on-window powers and SNRs
         t0 = int(best_offsets[b])
-        on_idx = t0 + np.arange(K) * N
+        on_idx = t0 + _fo
         on_powers = power[b, on_idx]
         fold_snrs_db = (10.0 * np.log10(on_powers / noise_power[b])).tolist()
         uniformity = float(on_powers.min() / max(on_powers.max(), 1e-30))
@@ -594,7 +600,7 @@ def main():
     global _should_stop
 
     ap = argparse.ArgumentParser(
-        description='Sirtrack VHF Pulse Detector (K=5, EVT threshold)',
+        description='VHF Pulse Detector (configurable K, EVT threshold)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
     ap.add_argument('--tp',  type=float, default=0.015,
@@ -623,7 +629,12 @@ def main():
                     help='EVT threshold multiplier, lower = more sensitive (default: 0.90)')
     ap.add_argument('--confidence-ratio', type=float, default=1.3,
                     help='Score/threshold ratio for confirmed status (default: 1.3)')
+    ap.add_argument('--k', type=int, default=5,
+                    help='Number of pulses to fold/integrate (default: 5)')
     args = ap.parse_args()
+
+    global K
+    K = args.k
 
     # --- Validate parameters ---
     if args.pf <= 0 or args.pf >= 1:
@@ -640,6 +651,8 @@ def main():
         sys.exit(f'Error: --detection-margin must be positive, got {args.detection_margin}')
     if args.confidence_ratio <= 0:
         sys.exit(f'Error: --confidence-ratio must be positive, got {args.confidence_ratio}')
+    if args.k < 2:
+        sys.exit(f'Error: --k must be >= 2, got {args.k}')
 
     # --- STFT geometry ---
     n_w  = int(np.ceil(args.tp * args.fs))
@@ -648,7 +661,18 @@ def main():
                  f'Check --tp and --fs.')
     n_ol  = n_w // 2
     n_ws  = n_w - n_ol
-    N     = int(np.floor(args.tip * args.fs / n_ws))
+    N_exact = args.tip * args.fs / n_ws   # fractional PRI in STFT windows
+    N     = int(np.floor(N_exact))
+
+    # Precompute per-fold window offsets using fractional PRI.
+    # Using integer N (= floor(N_exact)) would accumulate drift of
+    # (N_exact - N) windows per fold — at fold k the pulse lands
+    # (k * N_exact) windows from the start, but integer stride puts
+    # it at (k * N), off by k * (N_exact - N).  For K=20 and
+    # N_exact=176.51 this reaches 9.6 windows by fold 19, missing
+    # the pulse entirely.  Rounding each offset independently keeps
+    # the error bounded to ±0.5 windows regardless of K.
+    fold_offsets = np.round(np.arange(K) * N_exact).astype(int)
 
     # Validate N is sufficient for K-fold integration
     if N < K:
@@ -676,18 +700,21 @@ def main():
         if dead_cols > 0:
             print(f'[DEBUG W] WARNING: {dead_cols} columns have near-zero norm!')
 
-    samples_needed = n_ws * (K * N + 1) + n_ol
+    # N search positions (0..N-1) + last fold offset + 1 for fencepost,
+    # converted to samples; +n_ol because the first STFT window is n_w wide
+    # but only n_ws is counted per step.
+    samples_needed = n_ws * (N + fold_offsets[-1] + 1) + n_ol
     seg_sec  = samples_needed / args.fs
     freq_res = args.fs / nfft
     fa_per_hour = (3600.0 / seg_sec) * args.pf
 
-    print('=== Sirtrack VHF Pulse Detector ===')
+    print('=== VHF Pulse Detector ===')
     print(f'  Pulse width     {args.tp * 1000:.1f} ms')
     print(f'  Inter-pulse     {args.tip:.3f} s')
     print(f'  Folds (K)       {K}')
     print(f'  Sample rate     {args.fs:.1f} Hz')
     print(f'  STFT            window={n_w}  overlap={n_ol}  step={n_ws}')
-    print(f'  PRI (N)         {N} STFT windows')
+    print(f'  PRI (N)         {N} STFT windows  (exact {N_exact:.4f})')
     print(f'  Freq bins       {nfft}  ({freq_res:.1f} Hz resolution, W matrix)')
     print(f'  Segment         {samples_needed} samples  ({seg_sec:.1f} s)')
     print(f'  False alarm %   {args.pf * 100:.2g}%  '
@@ -924,7 +951,9 @@ def main():
             detections, nodet_noise_psd, best_candidate = fold_detect(
                                      power, N, args.pf, args.fs, nfft,
                                      n_w, n_ol, samples_needed,
-                                     evt_threshold_cache, W=W, Wf=Wf,
+                                     evt_threshold_cache,
+                                     fold_offsets=fold_offsets,
+                                     W=W, Wf=Wf,
                                      debug=args.debug,
                                      detection_margin=args.detection_margin)
             proc_ms = (time.monotonic() - t0) * 1000.0

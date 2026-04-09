@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run the full Sirtrack VHF pulse detection pipeline at 146 MHz.
+# Run the full VHF pulse detection pipeline at 146 MHz.
 #
 #   airspyhf_zeromq_rx  →  [ZMQ]  →  decimator  →  [UDP]  →  pulse_detector.py
 #
