@@ -14,7 +14,7 @@ class LogFileManager;
 
 class CommandHandler {
 public:
-    explicit CommandHandler(MavlinkSystem* mavlink, bool simulatorMode = false, const std::string& simulatorPreset = "strong");
+    explicit CommandHandler(MavlinkSystem* mavlink, bool simulatorMode = false, const std::string& simulatorPreset = "strong", bool debugDetector = false);
 
     static constexpr int kPulseUdpPort = 50000; // UDP port for pulse/heartbeat reports from detectors
 
@@ -58,6 +58,7 @@ private:
     int                            _rawCaptureCount         = 0;
     bool                            _simulatorMode          = false;
     std::string                     _simulatorPreset;
+    bool                            _debugDetector          = false;
 
     static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3840 Hz outgoing
 };

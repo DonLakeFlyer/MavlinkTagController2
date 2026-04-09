@@ -39,6 +39,7 @@ int main(int argc, char** argv)
     bool        simulatorMode = false;
     std::string simulatorPreset = "strong";
 	std::string simulatorTelemetryEndpoint = "tcp://127.0.0.1:6001";
+    bool        debugDetector = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--simulator") == 0) {
@@ -51,6 +52,8 @@ int main(int argc, char** argv)
 			if (i + 1 < argc) {
 				simulatorTelemetryEndpoint = argv[++i];
 			}
+        } else if (strcmp(argv[i], "--debug-detector") == 0) {
+            debugDetector = true;
         } else {
             // Treat any other argument as the connection URL
             connectionUrl = argv[i];
@@ -83,7 +86,7 @@ int main(int argc, char** argv)
 
 	globalMavlinkSystem		= mavlink;
 
-    auto commandHandler 	= CommandHandler { mavlink, simulatorMode, simulatorPreset };
+    auto commandHandler 	= CommandHandler { mavlink, simulatorMode, simulatorPreset, debugDetector };
 
     udpPulseReceiver.start();
 
