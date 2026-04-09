@@ -96,7 +96,6 @@ class SimConfig:
     telemetry_sub_endpoint: str = "tcp://127.0.0.1:6001"  # ZMQ SUB endpoint for controller telemetry
     telemetry_topic: str = "vehicle_pose"
     tx_offset_north_m: float = 4000.0
-    antenna_max_attenuation_db: float = 40.0  # dB lost when pointing directly away
 
 
 @dataclass
@@ -190,15 +189,34 @@ def _initial_bearing_deg(lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2
     return (bearing + 360.0) % 360.0
 
 
-def _antenna_attenuation_db(off_boresight_deg: float, max_attenuation_db: float) -> float:
-    """Linear antenna attenuation in dB.
+# Measured H-plane gain pattern for Telonics RA-2A antenna
+# (off-boresight degrees → dB). Symmetric about boresight; 0° = pointing at transmitter.
+_ANTENNA_GAIN_ANGLES = np.array([
+    0, 10, 20, 30, 40, 50, 60, 70, 80, 90,
+    100, 110, 120, 130, 140, 150, 160, 170, 180,
+], dtype=np.float64)
 
-    0 dB at 0° off-boresight (pointing at transmitter).
-    -max_attenuation_db at 180° (pointing directly away).
-    Linear interpolation in between.
+_ANTENNA_GAIN_DB = np.array([
+    2.5, 2.5, 2.0, 1.5, 0.0, -2.5, -8.0, -12.0, -18.0, -25.0,
+    -17.5, -15.0, -12.0, -10.0, -11.0, -8.0, -8.0, -7.5, -7.5,
+], dtype=np.float64)
+
+assert len(_ANTENNA_GAIN_ANGLES) == len(_ANTENNA_GAIN_DB), "Antenna gain table arrays must have matching lengths"
+assert all(_ANTENNA_GAIN_ANGLES[i] < _ANTENNA_GAIN_ANGLES[i + 1] for i in range(len(_ANTENNA_GAIN_ANGLES) - 1)), "Antenna gain angles must be monotonically increasing"
+assert _ANTENNA_GAIN_ANGLES[0] == 0.0, "Antenna gain table must start at 0° (boresight)"
+
+# Pre-compute gain relative to boresight so 0° = 0 dB attenuation.
+_ANTENNA_ATTEN_DB = _ANTENNA_GAIN_DB - _ANTENNA_GAIN_DB[0]
+
+
+def _antenna_attenuation_db(off_boresight_deg: float) -> float:
+    """Measured antenna attenuation in dB (interpolated from gain table).
+
+    Returns 0 dB at boresight, non-positive values elsewhere.
+    Pattern is symmetric: only |off-boresight| is used.
     """
     off = min(180.0, abs(_normalize_angle_deg(off_boresight_deg)))
-    return -max_attenuation_db * (off / 180.0)
+    return float(np.interp(off, _ANTENNA_GAIN_ANGLES, _ANTENNA_ATTEN_DB))
 
 
 def _start_telemetry_subscriber(cfg: SimConfig, telem_state: DirectionalTelemetryState) -> tuple[threading.Event, threading.Thread] | tuple[None, None]:
@@ -368,9 +386,7 @@ def generate_packet(
                     tx_lon_deg,
                 )
                 off_boresight = _normalize_angle_deg(bearing_to_tx - vehicle_yaw_deg)
-                attenuation_db = _antenna_attenuation_db(
-                    off_boresight, cfg.antenna_max_attenuation_db
-                )
+                attenuation_db = _antenna_attenuation_db(off_boresight)
                 effective_snr_db = snr_at_distance(
                     tag.snr_db,
                     max(1.0, distance_m),
@@ -630,8 +646,7 @@ Examples:
                     help="Telemetry topic prefix (default: vehicle_pose)")
     p.add_argument("--tx-offset-north-m", type=float, default=4000.0,
                     help="Fixed transmitter offset north of first vehicle pose (default: 4000m)")
-    p.add_argument("--antenna-max-attenuation-db", type=float, default=40.0,
-                    help="Max antenna attenuation in dB when pointing directly away (default: 40)")
+
 
     args = p.parse_args()
 
@@ -681,7 +696,6 @@ Examples:
     cfg.telemetry_sub_endpoint = args.telemetry_sub_endpoint
     cfg.telemetry_topic = args.telemetry_topic
     cfg.tx_offset_north_m = args.tx_offset_north_m
-    cfg.antenna_max_attenuation_db = args.antenna_max_attenuation_db
 
     # Build tags from CLI if --freq-offset-hz was given
     if args.freq_offset_hz is not None:
