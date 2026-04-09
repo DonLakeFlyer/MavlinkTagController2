@@ -101,7 +101,22 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
             }
         }
 
-        std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f stft_score: %5.1g noise_psd: %5.1g freq: %9u seq: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+        bool isPythonDetector = (_mavlink->detectionMode() == DETECTION_MODE_PYTHON);
+        std::string pulseStatus = isPythonDetector
+            ? formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f score_ratio: %.3f noise_psd: %5.1g freq: %9u seq: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+                                        pulseInfo.confirmed_status,
+                                        pulseInfo.tag_id,
+                                        pulseInfo.snr,
+                                        pulseInfo.orientation_z,
+                                        pulseInfo.stft_score,
+                                        pulseInfo.noise_psd,
+                                        pulseInfo.frequency_hz,
+                                        pulseInfo.group_seq_counter,
+                                        telemetry.position.latitude,
+                                        telemetry.position.longitude,
+                                        telemetry.attitudeEuler.yawDegrees,
+                                        telemetry.position.relativeAltitude)
+            : formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f stft_score: %5.1g noise_psd: %5.1g freq: %9u seq: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
                                         pulseInfo.confirmed_status,
                                         pulseInfo.tag_id,
                                         pulseInfo.snr,
