@@ -158,7 +158,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     // Default to 5 if the GCS sends 0 or 1 (unset or invalid).
     uint32_t k = tagInfo.k >= 2 ? tagInfo.k : 5;
     if (tagInfo.k < 2) {
-        logWarn() << "Tag" << tagId << "has invalid k=" << tagInfo.k << ", defaulting to 5";
+        logWarn() << "Tag " << tagId << " has invalid k=" << tagInfo.k << ", defaulting to 5";
     }
 
     std::string repoDir     = formatString("%s/repos/MavlinkTagController2", _homePath);
