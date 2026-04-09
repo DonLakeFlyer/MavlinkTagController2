@@ -15,7 +15,7 @@ airspyhf_zeromq_rx  →  ZMQ PUB  →  decimator  →  UDP  →  pulse_detector.
 
 ### 1. Data Accumulation (~10 seconds per cycle)
 
-The detector accumulates IQ samples until it has enough data to fold K=5 pulses:
+The detector accumulates IQ samples until it has enough data to fold K pulses (K is configurable via `--k`, default 5):
 
 ```
 samples_needed = STFT_step × (K × PRI_windows + 1) + STFT_overlap
@@ -63,7 +63,7 @@ For each frequency bin, the detector searches all possible first-pulse offsets w
 
 ```python
 search_range = min(PRI_windows, max_valid_start)
-pulse_idx = first_offset + [0, N, 2N, 3N, 4N]  # K=5 folds
+pulse_idx = first_offset + [0, N, 2N, ..., (K-1)×N]  # K folds
 ```
 
 **Folding operation:** Sum power at each candidate pattern:
@@ -127,7 +127,7 @@ noise  = noise_power[f]          # per-window noise estimate
 SNR_dB = 10 × log10(signal / noise)
 ```
 
-This matches uavrt_detection's convention: the fold score naturally scales with K (more folds → higher numerator → higher reported SNR). Expect roughly `10×log10(K)` dB improvement over single-pulse detection (≈ 7 dB for K=5).
+This matches uavrt_detection's convention: the fold score naturally scales with K (more folds → higher numerator → higher reported SNR). Expect roughly `10×log10(K)` dB improvement over single-pulse detection (e.g. ≈ 7 dB for K=5, ≈ 13 dB for K=20).
 
 > **Note:** The denominator is the single-window noise estimate, *not* `K × noise_power`. This means the reported SNR includes the integration gain and is directly comparable to uavrt_detection's output.
 
@@ -413,7 +413,7 @@ At 3840 Hz decimated rate with default parameters:
 
 ### False Alarm Rate
 
-With `--pf 5e-2` (default, Aggressive) and ~10-second cycles (K=5, tip=2.0s):
+With `--pf 5e-2` (default, Aggressive) and ~10-second cycles (K=5, tip=2.0 s):
 
 ```
 FA_rate = (3600 s/hour) / (10 s/cycle) × 5e-2 = 18 FA/hour
@@ -481,15 +481,15 @@ pip3 install numpy scipy
 
 ## Implementation Notes
 
-### Why K=5 (not K=10 as originally)?
+### Choosing K
 
-The code was simplified from K=10 to K=5 to:
-- Reduce cycle time (10s instead of 20s)
-- Lower computational cost
-- Still achieve 7 dB SNR gain
-- Provide faster feedback in field testing
+K (fold count) is configurable via `--k` (default 5). The default K=5 balances:
+- Cycle time (~10 s at tip=2.0 s)
+- Computational cost
+- 7 dB SNR gain over single-pulse detection
+- Fast feedback in field testing
 
-For very weak tags, increasing K back to 10 would improve sensitivity at the cost of longer detection latency.
+Higher K (e.g. 20) increases sensitivity (+13 dB) at the cost of longer cycles (~27 s) and longer EVT cache generation on first run. The fractional PRI fix ensures fold alignment is accurate at any K.
 
 ### Why Stateless?
 
