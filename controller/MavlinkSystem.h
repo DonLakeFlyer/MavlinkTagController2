@@ -48,6 +48,8 @@ public:
 	Telemetry& 					telemetry					() { return _telemetry; }
 	uint16_t 					heartbeatStatus				() const { return _heartbeatStatus.load(); }
 	void						setHeartbeatStatus			(uint16_t heartbeatStatus) { _heartbeatStatus.store(heartbeatStatus); }
+	uint32_t					detectionMode				() const { return _detectionMode.load(); }
+	void						setDetectionMode			(uint32_t mode) { _detectionMode.store(mode); }
 
 private:
 	MavlinkSystem();
@@ -64,6 +66,7 @@ private:
 	std::mutex 					_subscriptions_mutex {};
 	Telemetry 					_telemetry;
 	std::atomic<uint16_t>		_heartbeatStatus { HEARTBEAT_STATUS_IDLE };
+	std::atomic<uint32_t>		_detectionMode { DETECTION_MODE_UAVRT };
 
 	friend class MavlinkOutgoingMessageQueue;
 };

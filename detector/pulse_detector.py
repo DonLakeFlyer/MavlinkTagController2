@@ -392,7 +392,9 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     Returns:
         (detections, noise_psd, best_candidate) where:
           detections: list of (freq_hz, snr_db, offset, noise_psd, stft_score,
-                      score_ratio) sorted by SNR descending.
+                      score_ratio, fold_info) sorted by SNR descending.
+                      fold_info is a dict with 'uniformity' (float) and
+                      'fold_snrs' (list of per-fold SNRs in dB).
           noise_psd:  float — median noise PSD across frequency bins when no
                       detections are found; None when detections are present;
                       NaN on early-exit error paths (insufficient data).
@@ -551,9 +553,16 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         # Score-to-threshold ratio: how far above threshold this detection is.
         # Values near 1.0 are marginal (likely false alarm); >>1 is confident.
         score_ratio = float(best_scores[b] / max(threshold[b], 1e-30))
+        # Per-fold diagnostics: individual on-window powers and SNRs
+        t0 = int(best_offsets[b])
+        on_idx = t0 + np.arange(K) * N
+        on_powers = power[b, on_idx]
+        fold_snrs_db = (10.0 * np.log10(on_powers / noise_power[b])).tolist()
+        uniformity = float(on_powers.min() / max(on_powers.max(), 1e-30))
+        fold_info = {'uniformity': uniformity, 'fold_snrs': fold_snrs_db}
         results.append((freq_axis[b], snr_db, int(best_offsets[b]),
                          float(noise_power[b] / psd_scale), stft_score,
-                         score_ratio))
+                         score_ratio, fold_info))
 
     results.sort(key=lambda x: -x[1])
 
@@ -564,11 +573,11 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     min_sep = max(15, nfft // 4)
     merged = []
     used_bins = []
-    for freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio in results:
+    for freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio, fold_info in results:
         b = int(np.argmin(np.abs(freq_axis - freq_hz)))
         if any(abs(b - ub) <= min_sep for ub in used_bins):
             continue
-        merged.append((freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio))
+        merged.append((freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio, fold_info))
         used_bins.append(b)
         # Report only the strongest detection
         if len(merged) >= 1:
@@ -683,6 +692,8 @@ def main():
     print(f'  Segment         {samples_needed} samples  ({seg_sec:.1f} s)')
     print(f'  False alarm %   {args.pf * 100:.2g}%  '
           f'(~{fa_per_hour:.2f} false alarms/hour)')
+    print(f'  Det margin      {args.detection_margin:.2f}')
+    print(f'  Conf ratio      {args.confidence_ratio:.2f}')
     print(f'  UDP port        {args.port}')
     if args.center_freq > 0:
         print(f'  Center freq     {args.center_freq:.6f} MHz')
@@ -948,7 +959,7 @@ def main():
                 # detection that is more likely to be a false alarm.  Report
                 # these as SUBTHRESHOLD so the GCS can display them differently.
 
-                for freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio in detections:
+                for freq_hz, snr_db, offset, noise_psd, stft_score, score_ratio, fold_info in detections:
                     is_marginal = score_ratio < confidence_ratio
                     det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
                                   else DETECTION_STATUS_SUPERTHRESHOLD)
@@ -967,7 +978,7 @@ def main():
                             start_time_seconds=start_time_s,
                             predict_next_start_seconds=predict_next_s,
                             snr=snr_db,
-                            stft_score=stft_score,
+                            stft_score=score_ratio,
                             group_seq_counter=cycle,
                             group_ind=0,
                             group_snr=snr_db,
@@ -982,14 +993,20 @@ def main():
                               f'{abs_mhz:.6f} MHz  '
                               f'({freq_hz:+.1f} Hz)  '
                               f'SNR {snr_db:.1f} dB  '
+                              f'score_ratio {score_ratio:.3f}  '
                               f'noise {noise_psd:.3e}  '
                               f'{proc_ms:.0f} ms{delta_str}{gap_flag}{confidence_flag}')
                     else:
                         print(f'[{cycle:4d} {ts_str}]  DETECTED  '
                               f'{freq_hz:+.1f} Hz  '
                               f'SNR {snr_db:.1f} dB  '
+                              f'score_ratio {score_ratio:.3f}  '
                               f'noise {noise_psd:.3e}  '
                               f'{proc_ms:.0f} ms{delta_str}{gap_flag}{confidence_flag}')
+                    fold_snrs_str = ', '.join(f'{s:.1f}' for s in fold_info['fold_snrs'])
+                    print(f'  [FOLDS] score_ratio={score_ratio:.3f}  '
+                          f'uniformity={fold_info["uniformity"]:.3f}  '
+                          f'per_fold_snr=[{fold_snrs_str}] dB')
             else:
                 # Send a no-detection report so the controller/GCS knows
                 # we searched this cycle and found nothing.  Uses
@@ -997,6 +1014,7 @@ def main():
                 # status value that cannot be confused with a real pulse.
                 if pulse_sock is not None and args.freq:
                     start_time_s = current_ts / 1e9 if current_ts else time.time()
+                    nodet_score_ratio = best_candidate['score_ratio'] if best_candidate is not None else 0.0
                     send_pulse_udp(
                         pulse_sock, pulse_dest,
                         tag_id=args.tag_id,
@@ -1004,7 +1022,7 @@ def main():
                         start_time_seconds=start_time_s,
                         predict_next_start_seconds=0.0,
                         snr=0.0,
-                        stft_score=0.0,
+                        stft_score=nodet_score_ratio,
                         group_seq_counter=cycle,
                         group_ind=0,
                         group_snr=0.0,
