@@ -204,6 +204,7 @@ _ANTENNA_GAIN_DB = np.array([
 assert len(_ANTENNA_GAIN_ANGLES) == len(_ANTENNA_GAIN_DB), "Antenna gain table arrays must have matching lengths"
 assert all(_ANTENNA_GAIN_ANGLES[i] < _ANTENNA_GAIN_ANGLES[i + 1] for i in range(len(_ANTENNA_GAIN_ANGLES) - 1)), "Antenna gain angles must be monotonically increasing"
 assert _ANTENNA_GAIN_ANGLES[0] == 0.0, "Antenna gain table must start at 0° (boresight)"
+assert _ANTENNA_GAIN_ANGLES[-1] == 180.0, "Antenna gain table must end at 180°"
 
 # Pre-compute gain relative to boresight so 0° = 0 dB attenuation.
 _ANTENNA_ATTEN_DB = _ANTENNA_GAIN_DB - _ANTENNA_GAIN_DB[0]
