@@ -383,6 +383,8 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
             logInfo() << "Python detector thresholds: detectionMargin:" << detectionMargin << " confidenceRatio:" << confidenceRatio;
         }
 
+        _mavlink->setDetectionMode(startDetection.detection_mode);
+
         for (const TunnelProtocol::TagInfo_t& tagInfo: _tagDatabase) {
             if (startDetection.detection_mode == DETECTION_MODE_PYTHON) {
                 _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio);
@@ -400,7 +402,6 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         std::string startedStr = formatString("All processes started at center hz: %.3f", (double)startDetection.radio_center_frequency_hz / 1000000.0);
         _mavlink->sendStatusText(startedStr.c_str(), MAV_SEVERITY_INFO);
 
-        _mavlink->setDetectionMode(startDetection.detection_mode);
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_DETECTING);
     }).detach();
 
