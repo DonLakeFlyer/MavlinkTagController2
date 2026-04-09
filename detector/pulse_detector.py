@@ -12,7 +12,7 @@ Pipeline:
 The decimator must include this script's --port in its --ports list.
 
 Algorithm (per cycle):
-  1. Accumulate ~10 s of decimated IQ (enough for 5 pulse intervals)
+  1. Accumulate decimated IQ (enough for K pulse intervals)
   2. Compute STFT with window matched to pulse width (50% overlap)
   3. Fold the power spectrogram at the exact PRI (no M/J expansion)
   4. Threshold using Extreme Value Theory (Monte Carlo noise trials)
@@ -199,7 +199,7 @@ def build_weighting_matrix(n_w, Fs, zetas=None):
 # STFT
 # ---------------------------------------------------------------------------
 
-def compute_stft_power(iq, n_w, n_ol, nfft, W=None, min_windows=None):
+def compute_stft_power(iq, n_w, n_ol, nfft, W=None, min_windows=1):
     """Compute power spectrogram via overlapped short-time FFT.
 
     When W (spectral weighting matrix) is provided, the FFT is computed at
@@ -213,14 +213,12 @@ def compute_stft_power(iq, n_w, n_ol, nfft, W=None, min_windows=None):
         n_ol:        overlap in samples
         nfft:        FFT length (used only when W is None)
         W:           Optional (n_w, n_freq) spectral weighting matrix
-        min_windows: Minimum number of STFT windows required (default: K)
+        min_windows: Minimum number of STFT windows required (default: 1)
 
     Returns:
         power:     (n_freq, n_windows) float32 power spectrogram, DC-centred
         n_windows: number of time windows
     """
-    if min_windows is None:
-        min_windows = K
     n_ws = n_w - n_ol
     n_windows = (len(iq) - n_ol) // n_ws
     n_freq = W.shape[1] if W is not None else nfft
@@ -288,7 +286,8 @@ def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
                    * np.float32(1.0 / np.sqrt(2.0))
 
         # Run through the exact same STFT pipeline as real data
-        power, n_time = compute_stft_power(noise_iq, n_w, n_ol, nfft, W=W)
+        power, n_time = compute_stft_power(noise_iq, n_w, n_ol, nfft, W=W,
+                                           min_windows=K)
         if n_time == 0:
             continue
 
@@ -924,7 +923,8 @@ def main():
             had_gap = segment_has_gap
             segment_has_gap = False
 
-            power, n_win = compute_stft_power(segment, n_w, n_ol, nfft, W=W)
+            power, n_win = compute_stft_power(segment, n_w, n_ol, nfft, W=W,
+                                               min_windows=K)
 
             if args.debug:
                 seg_mag = np.abs(segment)

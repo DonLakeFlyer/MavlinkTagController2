@@ -154,6 +154,13 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     double  tp                          = tagInfo.pulse_width_msecs / 1000.0;
     double  centerFreqMhz              = double(tagInfo.channelizer_channel_center_frequency_hz) / 1000000.0;
 
+    // Validate K (fold count): must be >= 2 for meaningful integration.
+    // Default to 5 if the GCS sends 0 or 1 (unset or invalid).
+    uint32_t k = tagInfo.k >= 2 ? tagInfo.k : 5;
+    if (tagInfo.k < 2) {
+        logWarn() << "Tag" << tagId << "has invalid k=" << tagInfo.k << ", defaulting to 5";
+    }
+
     std::string repoDir     = formatString("%s/repos/MavlinkTagController2", _homePath);
     std::string venvPython  = formatString("%s/.venv/bin/python3", repoDir.c_str());
     std::string pythonCmd   = (access(venvPython.c_str(), X_OK) == 0) ? venvPython : std::string("python3");
@@ -173,7 +180,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                 centerFreqMhz, tagInfo.false_alarm_probability,
                                 detectionMargin, confidenceRatio,
                                 cacheDir.c_str(),
-                                tagInfo.k);
+                                k);
     if (_debugDetector) {
         commandStr += " --debug";
     }
