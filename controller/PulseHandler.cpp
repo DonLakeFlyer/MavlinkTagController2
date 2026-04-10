@@ -53,10 +53,12 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
     } else if (std::isfinite(udpPulseInfo.detection_status)
               && static_cast<uint8_t>(udpPulseInfo.detection_status) == DETECTION_STATUS_NO_DETECTION) {
         // No pulse detected this cycle — forward noise floor to GCS
-        pulseInfo.detection_status  = DETECTION_STATUS_NO_DETECTION;
-        pulseInfo.confirmed_status  = 0;
-        pulseInfo.noise_psd         = udpPulseInfo.noise_psd;
-        pulseInfo.start_time_seconds = udpPulseInfo.start_time_seconds;
+        pulseInfo.detection_status      = DETECTION_STATUS_NO_DETECTION;
+        pulseInfo.confirmed_status      = 0;
+        pulseInfo.stft_score            = udpPulseInfo.stft_score;
+        pulseInfo.noise_psd             = udpPulseInfo.noise_psd;
+        pulseInfo.group_seq_counter     = (uint16_t)udpPulseInfo.group_seq_counter;
+        pulseInfo.start_time_seconds    = udpPulseInfo.start_time_seconds;
 
         auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
         logDebug() << formatString("NO DETECTION Id: %2u score_ratio: %.3f noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
@@ -80,12 +82,12 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
         pulseInfo.group_snr                     = udpPulseInfo.group_snr;
         pulseInfo.detection_status              = (uint8_t)udpPulseInfo.detection_status;
         pulseInfo.confirmed_status              = (uint8_t)udpPulseInfo.confirmed_status;
-        pulseInfo.position_x                    = telemetry.position.latitude;
-        pulseInfo.position_y                    = telemetry.position.longitude;
-        pulseInfo.position_z                    = telemetry.position.relativeAltitude;
-        pulseInfo.orientation_x                 = telemetry.attitudeEuler.rollDegrees;
-        pulseInfo.orientation_y                 = telemetry.attitudeEuler.pitchDegrees;
-        pulseInfo.orientation_z                 = telemetry.attitudeEuler.yawDegrees;
+        pulseInfo.latitude                      = telemetry.position.latitude;
+        pulseInfo.longitude                     = telemetry.position.longitude;
+        pulseInfo.altitude_rel                  = telemetry.position.relativeAltitude;
+        pulseInfo.roll_deg                      = telemetry.attitudeEuler.rollDegrees;
+        pulseInfo.pitch_deg                     = telemetry.attitudeEuler.pitchDegrees;
+        pulseInfo.yaw_deg                       = telemetry.attitudeEuler.yawDegrees;
         pulseInfo.noise_psd                     = udpPulseInfo.noise_psd;
 
         // Simulator hack: when pointing within 45° of directly away from
@@ -104,15 +106,16 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
 
         bool isPythonDetector = (_mavlink->detectionMode() == DETECTION_MODE_PYTHON);
         std::string pulseStatus = isPythonDetector
-            ? formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f score_ratio: %.3f noise_psd: %5.1g freq: %9u seq: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+            ? formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f score_ratio: %.3f noise_psd: %5.1g freq: %9u seq: %u group_ind: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
                                         pulseInfo.confirmed_status,
                                         pulseInfo.tag_id,
                                         pulseInfo.snr,
-                                        pulseInfo.orientation_z,
+                                        pulseInfo.yaw_deg,
                                         pulseInfo.stft_score,
                                         pulseInfo.noise_psd,
                                         pulseInfo.frequency_hz,
                                         pulseInfo.group_seq_counter,
+                                        pulseInfo.group_ind,
                                         telemetry.position.latitude,
                                         telemetry.position.longitude,
                                         telemetry.attitudeEuler.yawDegrees,
@@ -121,7 +124,7 @@ void PulseHandler::handlePulse(const PulseHandler::UDPPulseInfo_T& udpPulseInfo)
                                         pulseInfo.confirmed_status,
                                         pulseInfo.tag_id,
                                         pulseInfo.snr,
-                                        pulseInfo.orientation_z,
+                                        pulseInfo.yaw_deg,
                                         pulseInfo.stft_score,
                                         pulseInfo.noise_psd,
                                         pulseInfo.frequency_hz,

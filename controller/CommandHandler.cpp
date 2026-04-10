@@ -150,7 +150,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     int     tagId                       = tagInfo.id + secondaryChannelIncrement;
     int     portData                    = isHFMode ? (10000 + secondaryChannelIncrement) : (20000 + ((tagInfo.channelizer_channel_number - 1) * 2) + secondaryChannelIncrement);
     int     sampleRate                  = isHFMode ? 3840 : 3750;
-    double  tip                         = (secondaryChannel ? tagInfo.intra_pulse2_msecs : tagInfo.intra_pulse1_msecs) / 1000.0;
+    double  tip                         = tagInfo.intra_pulse1_msecs / 1000.0;
     double  tp                          = tagInfo.pulse_width_msecs / 1000.0;
     double  centerFreqMhz              = double(tagInfo.channelizer_channel_center_frequency_hz) / 1000000.0;
 
@@ -183,6 +183,14 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                 k);
     if (_debugDetector) {
         commandStr += " --debug";
+    }
+
+    // If the tag has a secondary PRI, pass it as --tip-secondary so the
+    // detector runs multi-hypothesis rate-switch detection in a single process
+    // instead of requiring a separate detector process for the second rate.
+    if (tagInfo.intra_pulse2_msecs != 0) {
+        double tipSecondary = tagInfo.intra_pulse2_msecs / 1000.0;
+        commandStr += formatString(" --tip-secondary %f --min-uniformity 0.25", tipSecondary);
     }
 
     std::string root    = formatString("py_detector_%d", tagId);
@@ -400,10 +408,9 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
 
         for (const TunnelProtocol::TagInfo_t& tagInfo: _tagDatabase) {
             if (startDetection.detection_mode == DETECTION_MODE_PYTHON) {
+                // Python detector handles both rates in a single process via
+                // --tip-secondary, so only launch once per tag.
                 _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio);
-                if (tagInfo.intra_pulse2_msecs != 0) {
-                    _startPythonDetector(logFileManager, tagInfo, true /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio);
-                }
             } else {
                 _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
                 if (tagInfo.intra_pulse2_msecs != 0) {
@@ -438,6 +445,8 @@ bool CommandHandler::_handleStopDetection(void)
 
         delete _airspyPipe;
         _airspyPipe = NULL;
+
+        _simPhase = 0;
 
         _mavlink->setDetectionMode(DETECTION_MODE_UAVRT);
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
@@ -741,7 +750,7 @@ std::string CommandHandler::_sdrPathStatusText(AirSpyDeviceType deviceType, doub
     return formatString("SDR path selected: Unknown AirSpy @ %.3f MHz", frequencyMhz);
 }
 
-std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz) const
+std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
 {
     // Build the iq_simulator.py command line.
     // The simulator is a drop-in replacement for airspyhf_zeromq_rx, publishing
@@ -774,15 +783,70 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz) c
                             _simulatorPreset.c_str());
     }
 
-    // Build per-tag arguments
+    // Build per-tag arguments.
+    //
+    // For dual-rate tags (intra_pulse2_msecs != 0), the controller cycles
+    // through a 4-phase pattern across successive pie slices so the detector
+    // sees every combination:
+    //
+    //   Phase 0 (clean A):  --tip tipA                                     → group_ind 0
+    //   Phase 1 (A→B):      --tip tipA --tip-secondary tipB --switch-time T → group_ind 2+
+    //   Phase 2 (clean B):  --tip tipB                                     → group_ind 1
+    //   Phase 3 (B→A):      --tip tipB --tip-secondary tipA --switch-time T → group_ind 2+
+    //
+    // switch_time places the rate change at the midpoint of the K-group.
+    // The detector discards the first warmupSeconds of IQ data before
+    // detection starts, so switch_time must land after warmup plus
+    // enough lead-in pulses at the initial rate.  We use:
+    //   T = warmup + (K + K/2) * tip
+    // which gives K full pulses at the old rate (one complete segment)
+    // then K/2 more before switching, so the transition falls mid-group
+    // in the second detection cycle.
+    static constexpr double warmupSeconds = 5.0;  // must match --warmup-seconds default
+
+    uint32_t phase = _simPhase;
+    _simPhase = (_simPhase + 1) % 4;
+
     std::string tagArgs;
     for (const auto& tagInfo : _tagDatabase) {
         int32_t freqOffsetHz = static_cast<int32_t>(tagInfo.frequency_hz) - static_cast<int32_t>(radioCenterFrequencyHz);
         double tp  = tagInfo.pulse_width_msecs / 1000.0;
-        double tip = tagInfo.intra_pulse1_msecs / 1000.0;
-        tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
-                                freqOffsetHz, tp, tip);
+        double tipA = tagInfo.intra_pulse1_msecs / 1000.0;
+
+        if (tagInfo.intra_pulse2_msecs != 0) {
+            double tipB = tagInfo.intra_pulse2_msecs / 1000.0;
+            uint32_t k = tagInfo.k >= 2 ? tagInfo.k : 5;
+
+            switch (phase) {
+            case 0: // Clean A
+                tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
+                                        freqOffsetHz, tp, tipA);
+                break;
+            case 1: { // A → B transition
+                double switchTime = warmupSeconds + (k + k / 2) * tipA;
+                tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f --tip-secondary %f --switch-time %f",
+                                        freqOffsetHz, tp, tipA, tipB, switchTime);
+                break;
+            }
+            case 2: // Clean B
+                tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
+                                        freqOffsetHz, tp, tipB);
+                break;
+            case 3: { // B → A transition
+                double switchTime = warmupSeconds + (k + k / 2) * tipB;
+                tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f --tip-secondary %f --switch-time %f",
+                                        freqOffsetHz, tp, tipB, tipA, switchTime);
+                break;
+            }
+            }
+        } else {
+            tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
+                                    freqOffsetHz, tp, tipA);
+        }
     }
+
+    logInfo() << "_simulatorCommand: simPhase=" << phase
+              << " (" << (phase == 0 ? "clean A" : phase == 1 ? "A->B" : phase == 2 ? "clean B" : "B->A") << ")";
 
     return formatString("%s -u %s -P 5555%s",
                         pythonCmd.c_str(),

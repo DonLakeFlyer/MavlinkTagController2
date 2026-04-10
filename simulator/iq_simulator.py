@@ -70,12 +70,51 @@ class TagSignal:
     tp: float = 0.015                 # Pulse width in seconds
     tip: float = 2.0                  # Inter-pulse interval in seconds
     phase_offset: float = 0.0         # Initial pulse phase offset in seconds
+    tip_secondary: float = 0.0        # Secondary TIP for rate-switch (0 = disabled)
+    switch_time: float = 0.0          # Absolute time in seconds to switch from tip → tip_secondary (0 = disabled)
 
     def pulse_on(self, t: np.ndarray) -> np.ndarray:
         """Return a boolean mask: True where the pulse is active."""
-        # Time within the current pulse period
+        if self.tip_secondary and self.tip_secondary > 0 and self.switch_time and self.switch_time > 0:
+            return self._pulse_on_rate_switch(t)
+        # Fixed-rate: simple modular arithmetic
         t_mod = (t - self.phase_offset) % self.tip
         return t_mod < self.tp
+
+    def _pulse_on_rate_switch(self, t: np.ndarray) -> np.ndarray:
+        """Generate pulse mask with a one-shot rate switch at switch_time.
+
+        Before switch_time pulses repeat at self.tip; after switch_time
+        they repeat at self.tip_secondary.  The first post-switch pulse
+        is placed one tip_secondary interval after the last pre-switch
+        pulse, keeping phase continuous.
+        """
+        mask = np.zeros(len(t), dtype=bool)
+        t_switch = self.switch_time
+
+        # --- pre-switch region (rate = tip) ---
+        pre = t < t_switch
+        if np.any(pre):
+            t_mod = (t[pre] - self.phase_offset) % self.tip
+            mask[pre] = t_mod < self.tp
+
+        # --- post-switch region (rate = tip_secondary) ---
+        post = t >= t_switch
+        if np.any(post):
+            # Last pre-switch pulse start: largest multiple of tip before switch_time.
+            # Guard against switch_time <= phase_offset (no pre-switch pulses):
+            # anchor post-switch pulses directly at phase_offset.
+            if t_switch <= self.phase_offset:
+                n_pre_pulses = 0
+            else:
+                n_pre_pulses = int((t_switch - self.phase_offset) / self.tip)
+            last_pre_pulse = self.phase_offset + n_pre_pulses * self.tip
+            # First post-switch pulse starts one tip_secondary after the last pre-switch pulse
+            post_phase = last_pre_pulse + self.tip_secondary
+            t_mod = (t[post] - post_phase) % self.tip_secondary
+            mask[post] = t_mod < self.tp
+
+        return mask
 
 
 @dataclass
@@ -147,6 +186,16 @@ PRESETS = {
         tags=[TagSignal(freq_offset_hz=0.0, snr_db=20.0, tp=0.015, tip=2.0)],
         gap_seconds=0.1,
         gap_interval=10.0,
+    ),
+    # One-shot rate-switch: switches from tip to tip_secondary mid-K-group.
+    # The controller cycles through clean A / A→B / clean B / B→A phases
+    # across successive pie slices.
+    "rate-switch": SimConfig(
+        noise_power_dbfs=-40.0,
+        tags=[TagSignal(
+            freq_offset_hz=0.0, snr_db=20.0, tp=0.015,
+            tip=2.0, tip_secondary=1.333, switch_time=34.0,
+        )],
     ),
 }
 
@@ -447,10 +496,14 @@ def run(cfg: SimConfig) -> None:
           f"seed={cfg.seed}",
           file=sys.stderr)
     for i, tag in enumerate(cfg.tags):
-        print(f"iq_simulator: tag[{i}] freq_offset={tag.freq_offset_hz:+.1f} Hz "
-              f"snr={tag.snr_db:.1f} dB  tp={tag.tp*1000:.1f} ms  "
-              f"tip={tag.tip:.3f} s  phase_offset={tag.phase_offset:.3f} s",
-              file=sys.stderr)
+        line = (f"iq_simulator: tag[{i}] freq_offset={tag.freq_offset_hz:+.1f} Hz "
+                f"snr={tag.snr_db:.1f} dB  tp={tag.tp*1000:.1f} ms  "
+                f"tip={tag.tip:.3f} s  phase_offset={tag.phase_offset:.3f} s")
+        if tag.tip_secondary > 0:
+            line += f"  rate-switch: tip_secondary={tag.tip_secondary:.3f} s"
+            if tag.switch_time > 0:
+                line += f"  switch_time={tag.switch_time:.1f} s"
+        print(line, file=sys.stderr)
 
     # Let subscribers connect
     time.sleep(0.5)
@@ -620,6 +673,10 @@ Examples:
                     help="Inter-pulse interval in seconds. Repeat for multiple tags.")
     p.add_argument("--phase-offset", type=float, action="append", default=None,
                     help="Pulse phase offset in seconds. Repeat for multiple tags.")
+    p.add_argument("--tip-secondary", type=float, action="append", default=None,
+                    help="Secondary TIP for rate-switch in seconds (0 = disabled). Repeat for multiple tags.")
+    p.add_argument("--switch-time", type=float, action="append", default=None,
+                    help="Time in seconds to switch from tip to tip-secondary (0 = disabled). Repeat for multiple tags.")
 
     # Distance model
     p.add_argument("--distance-m", type=float, default=0.0,
@@ -705,6 +762,8 @@ Examples:
         tps = _pad_list(args.tp, n_tags, 0.015)
         tips = _pad_list(args.tip, n_tags, 2.0)
         phases = _pad_list(args.phase_offset, n_tags, 0.0)
+        tips_secondary = _pad_list(args.tip_secondary, n_tags, 0.0)
+        switch_times = _pad_list(args.switch_time, n_tags, 0.0)
 
         cfg.tags = []
         for i in range(n_tags):
@@ -714,6 +773,8 @@ Examples:
                 tp=tps[i],
                 tip=tips[i],
                 phase_offset=phases[i],
+                tip_secondary=tips_secondary[i],
+                switch_time=switch_times[i],
             ))
 
     # Apply distance model to first tag
