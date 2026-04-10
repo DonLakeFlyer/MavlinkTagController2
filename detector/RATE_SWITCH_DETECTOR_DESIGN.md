@@ -1,176 +1,170 @@
 # Rate Switch Aware Detector Design
 
-## Overview
+## Problem
 
-This document describes detector implementations that can handle pulse repetition rate changes during an active detection window, instead of assuming a single fixed inter-pulse interval per cycle.
+A VHF collar transmits pulses at one of two known rates (e.g. 1.5s resting, 2.0s moving). It can switch between them. The detector folds K consecutive pulses to boost SNR. If a rate switch happens mid-segment, a single-rate fold misaligns some pulses and loses sensitivity.
 
-The current detector flow is documented in `README.md`, and cross-rate leakage behavior is described in `CROSS_RATE_REJECTION.md`. This design extends that flow with explicit rate-switch modeling.
+## Key Constraints
 
-## Problem Statement
+1. **Two rates are known exactly.** They come from the collar spec and are configured at startup.
+2. **Crystal oscillator timing.** Pulse timing has ppm-level drift — negligible even at K=20. A fold template built from the configured rates will land exactly on each pulse.
+3. **Clean transitions.** Every inter-pulse gap is exactly rate A or rate B — there are no intermediate or anomalous gaps during a switch. The collar transitions directly from one rate to the other.
+4. **At most one switch per segment.** The collar changes rate infrequently. Within K pulses, there is at most one transition point.
+5. **The segment must be long enough for K folds at the slowest rate.** This ensures all hypotheses fit within the available data.
 
-A collar can switch between two pulse repetition intervals during motion or behavior change. If a detector assumes a single PRI for the full segment, a mid-segment switch causes partial fold misalignment and temporary sensitivity loss, especially for weak long-range signals.
+## Hypothesis Enumeration
 
-Goal:
-- Detect both stable-rate and switch-rate segments with minimal long-range sensitivity loss.
+Given these constraints, the set of possible pulse schedules is small and exact.
 
-Non-goals:
-- Full blind search over arbitrary unknown pulse schedules.
-- Large compute growth from dense brute-force rate banks.
+Each schedule is a sequence of K−1 gaps. Each gap is either rate A or rate B. With at most one switch point, the possibilities are:
 
-## Recommended Implementation
+- **Pure A**: all gaps are A → `[A, A, A, A]`
+- **Pure B**: all gaps are B → `[B, B, B, B]`
+- **A→B at change-point c**: first c gaps are A, rest are B (c = 1..K−2)
+- **B→A at change-point c**: first c gaps are B, rest are A (c = 1..K−2)
 
-Use a single detector process with one STFT pass and a multi-hypothesis fold bank that includes change-point schedules.
+For K=5 this gives exactly **8 hypotheses**. For K=10 it gives **18**. One of them is guaranteed to match the actual pulse pattern exactly.
 
-Why:
-- Reuses existing STFT and noise/threshold pipeline in `pulse_detector.py`.
-- Models the exact event of interest: one rate switching to another within a segment.
-- Lower integration risk than full adaptive trackers.
+## Detection
 
-## Signal Model
+For each hypothesis, the detector:
+1. Computes fold window indices from the gap schedule (cumulative sum of N_A and N_B spacings, with fractional PRI rounded per-offset).
+2. Slides the template across all valid start positions within the segment.
+3. Sums STFT power at the K window positions → fold score.
 
-Let:
-- $P(f,t)$ be STFT power at frequency bin $f$ and time-window index $t$.
-- $K$ be fold count (currently 5).
-- $N_A$ and $N_B$ be window spacings for the two PRIs.
-- $t_0$ be first-pulse offset candidate.
+The best score across all hypotheses and start positions is compared against an EVT-derived threshold (calibrated over the full hypothesis bank to control false alarm rate).
 
-A hypothesis defines an inter-pulse schedule $\sigma = [\sigma_0,\sigma_1,\dots,\sigma_{K-2}]$ of length $K-1$, where each $\sigma_k \in \{A,B\}$.
+## Uniformity Filter
 
-Pulse window indices:
-$$
-i_0 = t_0,\quad
-i_k = t_0 + \sum_{j=0}^{k-1} N_{\sigma_j},\; k \ge 1
-$$
+After thresholding, a uniformity check rejects detections where pulse power is concentrated in a subset of folds (cross-rate leakage). Uniformity = min fold power / max fold power. Reject if below `min_uniformity` (default 0.25).
 
-Fold score:
-$$
-S_h(f,t_0) = \sum_{k=0}^{K-1} P(f, i_k)
-$$
+For a correctly matched hypothesis, all K folds land on real pulses, so uniformity is high. For a mismatched hypothesis, some folds land on noise, giving near-zero uniformity.
 
-For two rates and one switch max, hypothesis set is:
-- Pure A
-- Pure B
-- A to B at change-point $c \in \{1,\dots,K-2\}$ (non-degenerate switches only)
-- B to A at change-point $c \in \{1,\dots,K-2\}$ (non-degenerate switches only)
+## Configuration
 
-For $K=5$, the total number of hypotheses is 8.
+- `--tip-secondary <seconds>`: enables multi-hypothesis mode with the second rate.
+- `--min-uniformity <float>`: uniformity threshold (controller passes 0.25 for dual-rate).
+- If `--tip-secondary` is absent, behavior matches the single-rate detector exactly.
 
-## Detection Statistic and Thresholding
+## Pulse Reporting Pipeline (Python Detector → Tag Tracker GCS)
 
-For each frequency bin:
-- Evaluate all valid $t_0$ and hypotheses.
-- Keep best hypothesis score:
-$$
-S^\star(f) = \max_{h,t_0} S_h(f,t_0)
-$$
+### Architecture difference from C++ detector
 
-Decision:
-- Compare $S^\star(f)$ to per-bin threshold derived from EVT and per-bin noise scaling, consistent with current method in `README.md`.
+The C++ detector (`DETECTION_MODE_UAVRT`) launches **two** processes per dual-rate tag — one for each PRI — with tag IDs `id` (primary) and `id + 1` (secondary). Tag Tracker distinguishes rates by tag ID (even = secondary).
 
-Important:
-- EVT calibration must include the larger search space (all hypotheses and offsets), otherwise false alarm rate will be underestimated.
+The Python detector (`DETECTION_MODE_PYTHON`) launches a **single** process per tag. Both rates and all switch hypotheses are evaluated in one fold pass. Rate-switch information is encoded in the `group_ind` field of each pulse report.
 
-## Uniformity and Robustness Filters
+### Detector → Controller (UDP)
 
-Apply post-threshold checks to reject cross-rate leakage and pathological patterns.
+`send_pulse_udp()` packs 12 little-endian IEEE-754 doubles (96 bytes) to `127.0.0.1:50000`:
 
-On-window uniformity:
-$$
-U_h = \frac{\min_k P(f,i_k)}{\max_k P(f,i_k)}
-$$
-Reject if $U_h < U_{min}$.
+| Index | Field | Type | Description |
+|-------|-------|------|-------------|
+| 0 | `tag_id` | double→uint32 | Tag ID from `TagInfo_t.id` |
+| 1 | `frequency_hz` | double→uint32 | Detection frequency; 0 = heartbeat |
+| 2 | `start_time_seconds` | double | Segment collection timestamp (wall clock) |
+| 3 | `predict_next_start_seconds` | double | Expected next pulse time (uses last-rate PRI) |
+| 4 | `snr` | double | Per-pulse SNR in dB |
+| 5 | `stft_score` | double | Score / threshold ratio |
+| 6 | `group_seq_counter` | double→uint16 | Cycle counter (same for all pulses in a group) |
+| 7 | `group_ind` | double→uint16 | Rate-switch hypothesis encoding (see below) |
+| 8 | `group_snr` | double | Incoherently summed K-group SNR |
+| 9 | `detection_status` | double→uint8 | 0=sub, 1=super, 2=confirmed, 3=no-detection |
+| 10 | `confirmed_status` | double→uint8 | 1=confirmed, 0=unconfirmed |
+| 11 | `noise_psd` | double | Estimated noise PSD at pulse frequency |
 
-Recommended:
-- Start with $U_{min}=0.25$ (same rationale as `CROSS_RATE_REJECTION.md`).
-- Expose as runtime parameter for tuning in harsh multipath environments.
+### `predict_next_start_seconds` rate selection
 
-Optional switch penalty:
-$$
-J_h = S_h - \lambda \cdot n_{switch}(h)
-$$
-Use $J_h$ for ranking to avoid over-preferring switch hypotheses in noise. Keep penalty small and validate with replay.
+The predicted next-pulse time uses the PRI from the **last gap** of the winning hypothesis:
+- If the hypothesis ends on rate B (e.g. `"B"`, `"A_to_B_c2"`), prediction uses `tip_secondary`.
+- Otherwise (e.g. `"A"`, `"B_to_A_c2"`), prediction uses `tip`.
 
-## Long-Range Sensitivity Safeguards
+Tag Tracker can compare successive `predict_next_start_seconds` values against both known TIPs to infer which rate is currently active.
 
-To preserve weak-signal performance:
-- Keep hypothesis family small (pure plus single-switch only).
-- Prefer soft penalties over hard rejection.
-- Require only one robust uniformity threshold, not multiple strict filters.
-- Maintain current per-bin adaptive threshold scaling.
-- Validate at low SNR with synthetic and replay data.
+### Controller → GCS (MAVLink tunnel)
 
-Expected behavior:
-- Better than fixed-PRI detector during transition windows.
-- Similar sensitivity to current detector in steady-rate segments.
+`PulseHandler::handlePulse()` copies all UDP fields into `PulseInfo_t` and attaches vehicle telemetry (lat/lon/alt/roll/pitch/yaw) from the telemetry cache based on `start_time_seconds`. The struct is sent as raw bytes inside a `TUNNEL` MAVLink message.
 
-## Complexity and Performance
+Key `PulseInfo_t` fields for rate-switch (defined in `TunnelProtocol.h`):
 
-Compute increase is mainly in fold stage, not STFT:
-- STFT cost unchanged (single pass).
-- Fold cost scales by number of hypotheses.
-- For two-rate single-switch bank, fold work is about 10x current single-hypothesis fold, but still small relative to SDR and transport pipeline in typical settings.
+| Field | Type | Rate-switch usage |
+|-------|------|-------------------|
+| `tag_id` | uint32_t | Same tag ID for both rates (no +1 split) |
+| `group_ind` | uint16_t | Hypothesis encoding (see below) |
+| `predict_next_start_seconds` | double | Uses winning hypothesis's last-rate PRI |
+| `detection_status` | uint8_t | 3 = no detection (one per cycle, not two) |
+| `stft_score` | double | Score/threshold ratio; for no-detection carries best sub-threshold ratio |
 
-## Interface and Configuration
+### `group_ind` hypothesis encoding
 
-Add parameters:
-- `--tip-secondary`: secondary inter-pulse interval (seconds).
-- `--enable-rate-switch-bank`: enable change-point hypotheses.
-- `--max-switches-per-segment`: default 1. Values greater than 1 are not supported in the initial single-switch implementation and are reserved for future multi-switch schedules.
-- `--min-uniformity`: default 0.25.
-- `--switch-penalty`: default small positive value.
+The `group_ind` field encodes the winning rate-switch hypothesis for the K-group:
 
-Backwards compatibility:
-- If `--tip-secondary` is absent, behavior matches current single-rate detector.
+| `group_ind` value | Meaning | Hypothesis label |
+|-------------------|---------|------------------|
+| 0 | Pure rate A (primary/resting TIP) | `"A"` |
+| 1 | Pure rate B (secondary/moving TIP) | `"B"` |
+| 2 .. K−1 | A→B switch at change-point c (c = group_ind − 1) | `"A_to_B_c{c}"` |
+| K .. 2K−3 | B→A switch at change-point c (c = group_ind − K + 1) | `"B_to_A_c{c}"` |
 
-## Integration Plan
+For K=5, the values are:
 
-1. Add hypothesis generation and index construction in fold stage in `pulse_detector.py`.
-2. Update EVT threshold generation to calibrate over full hypothesis bank.
-3. Add uniformity check at the integration point described in `CROSS_RATE_REJECTION.md`.
-4. Extend logs with selected hypothesis type:
-   - A
-   - B
-   - A_to_B_cX
-   - B_to_A_cX
-5. Keep UDP reporting format unchanged initially. Include hypothesis label in logs first.
+| `group_ind` | Hypothesis |
+|-------------|------------|
+| 0 | Pure A |
+| 1 | Pure B |
+| 2 | A→B switch at pulse 1 |
+| 3 | A→B switch at pulse 2 |
+| 4 | A→B switch at pulse 3 |
+| 5 | B→A switch at pulse 1 |
+| 6 | B→A switch at pulse 2 |
+| 7 | B→A switch at pulse 3 |
 
-## Validation Plan
+For single-rate tags (`intra_pulse2_msecs == 0`), `group_ind` is always 0.
 
-Unit tests:
-- Index generation for pure and switch hypotheses.
+### No-detection behavior
+
+When the detector searches a cycle and finds no pulse above threshold, it sends a single report with `detection_status = 3`. Key field values for no-detection:
+
+- `snr = 0`
+- `predict_next_start_seconds = 0`
+- `group_ind = 0`
+- `stft_score` = best sub-threshold score ratio (useful for diagnostics)
+- `noise_psd` = observed noise floor
+
+Because the Python detector is a single process, Tag Tracker receives **one** no-detection message per cycle per tag — unlike the C++ detector which sends two (one per tag ID).
+
+### Tag Tracker GCS implementation requirements
+
+To support Python rate-switch detection, Tag Tracker must:
+
+1. **Decode `group_ind`** using the encoding table above when `detection_mode == DETECTION_MODE_PYTHON` (1). The tag's K value (from `TagInfo_t.k`) is needed to interpret the B→A range.
+2. **Display activity state**: Map `group_ind` to a user-visible label (resting/moving/switching). Change-point hypotheses indicate the tag is transitioning.
+3. **Use `predict_next_start_seconds` for timing**: This already reflects the detected rate. No need for Tag Tracker to independently compute next-pulse timing.
+4. **Handle single no-detection per tag**: Only one `detection_status == 3` message per cycle (not two).
+5. **No tag ID splitting**: Both rates report under the same `tag_id`. Do not look for an even-numbered companion tag when `detection_mode == DETECTION_MODE_PYTHON`.
+
+### Simulator support for rate-switch testing
+
+The IQ simulator (`simulator/iq_simulator.py`) supports rate switching:
+
+- **Preset**: `--preset rate-switch` (tip=2.0s → tip_secondary=1.333s, switch at 34s).
+- **CLI args**: `--tip-secondary <seconds> --switch-time <seconds>` per tag.
+- **Controller plumbing**: When `intra_pulse2_msecs != 0`, `CommandHandler::_simulatorCommand()` passes `--tip-secondary` and computes `--switch-time` including simulator warmup: `switch_time = warmupSeconds + (K + K/2) * tip` (integer division for `K/2`). This places the rate change halfway through the first post-warmup K-grouping.
+
+## Integration Status
+
+Complete:
+1. Hypothesis generation (`build_hypothesis_indices`) and multi-hypothesis fold (`fold_multi_hypothesis`) in `pulse_detector.py`.
+2. EVT threshold calibrated over full hypothesis bank.
+3. Uniformity check applied post-threshold, gated by `--min-uniformity`.
+4. Detection logs include hypothesis label (e.g. `hyp=A_to_B_c2`).
+5. UDP reporting includes `group_ind` derived from hypothesis label.
+6. Controller launches a single detector process per tag; passes `--tip-secondary` and `--min-uniformity 0.25` when dual-rate.
+
+## Tests
+
+- Hypothesis index generation for pure and switch schedules.
 - Boundary conditions for valid offsets and segment edges.
 - Uniformity metric correctness.
-
-Monte Carlo:
-- Verify empirical false alarm rate matches target pf after hypothesis-bank EVT calibration.
-
-Scenario tests:
-- Stable A only.
-- Stable B only.
-- A to B switch mid-segment.
-- B to A switch mid-segment.
-- Cross-rate strong interferer.
-- Low-SNR long-range pulses with and without fading.
-
-Acceptance criteria:
-- No steady-state sensitivity regression versus current detector.
-- Reduced missed detections across rate-switch transitions.
-- Controlled false alarm behavior at configured pf.
-
-## Alternative Implementations
-
-Adaptive PRI tracker:
-- Estimates PRI from detected pulse times each cycle.
-- Better for unknown rates but less stable at low SNR.
-
-Dense multi-rate bank:
-- Covers many PRIs and switch windows.
-- High compute and stricter multiple-testing correction burden.
-
-HMM or IMM state model:
-- Strong theoretical framework for switching dynamics.
-- Higher implementation and tuning complexity.
-
-## Recommendation
-
-Implement the single-process multi-hypothesis fold bank with one-switch schedules first. It directly targets mid-window rate changes, minimizes architecture disruption, and is most likely to preserve long-range detection performance.
+- End-to-end fold detection at both rates and during switches.
+- EVT false alarm rate validation with full hypothesis bank.

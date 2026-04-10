@@ -1,4 +1,4 @@
-name: Build
+name: Tests
 
 on:
   push:
@@ -9,33 +9,21 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  decimator:
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            preset: debug
-            install_deps: >-
-              sudo apt-get update && sudo apt-get install -y
-              build-essential cmake pkg-config
-              libboost-system-dev libboost-thread-dev libboost-filesystem-dev
-              libzmq3-dev libusb-1.0-0-dev libairspyhf-dev
-          - os: ubuntu-24.04
-            preset: release
             install_deps: >-
               sudo apt-get update && sudo apt-get install -y
               build-essential cmake pkg-config
               libboost-system-dev libboost-thread-dev libboost-filesystem-dev
               libzmq3-dev libusb-1.0-0-dev libairspyhf-dev
           - os: macos-latest
-            preset: debug
-            install_deps: brew install cmake pkg-config boost zeromq libusb airspyhf
-          - os: macos-latest
-            preset: release
             install_deps: brew install cmake pkg-config boost zeromq libusb airspyhf
 
-    name: build (${{ matrix.os }}, ${{ matrix.preset }})
+    name: c++ (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -48,24 +36,22 @@ jobs:
         run: ${{ matrix.install_deps }}
 
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset debug
 
       - name: Build
-        run: cmake --build --preset ${{ matrix.preset }}
+        run: cmake --build --preset debug
 
       - name: Test
-        if: matrix.preset == 'debug'
-        run: ctest --preset debug
+        run: ctest --preset debug --output-on-failure
 
-  # ── Pulse detector validation ──────────────────────────────────────
   detector:
-    name: detector (${{ matrix.os }}, py${{ matrix.python-version }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest]
         python-version: ['3.11', '3.12']
 
+    name: detector-simulator-python (${{ matrix.os }}, ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -79,13 +65,28 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install numpy scipy
+          ./setup_venv.sh
+          source .venv/bin/activate
+          pip install pytest
 
       - name: Syntax check
-        run: python -m py_compile detector/pulse_detector.py
+        run: |
+          source .venv/bin/activate
+          python -m py_compile detector/pulse_detector.py
+          python -m py_compile simulator/iq_simulator.py
 
       - name: Validate help output
         run: |
+          source .venv/bin/activate
           cd detector
           python pulse_detector.py --help
+
+      - name: Detector tests
+        run: |
+          source .venv/bin/activate
+          python -m pytest detector/tests/ -v --tb=short
+
+      - name: Simulator tests
+        run: |
+          source .venv/bin/activate
+          python -m pytest simulator/tests/ -v --tb=short

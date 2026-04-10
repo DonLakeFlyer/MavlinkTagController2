@@ -46,7 +46,7 @@ private:
     std::string _tunnelCommandIdToString    (uint32_t command);
     std::string _tunnelCommandResultToString(uint32_t result);
 
-    std::string _simulatorCommand(uint32_t radioCenterFrequencyHz) const;
+    std::string _simulatorCommand(uint32_t radioCenterFrequencyHz);
 
     MavlinkSystem*                  _mavlink                = nullptr;
     TagDatabase                     _tagDatabase;
@@ -59,6 +59,7 @@ private:
     bool                            _simulatorMode          = false;
     std::string                     _simulatorPreset;
     bool                            _debugDetector          = false;
+    uint32_t                        _simPhase               = 0;        // 4-phase cycle: 0=A, 1=A→B, 2=B, 3=B→A
 
     static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3840 Hz outgoing
 };
