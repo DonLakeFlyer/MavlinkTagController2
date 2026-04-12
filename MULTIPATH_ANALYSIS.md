@@ -52,7 +52,7 @@ The **180° ambiguity check** does not catch this — ground reflection arrives 
 
 The fundamental fix. A **right-hand circularly polarised (RHCP)** antenna on the drone causes the ground-reflected signal to arrive as LHCP, which an RHCP antenna strongly rejects. The direct signal from the linearly polarised collar is received with a 3 dB penalty, but the ground reflection suppression is typically 15–25 dB — a net gain under multipath conditions.
 
-For a 3-element Yagi at 146 MHz (half-wave elements, ~102 cm driven element, ~100 cm boom), a phased cross-dipole feed achieves RHCP. The antenna is mechanically simple — single boom, no switching required — and robust for bush operations.
+For a 3-element Yagi at 146 MHz a phased cross-dipole feed achieves RHCP. See `YAGI_ANTENNA_DESIGN.md` for exact element and boom dimensions. The antenna is mechanically simple — single boom, no switching required — and robust for bush operations.
 
 **Note:** Switching to a Yagi requires updating the antenna pattern LUT in `RotationInfo.cc`. The RA-2AK pattern currently hardcoded does not match a Yagi's sharper forward lobe (~60° 3 dB beamwidth) and lower sidelobes. The mounted pattern on the 680 frame should be characterised empirically to account for prop wash and frame reflections.
 
@@ -117,7 +117,7 @@ The path length difference between direct and reflected signals is:
 Δr ≈ 2h × sin(θ)
 ```
 
-where `h` is AGL height and `θ` is elevation angle to the collar. At 400 ft / 5 km, `Δr ≈ 6 m`. A **30 ft (~9 m) altitude change** shifts the path length difference by ~0.5 m — roughly a quarter wavelength at 146 MHz — which is enough to move significantly within the interference fringe pattern.
+where `h` is AGL height and `θ` is elevation angle to the collar. At 400 ft / 5 km, `Δr ≈ 6 m`. A **30 ft (~9 m) altitude change** shifts the path length difference by about **0.44 m** (~0.21λ at 146 MHz) — which is enough to move significantly within the interference fringe pattern.
 
 This is why the targeted re-test at a second altitude is effective: it does not need to fully escape the multipath zone, only to sample a sufficiently different point on the standing wave pattern to distinguish consistent signal from fading.
 
