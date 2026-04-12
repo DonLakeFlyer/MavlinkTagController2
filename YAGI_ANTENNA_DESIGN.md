@@ -98,7 +98,7 @@ If you purchased the Arrow 146-3, the boom, reflector, and director are already 
 - 1× length of Easton aluminium arrow shaft or 9.5 mm aluminium tube, 966 mm total (2× 483 mm arms) — for the second dipole
 - 1× small aluminium or HDPE cross-hub to mount both dipoles at 90° on the Arrow's 3/4" boom (fabricate from flat stock or 3D print in PETG)
 - 1× BNC T-connector (female-female-male)
-- ~380 mm of RG-59 75-ohm coax with solid PE dielectric (velocity factor 0.66) — for the delay line
+- ~380 mm of RG-59 75-ohm coax with solid PE dielectric (velocity factor 0.66) — starting stock length, to be trimmed to a 338 mm delay line
 - 2× BNC male connectors to terminate the delay line
 - Heat shrink and self-amalgamating tape for weatherproofing
 
@@ -110,7 +110,7 @@ If you purchased the Arrow 146-3, the boom, reflector, and director are already 
 Physical length = 512 mm × 0.66 = 338 mm
 ```
 
-Cut the RG-59 to **338 mm** tip-to-tip including the connectors. Verify electrically with a VNA — the line should present a short circuit at 146.5 MHz when the far end is open, or an open circuit when the far end is shorted.
+**338 mm** is the electrical quarter-wave target for the coax section. Connector bodies add physical length, so cut the RG-59 slightly long, fit the BNC connectors, then verify and trim with a VNA until the assembled delay line is an electrical λ/4 at 146.5 MHz. The line should present a short circuit at 146.5 MHz when the far end is open, or an open circuit when the far end is shorted.
 
 **Assembly steps:**
 
