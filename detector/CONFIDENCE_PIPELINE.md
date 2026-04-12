@@ -9,7 +9,7 @@ The detector uses a layered threshold system. Each layer serves a distinct role:
 
 | Layer | Parameter | Default | Purpose |
 |-------|-----------|---------|---------|
-| 1 | `false_alarm_prob` (pf) | 0.01 | Sets the fundamental noise-floor threshold via EVT |
+| 1 | `false_alarm_prob` (pf) | 0.05 | Sets the fundamental noise-floor threshold via EVT |
 | 2 | `detection_margin` | 0.90 | Lowers the threshold to increase sensitivity |
 | 3 | `confidence_ratio` | 1.30 | Classifies detections as HIGH or LOW confidence |
 | — | `uniformity` | — | Diagnostic metric (not used in classification) |
@@ -169,9 +169,10 @@ uniformity = on_powers.min() / max(on_powers.max(), 1e-30)
 ### Current status
 
 Uniformity is:
-- **Computed** for every detection (line 537 in `pulse_detector.py`)
+- **Computed** for every detection in `pulse_detector.py`
 - **Logged** in the `[FOLDS]` diagnostic line
-- **Stored** in `fold_info` and available to downstream code
+- **Stored** in the in-process `fold_info` dict for local downstream use
+- **NOT sent** in the current UDP packet format, so it is not available to the controller/GCS unless the wire format is extended
 - **NOT used** in the SUBTHRESHOLD/SUPERTHRESHOLD classification
 
 A detection with `uniformity=0.000` will still be classified as `Conf:1` if

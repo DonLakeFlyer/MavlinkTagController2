@@ -183,6 +183,8 @@ To flip to LHCP if needed, swap which dipole receives the delay line.
 
 `RotationInfo.cc` in TagTracker contains a hardcoded empirical pattern LUT for the RA-2AK antenna sampled at 10° intervals. **This must be replaced before flying the Yagi.** Using the wrong pattern in the LM fit will produce systematically biased bearings.
 
+**Repository note:** `RotationInfo.cc` and related classes such as `RotateAndCaptureStateBase` are part of the separate TagTracker application codebase (QGroundControl fork); they are not in this monorepo.
+
 The Yagi pattern is well-approximated theoretically but the mounted pattern on the 680 frame will differ due to frame and prop reflections. The recommended process:
 
 1. Use the theoretical pattern (tabulated below) as a starting point for initial testing
