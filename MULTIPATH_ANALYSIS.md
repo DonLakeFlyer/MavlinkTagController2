@@ -141,7 +141,7 @@ These changes do not address multipath directly but improve the bearing estimate
 
 #### Confirmed-Status Weighting in the LM Fit
 
-The LM fit in `RotationInfo.cc` currently assigns equal weight to all slices regardless of detection quality. `PulseInfo_t` already carries `confirmed_status` (0 = unconfirmed, 1 = confirmed), which indicates whether the detected pulse aligned with a prior pulse prediction. A confirmed detection is a higher-quality measurement than an unconfirmed one.
+The LM fit in `RotationInfo.cc` currently assigns equal weight to all slices regardless of detection quality. `PulseInfo_t` already carries `confirmed_status` (0 = unconfirmed, 1 = confirmed), which indicates whether the detection's score_ratio exceeded the confidence_ratio gate (i.e., `score_ratio >= confidence_ratio`). A confirmed detection has a stronger score and is a higher-quality measurement than an unconfirmed one.
 
 Adding a per-slice weight vector to the LM cost function — confirmed slices weight 1.0, unconfirmed slices weight 0.5 — would give higher-confidence observations more influence on the fitted bearing. The practical benefit is limited if most detections at 5+ km are unconfirmed, but costs almost nothing to implement.
 
