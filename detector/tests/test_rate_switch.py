@@ -350,7 +350,7 @@ class TestFoldMultiHypothesis:
 # ---------------------------------------------------------------------------
 
 class TestMaxFoldFraction:
-    """Verify that max_fold_fraction is correctly computed in fold_info."""
+    """Verify the dominant-fold ratio used to derive max_fold_fraction from on_powers."""
 
     def test_uniform_signal_low_fraction(self):
         """Equal-power folds should produce max_fold_fraction = 1/K."""
