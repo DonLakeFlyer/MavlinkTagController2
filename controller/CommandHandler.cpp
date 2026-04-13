@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <future>
@@ -22,11 +23,14 @@
 #include "channelizerTuner.h"
 #include "MavlinkSystem.h"
 #include "LogFileManager.h"
+#include "TelemetryCache.h"
+#include "BearingCalculator.h"
 
 using namespace TunnelProtocol;
 
-CommandHandler::CommandHandler(MavlinkSystem* mavlink, bool simulatorMode, const std::string& simulatorPreset, bool debugDetector)
+CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode, const std::string& simulatorPreset, bool debugDetector)
     : _mavlink          (mavlink)
+    , _telemetryCache   (telemetryCache)
     , _homePath         (getenv("HOME"))
     , _simulatorMode    (simulatorMode)
     , _simulatorPreset  (simulatorPreset)
@@ -130,8 +134,8 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
     std::string commandStr  = formatString("%s/repos/uavrt_detection/uavrt_detection %s",
                                 _homePath,
                                 _tagDatabase.detectorConfigFileName(tagInfo, secondaryChannel).c_str());
-    std::string root        = formatString("detector_%d", tagInfo.id + (secondaryChannel ? 1 : 0));
-    std::string logPath     = logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "log");
+    std::string logStem     = formatString("detector_%d", tagInfo.id + (secondaryChannel ? 1 : 0));
+    std::string logPath     = logFileManager->filename(LogFileManager::DETECTORS, logStem.c_str(), "log");
 
     MonitoredProcess* detectorProc = new MonitoredProcess(
                                                 _mavlink,
@@ -193,8 +197,14 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
         commandStr += formatString(" --tip-secondary %f --min-uniformity 0.25", tipSecondary);
     }
 
-    std::string root    = formatString("py_detector_%d", tagId);
-    std::string logPath = logFileManager->filename(LogFileManager::DETECTORS, root.c_str(), "log");
+    std::string logStem;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        logStem = _inRotation
+            ? formatString("py_detector_%d_heading-%03.0f", tagId, _currentHeadingDeg)
+            : formatString("py_detector_%d", tagId);
+    }
+    std::string logPath = logFileManager->filename(LogFileManager::DETECTORS, logStem.c_str(), "log");
 
     logInfo() << "Starting Python pulse detector:" << commandStr;
 
@@ -230,7 +240,14 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
     }
 
     auto logFileManager = LogFileManager::instance();
-    logFileManager->detectorsStarted();
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        if (_inRotation) {
+            logFileManager->detectorsStarted(_currentHeadingDeg);
+        } else {
+            logFileManager->detectorsStarted();
+        }
+    }
     bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
     if (!_tagDatabase.writeDetectorConfigs(isHFMode)) {
         logError() << "CommandHandler::_handleEndTags: writeDetectorConfigs failed";
@@ -456,6 +473,301 @@ bool CommandHandler::_handleStopDetection(void)
     }).detach();
 
     return true;
+}
+
+void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo)
+{
+    PulseInfo_t pulseInfo;
+
+    memset(&pulseInfo, 0, sizeof(pulseInfo));
+
+    pulseInfo.header.command                = COMMAND_ID_PULSE;
+    pulseInfo.tag_id                        = (uint32_t)udpPulseInfo.tag_id;
+    pulseInfo.frequency_hz                  = (uint32_t)udpPulseInfo.frequency_hz;
+
+    if (pulseInfo.frequency_hz == 0) {
+        logInfo() << "HEARTBEAT from Detector" << pulseInfo.tag_id;
+    } else if (std::isfinite(udpPulseInfo.detection_status)
+              && static_cast<uint8_t>(udpPulseInfo.detection_status) == kNoPulseDetectionStatus) {
+        // No pulse detected this cycle — forward noise floor to GCS
+        pulseInfo.detection_status      = kNoPulseDetectionStatus;
+        pulseInfo.confirmed_status      = 0;
+        pulseInfo.stft_score            = udpPulseInfo.stft_score;
+        pulseInfo.noise_psd             = udpPulseInfo.noise_psd;
+        pulseInfo.group_seq_counter     = (uint16_t)udpPulseInfo.group_seq_counter;
+        pulseInfo.start_time_seconds    = udpPulseInfo.start_time_seconds;
+
+        auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
+        logDebug() << formatString("NO DETECTION Id: %2u score_ratio: %.3f noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+                                   pulseInfo.tag_id,
+                                   udpPulseInfo.stft_score,
+                                   pulseInfo.noise_psd,
+                                   pulseInfo.frequency_hz,
+                                   telemetry.position.latitude,
+                                   telemetry.position.longitude,
+                                   telemetry.attitudeEuler.yawDegrees,
+                                   telemetry.position.relativeAltitude);
+    } else {
+        auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
+
+        pulseInfo.start_time_seconds            = udpPulseInfo.start_time_seconds;
+        pulseInfo.predict_next_start_seconds    = udpPulseInfo.predict_next_start_seconds;
+        pulseInfo.snr                           = udpPulseInfo.snr;
+        pulseInfo.stft_score                    = udpPulseInfo.stft_score;
+        pulseInfo.group_seq_counter             = (uint16_t)udpPulseInfo.group_seq_counter;
+        pulseInfo.group_ind                     = (uint16_t)udpPulseInfo.group_ind;
+        pulseInfo.group_snr                     = udpPulseInfo.group_snr;
+        pulseInfo.detection_status              = (uint8_t)udpPulseInfo.detection_status;
+        pulseInfo.confirmed_status              = (uint8_t)udpPulseInfo.confirmed_status;
+        pulseInfo.latitude                      = telemetry.position.latitude;
+        pulseInfo.longitude                     = telemetry.position.longitude;
+        pulseInfo.altitude_rel                  = telemetry.position.relativeAltitude;
+        pulseInfo.roll_deg                      = telemetry.attitudeEuler.rollDegrees;
+        pulseInfo.pitch_deg                     = telemetry.attitudeEuler.pitchDegrees;
+        pulseInfo.yaw_deg                       = telemetry.attitudeEuler.yawDegrees;
+        pulseInfo.noise_psd                     = udpPulseInfo.noise_psd;
+
+        // Simulator hack: when pointing within 45° of directly away from
+        // the transmitter (assumed due north), force unconfirmed with low SNR.
+        if (_simulatorMode) {
+            float yaw = telemetry.attitudeEuler.yawDegrees;
+            // Normalize yaw-180 into [-180,180]
+            float offBack = std::fmod(yaw - 180.0f + 540.0f, 360.0f) - 180.0f;
+            if (std::fabs(offBack) < (180.0f - kBackSectorMinDeg)) {
+                pulseInfo.confirmed_status = 0;
+                pulseInfo.snr = 20.0;
+                pulseInfo.group_snr = 20.0;
+                pulseInfo.detection_status = 0; // subthreshold
+            }
+        }
+
+        bool isPythonDetector = (_mavlink->detectionMode() == DETECTION_MODE_PYTHON);
+        std::string pulseStatus = isPythonDetector
+            ? formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f score_ratio: %.3f noise_psd: %5.1g freq: %9u seq: %u group_ind: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+                                        pulseInfo.confirmed_status,
+                                        pulseInfo.tag_id,
+                                        pulseInfo.snr,
+                                        pulseInfo.yaw_deg,
+                                        pulseInfo.stft_score,
+                                        pulseInfo.noise_psd,
+                                        pulseInfo.frequency_hz,
+                                        pulseInfo.group_seq_counter,
+                                        pulseInfo.group_ind,
+                                        telemetry.position.latitude,
+                                        telemetry.position.longitude,
+                                        telemetry.attitudeEuler.yawDegrees,
+                                        telemetry.position.relativeAltitude)
+            : formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f stft_score: %5.1g noise_psd: %5.1g freq: %9u seq: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+                                        pulseInfo.confirmed_status,
+                                        pulseInfo.tag_id,
+                                        pulseInfo.snr,
+                                        pulseInfo.yaw_deg,
+                                        pulseInfo.stft_score,
+                                        pulseInfo.noise_psd,
+                                        pulseInfo.frequency_hz,
+                                        pulseInfo.group_seq_counter,
+                                        telemetry.position.latitude,
+                                        telemetry.position.longitude,
+                                        telemetry.attitudeEuler.yawDegrees,
+                                        telemetry.position.relativeAltitude);
+        if (udpPulseInfo.confirmed_status) {
+            logInfo() << pulseStatus;
+        } else {
+            logDebug() << pulseStatus;
+        }
+    }
+
+    _mavlink->sendTunnelMessage(&pulseInfo, sizeof(pulseInfo));
+
+    // Rotation mode: auto-stop detection after any non-heartbeat result for this heading
+    bool shouldAutoStop = false;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        if (_inRotation && !_rotationAutoStopping
+            && pulseInfo.frequency_hz != 0) {
+
+            // Store slice data for pulses (both confirmed and low-confidence)
+            if (pulseInfo.detection_status != kNoPulseDetectionStatus) {
+                RotationSlice slice;
+                slice.heading_deg       = _currentHeadingDeg;
+                slice.snr_db            = pulseInfo.snr;
+                slice.noise_psd         = pulseInfo.noise_psd;
+                slice.confirmed_status  = pulseInfo.confirmed_status;
+                slice.tag_id            = pulseInfo.tag_id;
+                slice.latitude          = pulseInfo.latitude;
+                slice.longitude         = pulseInfo.longitude;
+                slice.altitude_rel      = pulseInfo.altitude_rel;
+                _rotationSlices.push_back(slice);
+
+                logInfo() << "Rotation slice stored: tag_id:" << slice.tag_id
+                          << " heading:" << slice.heading_deg
+                          << " snr:" << slice.snr_db
+                          << " confirmed:" << slice.confirmed_status;
+            } else {
+                logInfo() << "Rotation no-detection at heading:" << _currentHeadingDeg;
+            }
+
+            _rotationAutoStopping = true;
+            shouldAutoStop = true;
+        }
+    }
+    if (shouldAutoStop) {
+        _handleStopDetection();
+    }
+}
+
+std::string CommandHandler::_handleStartRotationDetection(const mavlink_tunnel_t& tunnel)
+{
+    if (tunnel.payload_length != sizeof(StartRotationDetection_t)) {
+        logError() << "COMMAND_ID_START_ROTATION_DETECTION - ERROR: Payload length incorrect expected:actual"
+                   << sizeof(StartRotationDetection_t) << tunnel.payload_length;
+        return "Payload length incorrect";
+    }
+
+    if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
+        logError() << "COMMAND_ID_START_ROTATION_DETECTION - ERROR: Controller in incorrect state - heartbeatStatus:"
+                   << _mavlink->heartbeatStatus();
+        return "Controller in incorrect state";
+    }
+
+    StartRotationDetection_t rotationInfo;
+    memcpy(&rotationInfo, tunnel.payload, sizeof(rotationInfo));
+
+    // Store detection params for per-heading StartDetection calls
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        memset(&_rotationStartDetection, 0, sizeof(_rotationStartDetection));
+        _rotationStartDetection.header.command              = COMMAND_ID_START_DETECTION;
+        _rotationStartDetection.radio_center_frequency_hz   = rotationInfo.radio_center_frequency_hz;
+        _rotationStartDetection.gain                        = 0;
+        _rotationStartDetection.detection_mode              = DETECTION_MODE_PYTHON;
+        _rotationStartDetection.detection_margin            = rotationInfo.detection_margin;
+        _rotationStartDetection.confidence_ratio            = rotationInfo.confidence_ratio;
+
+        _inRotation             = true;
+        _currentHeadingDeg      = 0;
+        _rotationAutoStopping   = false;
+        _rotationSlices.clear();
+    }
+
+    auto logFileManager = LogFileManager::instance();
+    logFileManager->rotationStarted();
+
+    logInfo() << "COMMAND_ID_START_ROTATION_DETECTION:"
+              << " center_freq_hz:" << rotationInfo.radio_center_frequency_hz
+              << " n_slices:" << rotationInfo.n_slices
+              << " detection_margin:" << rotationInfo.detection_margin
+              << " confidence_ratio:" << rotationInfo.confidence_ratio;
+
+    return "";
+}
+
+std::string CommandHandler::_handleStartDetectionAtHeading(const mavlink_tunnel_t& tunnel)
+{
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        if (!_inRotation) {
+            logError() << "COMMAND_ID_START_DETECTION_AT_HEADING - ERROR: Not in rotation mode";
+            return "Not in rotation mode";
+        }
+    }
+
+    if (tunnel.payload_length != sizeof(StartDetectionAtHeading_t)) {
+        logError() << "COMMAND_ID_START_DETECTION_AT_HEADING - ERROR: Payload length incorrect expected:actual"
+                   << sizeof(StartDetectionAtHeading_t) << tunnel.payload_length;
+        return "Payload length incorrect";
+    }
+
+    StartDetectionAtHeading_t headingInfo;
+    memcpy(&headingInfo, tunnel.payload, sizeof(headingInfo));
+
+    mavlink_tunnel_t syntheticTunnel;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        _currentHeadingDeg      = headingInfo.heading_deg;
+        _rotationAutoStopping   = false;
+
+        logInfo() << "COMMAND_ID_START_DETECTION_AT_HEADING: heading:" << _currentHeadingDeg;
+
+        // Construct synthetic StartDetection tunnel for the existing handler
+        memset(&syntheticTunnel, 0, sizeof(syntheticTunnel));
+        syntheticTunnel.payload_length = sizeof(StartDetectionInfo_t);
+        memcpy(syntheticTunnel.payload, &_rotationStartDetection, sizeof(StartDetectionInfo_t));
+    }
+
+    return _handleStartDetection(syntheticTunnel);
+}
+
+std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t& /* tunnel */)
+{
+    std::vector<RotationSlice> slicesCopy;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        if (!_inRotation) {
+            logError() << "COMMAND_ID_STOP_ROTATION_DETECTION - ERROR: Not in rotation mode";
+            return "Not in rotation mode";
+        }
+
+        _inRotation = false;
+        slicesCopy = std::move(_rotationSlices);
+        _rotationSlices.clear();
+    }
+
+    // Stop any running detection
+    if (_mavlink->heartbeatStatus() == HEARTBEAT_STATUS_DETECTING) {
+        _handleStopDetection();
+    }
+
+    logInfo() << "COMMAND_ID_STOP_ROTATION_DETECTION: computing bearing from"
+              << slicesCopy.size() << "slices";
+
+    // Compute bearing per tag
+    BearingCalculator calculator;
+    for (const auto& slice : slicesCopy) {
+        calculator.addSlice(slice.heading_deg, slice.snr_db, slice.tag_id);
+    }
+
+    auto results = calculator.solve();
+
+    // Send bearing results to GCS and log
+    auto logFileManager = LogFileManager::instance();
+    std::ofstream bearingLog;
+    if (logFileManager->rotationActive()) {
+        std::string logPath = logFileManager->filename(LogFileManager::ROTATION, "bearing_result", "log");
+        bearingLog.open(logPath);
+        if (bearingLog.is_open()) {
+            bearingLog << "tag_id,bearing_deg,r_squared,n_valid_slices,best_snr\n";
+        }
+    }
+
+    for (const auto& result : results) {
+        BearingResult_t bearingResult;
+        memset(&bearingResult, 0, sizeof(bearingResult));
+        bearingResult.header.command    = COMMAND_ID_BEARING_RESULT;
+        bearingResult.tag_id            = result.tag_id;
+        bearingResult.bearing_deg       = result.bearing_deg;
+        bearingResult.r_squared         = result.r_squared;
+        bearingResult.n_valid_slices    = result.n_valid_slices;
+        bearingResult.best_snr          = result.best_snr;
+
+        _mavlink->sendTunnelMessage(&bearingResult, sizeof(bearingResult));
+
+        logInfo() << formatString("Bearing result: tag_id: %u  bearing: %.1f  R²: %.3f  slices: %u  best_snr: %.1f",
+                                  result.tag_id, result.bearing_deg, result.r_squared,
+                                  result.n_valid_slices, result.best_snr);
+
+        if (bearingLog.is_open()) {
+            bearingLog << result.tag_id << ","
+                       << result.bearing_deg << ","
+                       << result.r_squared << ","
+                       << result.n_valid_slices << ","
+                       << result.best_snr << "\n";
+        }
+    }
+
+    logFileManager->rotationStopped();
+
+    return "";
 }
 
 std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
@@ -704,6 +1016,35 @@ void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
             success = true;
         } else {
             std::string errorMessage = _checkForAirSpy();
+            success = errorMessage.empty();
+            if (!success) {
+                ackMessage = errorMessage;
+            }
+        }
+        break;
+    case COMMAND_ID_START_ROTATION_DETECTION:
+        {
+            std::string errorMessage = _handleStartRotationDetection(tunnel);
+            success = errorMessage.empty();
+            if (!success) {
+                ackMessage = errorMessage;
+            }
+        }
+        break;
+    case COMMAND_ID_START_DETECTION_AT_HEADING:
+        {
+            std::string errorMessage = _handleStartDetectionAtHeading(tunnel);
+            success = errorMessage.empty();
+            if (success) {
+                ackMessage = LogFileManager::instance()->logDir(LogFileManager::DETECTORS);
+            } else {
+                ackMessage = errorMessage;
+            }
+        }
+        break;
+    case COMMAND_ID_STOP_ROTATION_DETECTION:
+        {
+            std::string errorMessage = _handleStopRotationDetection(tunnel);
             success = errorMessage.empty();
             if (!success) {
                 ackMessage = errorMessage;
@@ -978,6 +1319,18 @@ std::string CommandHandler::_tunnelCommandIdToString(uint32_t command)
         break;
     case COMMAND_ID_AIRSPY_STATUS:
         commandStr = "AIRSPY_STATUS";
+        break;
+    case COMMAND_ID_START_ROTATION_DETECTION:
+        commandStr = "START_ROTATION_DETECTION";
+        break;
+    case COMMAND_ID_START_DETECTION_AT_HEADING:
+        commandStr = "START_DETECTION_AT_HEADING";
+        break;
+    case COMMAND_ID_STOP_ROTATION_DETECTION:
+        commandStr = "STOP_ROTATION_DETECTION";
+        break;
+    case COMMAND_ID_BEARING_RESULT:
+        commandStr = "BEARING_RESULT";
         break;
     }
 

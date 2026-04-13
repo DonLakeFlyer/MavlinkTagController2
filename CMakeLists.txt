@@ -113,7 +113,7 @@ target_include_directories(tagtracker_wireformat INTERFACE
 )
 
 if(BUILD_TESTING)
-    add_executable(tagtracker_wireformat_tests shared/test_zmq_iq_packet.c)
+    add_executable(tagtracker_wireformat_tests shared/tests/test_zmq_iq_packet.c)
     target_link_libraries(tagtracker_wireformat_tests PRIVATE tagtracker_wireformat)
     add_test(NAME tagtracker_wireformat_tests COMMAND tagtracker_wireformat_tests)
 endif()
