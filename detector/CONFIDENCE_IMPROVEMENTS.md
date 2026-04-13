@@ -51,7 +51,7 @@ det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
 
 ```python
 is_marginal = (score_ratio < confidence_ratio
-               or fold_info['max_fold_fraction'] > 0.8)
+               or fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD)
 det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
               else DETECTION_STATUS_SUPERTHRESHOLD)
 ```

@@ -368,7 +368,7 @@ def fold_multi_hypothesis(power, hypotheses):
         hyp_offsets = np.argmax(fold_scores, axis=1)
 
         if label in ('A', 'B'):
-            pure_scores[label] = (hyp_best.copy(), hyp_offsets.copy())
+            pure_scores[label] = (hyp_best, hyp_offsets)
 
         improved = hyp_best > best_scores
         best_scores[improved] = hyp_best[improved]
@@ -711,8 +711,8 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     Each detection includes a ``max_fold_fraction`` diagnostic — the
     largest single fold's fraction of the total K-fold score.  This is
     used by the caller to downgrade confidence (not to discard
-    detections).  A value > 0.8 indicates a single transient dominates
-    the score (see ``DOMINANT_FOLD_THRESHOLD``).
+    detections).  A value above ``DOMINANT_FOLD_THRESHOLD`` indicates a
+    single transient dominates the score.
 
     Args:
         power:               (n_freq, n_time) float32 power spectrogram.
