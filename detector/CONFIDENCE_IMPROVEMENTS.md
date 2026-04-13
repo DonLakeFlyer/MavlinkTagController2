@@ -24,15 +24,16 @@ different frequency. The score_ratio gate cannot catch this.
 
 ---
 
-## Change 1: Uniformity Gate in Detector
+## Change 1: Dominant-Fold Fraction Gate in Detector
 
 **Priority: High — biggest single impact, minimal code change**
 
 ### What
 
-Add a uniformity threshold to the detection decision. Detections with
-uniformity below the threshold are downgraded to SUBTHRESHOLD regardless
-of score_ratio.
+Add a dominant-fold fraction check to the detection decision. Detections
+where a single fold dominates the K-fold score (max_fold_fraction above
+`DOMINANT_FOLD_THRESHOLD`) are downgraded to SUBTHRESHOLD regardless of
+score_ratio.
 
 ### Where
 
@@ -128,7 +129,7 @@ Then in the classification:
 
 ```python
 is_marginal = (score_ratio < confidence_ratio
-               or fold_info['max_fold_fraction'] > 0.8
+               or fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
                or fold_info['contrast_db'] < min_contrast_db)
 ```
 
