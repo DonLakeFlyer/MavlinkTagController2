@@ -34,16 +34,15 @@ For each hypothesis, the detector:
 
 The best score across all hypotheses and start positions is compared against an EVT-derived threshold (calibrated over the full hypothesis bank to control false alarm rate).
 
-## Uniformity Filter
+## Fold Quality Diagnostic
 
-After thresholding, a uniformity check rejects detections where pulse power is concentrated in a subset of folds (cross-rate leakage). Uniformity = min fold power / max fold power. Reject if below `min_uniformity` (default 0.25).
+After thresholding, a max-fold-fraction diagnostic measures whether pulse power is concentrated in a single fold (transient/spike). `max_fold_fraction = max(fold_powers) / sum(fold_powers)`. Values > 0.8 indicate a single transient dominates the score. This is used to downgrade confidence, not to discard detections (matching uavrt_detection's `selectpeakindex` heuristic).
 
-For a correctly matched hypothesis, all K folds land on real pulses, so uniformity is high. For a mismatched hypothesis, some folds land on noise, giving near-zero uniformity.
+For a correctly matched hypothesis, all K folds land on real pulses, so power is spread across folds (low fraction). For a transient, one fold dominates (high fraction).
 
 ## Configuration
 
 - `--tip-secondary <seconds>`: enables multi-hypothesis mode with the second rate.
-- `--min-uniformity <float>`: uniformity threshold (controller passes 0.25 for dual-rate).
 - If `--tip-secondary` is absent, behavior matches the single-rate detector exactly.
 
 ## Pulse Reporting Pipeline (Python Detector → Tag Tracker GCS)
@@ -156,10 +155,10 @@ The IQ simulator (`simulator/iq_simulator.py`) supports rate switching:
 Complete:
 1. Hypothesis generation (`build_hypothesis_indices`) and multi-hypothesis fold (`fold_multi_hypothesis`) in `pulse_detector.py`.
 2. EVT threshold calibrated over full hypothesis bank.
-3. Uniformity check applied post-threshold, gated by `--min-uniformity`.
+3. Max-fold-fraction diagnostic computed per detection for confidence downgrade.
 4. Detection logs include hypothesis label (e.g. `hyp=A_to_B_c2`).
 5. UDP reporting includes `group_ind` derived from hypothesis label.
-6. Controller launches a single detector process per tag; passes `--tip-secondary` and `--min-uniformity 0.25` when dual-rate.
+6. Controller launches a single detector process per tag; passes `--tip-secondary` when dual-rate.
 
 ## Tests
 

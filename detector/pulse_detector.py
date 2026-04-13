@@ -41,6 +41,7 @@ from scipy.stats import gumbel_r
 
 K = 5  # Default fold count, overridden by --k
 FOLD_LOCAL_RADIUS = 1  # Use local max over [idx-r, ..., idx+r] per fold
+OCCAM_MARGIN = 0.05    # Prefer pure hypothesis if within 5% of switch winner
 
 # Detection status values (mirrors TunnelProtocol.h detection_status field)
 DETECTION_STATUS_SUBTHRESHOLD  = 0  # Subthreshold pulse
@@ -68,7 +69,7 @@ class Detection(NamedTuple):
     stft_score: float       # Fold score / PSD scale
     score_ratio: float      # Fold score / threshold (>1 = above threshold)
     hyp_label: str          # Winning hypothesis label (e.g. "A", "A_to_B_c2")
-    fold_info: dict         # {'uniformity': float, 'fold_snrs': list[float]}
+    fold_info: dict         # {'max_fold_fraction': float, 'fold_snrs': list[float]}
 
 
 def hyp_label_to_group_ind(label, K=5):
@@ -330,6 +331,12 @@ def build_hypothesis_indices(N_A, K, n_time, N_B=None):
 def fold_multi_hypothesis(power, hypotheses):
     """Fold power spectrogram across all hypotheses and return best per bin.
 
+    Applies an Occam preference: if a switch hypothesis wins but the
+    corresponding pure hypothesis (A or B, matching the switch's last rate)
+    scores within OCCAM_MARGIN of the winner, the pure hypothesis is
+    preferred.  This avoids spurious switch labels caused by sub-window
+    phase alignment at high SNR.
+
     Args:
         power:      (n_freq, n_time) float32 power spectrogram.
         hypotheses: list from build_hypothesis_indices().
@@ -345,6 +352,9 @@ def fold_multi_hypothesis(power, hypotheses):
     best_labels = np.empty(n_freq, dtype=object)
     best_labels[:] = ""
 
+    # Track pure-hypothesis scores for Occam preference
+    pure_scores = {}   # label -> (scores_array, offsets_array)
+
     for label, pulse_idx in hypotheses:
         # fold_scores shape: (n_freq, search_range)
         fold_scores = _compute_fold_scores(power, pulse_idx,
@@ -352,33 +362,41 @@ def fold_multi_hypothesis(power, hypotheses):
         hyp_best = np.max(fold_scores, axis=1)
         hyp_offsets = np.argmax(fold_scores, axis=1)
 
+        if label in ('A', 'B'):
+            pure_scores[label] = (hyp_best.copy(), hyp_offsets.copy())
+
         improved = hyp_best > best_scores
         best_scores[improved] = hyp_best[improved]
         best_offsets[improved] = hyp_offsets[improved]
         best_labels[improved] = label
 
+    # Occam preference: for bins where a switch hypothesis won, check if the
+    # corresponding pure hypothesis scored within OCCAM_MARGIN.  Switch
+    # hypotheses have extra degrees of freedom (the change point), so they
+    # can overfit sub-window alignment at high SNR.
+    if pure_scores:
+        for b in range(n_freq):
+            lbl = best_labels[b]
+            if lbl in ('A', 'B', ''):
+                continue  # already pure or empty
+            # Determine which pure hypothesis corresponds to this switch's
+            # last rate (the one used for next-pulse prediction).
+            if lbl.startswith('A_to_B'):
+                pure_lbl = 'B'
+            elif lbl.startswith('B_to_A'):
+                pure_lbl = 'A'
+            else:
+                continue
+            if pure_lbl not in pure_scores:
+                continue
+            pure_sc, pure_off = pure_scores[pure_lbl]
+            if best_scores[b] > 0 and pure_sc[b] >= best_scores[b] * (1.0 - OCCAM_MARGIN):
+                best_scores[b] = pure_sc[b]
+                best_offsets[b] = pure_off[b]
+                best_labels[b] = pure_lbl
+
     return best_scores, best_offsets, best_labels
 
-
-def uniformity_check(power, freq_bin, pulse_indices, U_min):
-    """Check pulse-window power uniformity for a single detection.
-
-    Args:
-        power:         (n_freq, n_time) power spectrogram.
-        freq_bin:      int — frequency bin index of the detection.
-        pulse_indices: 1-D array of K time-window indices for the detection.
-        U_min:         Minimum acceptable uniformity ratio.
-
-    Returns:
-        (U, passed) where U = min/max pulse power and passed = (U >= U_min).
-    """
-    powers = _local_peak_powers_1d(power[freq_bin], pulse_indices,
-                                   local_radius=FOLD_LOCAL_RADIUS)
-    p_max = np.max(powers)
-    if p_max <= 0:
-        return 0.0, False
-    U = float(np.min(powers) / p_max)
-    return U, U >= U_min
 
 
 def _compute_fold_scores(power, pulse_idx, local_radius=0):
@@ -676,14 +694,20 @@ def save_evt_cache(cache_dir, N_A, K, mu, sigma, N_B=None,
 def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                 evt_threshold_cache, fold_offsets=None, W=None, Wf=None,
                 debug=False, detection_margin=0.90,
-                hypotheses=None, N_B=None, min_uniformity=0.0,
+                hypotheses=None, N_B=None,
                 N_A_exact=None, N_B_exact=None):
     """Fold power spectrogram and detect pulses.
 
     Supports both single-rate and multi-hypothesis rate-switch detection.
-    When *hypotheses* is provided, folds across all hypotheses and applies
-    an optional uniformity filter.  When hypotheses is None, falls back to
-    fold_offsets-based (or basic N-stride) single-rate fold.
+    When *hypotheses* is provided, folds across all hypotheses.  When
+    hypotheses is None, falls back to fold_offsets-based (or basic
+    N-stride) single-rate fold.
+
+    Each detection includes a ``max_fold_fraction`` diagnostic — the
+    largest single fold's fraction of the total K-fold score.  This is
+    used by the caller to downgrade confidence (not to discard
+    detections).  A value > 0.8 indicates a single transient dominates
+    the score (matching uavrt_detection's ``selectpeakindex`` heuristic).
 
     Args:
         power:               (n_freq, n_time) float32 power spectrogram.
@@ -701,7 +725,6 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         hypotheses:          List from build_hypothesis_indices() (or None).
         N_B:                 Secondary PRI spacing (for EVT cache key; None
                              if single-rate).
-        min_uniformity:      Minimum U_h to accept a detection (0 = disabled).
         N_A_exact:           Fractional PRI for rate A (for EVT cache key).
                              Defaults to N if not provided.
         N_B_exact:           Fractional PRI for rate B (for EVT cache key).
@@ -711,8 +734,9 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         (detections, noise_psd, best_candidate) where:
           detections: list of (freq_hz, snr_db, offset, noise_psd, stft_score,
                       score_ratio, hyp_label, fold_info) sorted by SNR
-                      descending.  fold_info is a dict with 'uniformity'
-                      (float) and 'fold_snrs' (list of per-fold SNRs in dB).
+                      descending.  fold_info is a dict with
+                      'max_fold_fraction' (float) and 'fold_snrs'
+                      (list of per-fold SNRs in dB).
           noise_psd:  float — median noise PSD across frequency bins when no
                       detections are found; None when detections are present;
                       NaN on early-exit error paths (insufficient data).
@@ -866,7 +890,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
 
         # Compute per-hypothesis scores at this frequency bin
         hyp_diag = []
-        hyp_detail = []  # (label, ratio, offset, pulse_windows, fold_powers, U)
+        hyp_detail = []  # (label, ratio, offset, pulse_windows, fold_powers, mff)
         for label, pidx in hypotheses:
             fold_scores_h = _compute_fold_scores(
                 power[diag_bin:diag_bin + 1, :], pidx,
@@ -875,22 +899,22 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
             h_best_offset = int(np.argmax(fold_scores_h))
             h_ratio = h_best_score / max(float(threshold[diag_bin]), 1e-30)
 
-            # Compute uniformity for this hypothesis at its best offset
+            # Compute max_fold_fraction for this hypothesis at its best offset
             on_idx = pidx[h_best_offset]
             on_powers = _local_peak_powers_1d(
                 power[diag_bin], on_idx, local_radius=FOLD_LOCAL_RADIUS)
-            p_max = float(np.max(on_powers))
-            U = float(np.min(on_powers) / max(p_max, 1e-30))
+            p_sum = float(np.sum(on_powers))
+            mff = float(np.max(on_powers) / max(p_sum, 1e-30))
 
-            hyp_diag.append((label, h_ratio, U))
+            hyp_diag.append((label, h_ratio, mff))
             hyp_detail.append((label, h_ratio, h_best_offset, on_idx.tolist(),
-                               on_powers.tolist(), U))
+                               on_powers.tolist(), mff))
 
         # Sort by score ratio descending and show all hypotheses.
         hyp_diag.sort(key=lambda x: -x[1])
         top_str = '  '.join(
-            f'{lbl}:{rat:.1f}/U{u:.2f}{"*" if u < min_uniformity and min_uniformity > 0 else ""}'
-            for lbl, rat, u in hyp_diag
+            f'{lbl}:{rat:.1f}/F{mff:.2f}{"*" if mff > 0.8 else ""}'
+            for lbl, rat, mff in hyp_diag
         )
         n_above = len(det_bins)
         print(f'  [HYP] best_bin={diag_bin} winner={diag_label} '
@@ -900,12 +924,12 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         # Show per-fold SNR vectors for every hypothesis so we can inspect
         # which specific folds are weak/strong across the full bank.
         hyp_detail.sort(key=lambda x: -x[1])  # sort by score ratio
-        for lbl, rat, off, widx, fpow, U in hyp_detail:
+        for lbl, rat, off, widx, fpow, mff in hyp_detail:
             noise_at_bin = float(noise_power[diag_bin])
             fold_snrs = [f'{10*np.log10(p/noise_at_bin):.1f}' if p > 0
                          else '-inf' for p in fpow]
             print(f'  [HYP detail] {lbl} ratio={rat:.1f} t0={off} wins={widx} '
-                  f'n_time={n_time} U={U:.4f} '
+                  f'n_time={n_time} F={mff:.4f} '
                   f'fold_pwr=[{", ".join(f"{p:.3e}" for p in fpow)}] '
                   f'fold_snr=[{", ".join(fold_snrs)}] dB',
                   flush=True)
@@ -914,7 +938,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         median_noise_psd = float(np.median(noise_power) / psd_scale)
         return [], median_noise_psd, best_cand
 
-    # --- Build detection results with uniformity filter ---
+    # --- Build detection results ---
     # Build a lookup from hypothesis label to its pulse_idx matrix so we can
     # recover the exact pulse window indices for the winning hypothesis.
     hyp_lookup = {}
@@ -923,31 +947,9 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
             hyp_lookup[label] = pidx
 
     results = []
-    uniformity_reject_count = 0
     for b in det_bins:
         label = str(best_labels[b])
         offset = int(best_offsets[b])
-
-        # Uniformity filter: check that pulse windows have roughly equal power.
-        # In multi-hypothesis mode, use the winning hypothesis pulse_idx matrix.
-        # In legacy single-rate mode, fall back to the local pulse_idx matrix.
-        if min_uniformity > 0:
-            pidx_matrix = None
-            if label in hyp_lookup:
-                pidx_matrix = hyp_lookup[label]
-            elif not hypotheses:
-                pidx_matrix = pulse_idx
-
-            if pidx_matrix is not None and offset < pidx_matrix.shape[0]:
-                pulse_windows = pidx_matrix[offset]
-                U, passed = uniformity_check(power, b, pulse_windows,
-                                             min_uniformity)
-                if not passed:
-                    uniformity_reject_count += 1
-                    if debug:
-                        print(f'[DEBUG UNIFORMITY] bin={b} hyp={label} '
-                              f'U={U:.3f} < {min_uniformity:.3f} — rejected')
-                    continue
 
         snr_db = 10.0 * np.log10(best_scores[b] / noise_power[b])
         # Score-to-threshold ratio: how far above threshold this detection is.
@@ -964,8 +966,10 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         on_powers = _local_peak_powers_1d(
             power[b], on_idx, local_radius=FOLD_LOCAL_RADIUS)
         fold_snrs_db = (10.0 * np.log10(on_powers / noise_power[b])).tolist()
-        uniformity = float(on_powers.min() / max(on_powers.max(), 1e-30))
-        fold_info = {'uniformity': uniformity, 'fold_snrs': fold_snrs_db}
+        p_sum = float(np.sum(on_powers))
+        max_fold_fraction = float(np.max(on_powers) / max(p_sum, 1e-30))
+        fold_info = {'max_fold_fraction': max_fold_fraction,
+                     'fold_snrs': fold_snrs_db}
         results.append(Detection(
             freq_hz=freq_axis[b], snr_db=snr_db, offset=offset,
             noise_psd=float(noise_power[b] / psd_scale),
@@ -988,9 +992,6 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
             break
 
     if len(merged) == 0:
-        if uniformity_reject_count > 0:
-            print(f'  [HYP] uniformity rejected {uniformity_reject_count}/{len(det_bins)} '
-                  f'detection bins (U_min={min_uniformity:.2f})', flush=True)
         median_noise_psd = float(np.median(noise_power) / psd_scale)
         return [], median_noise_psd, best_cand
 
@@ -1040,10 +1041,6 @@ def main():
                     help='Secondary inter-pulse interval in seconds. '
                          'Enables multi-hypothesis rate-switch detection. '
                          'Omit to use single-rate mode (backwards compatible).')
-    ap.add_argument('--min-uniformity', type=float, default=0.0,
-                    help='Minimum pulse-window uniformity ratio to accept a '
-                         'detection (default: 0, disabled). Set > 0 to enable '
-                         '(e.g. 0.25). Recommended for multi-hypothesis mode.')
     ap.add_argument('--warmup-seconds', type=float, default=5.0,
                     help='Seconds of initial IQ data to discard before '
                          'detection starts (default: 5.0).')
@@ -1173,8 +1170,6 @@ def main():
           f'(~{fa_per_hour:.2f} false alarms/hour)')
     print(f'  Det margin      {args.detection_margin:.2f}')
     print(f'  Conf ratio      {args.confidence_ratio:.2f}')
-    if args.min_uniformity > 0:
-        print(f'  Uniformity      U_min={args.min_uniformity:.2f}')
     print(f'  UDP port        {args.port}')
     print(f'  Warmup discard  {args.warmup_seconds:.1f} s')
     if args.center_freq > 0:
@@ -1431,7 +1426,6 @@ def main():
                                      detection_margin=args.detection_margin,
                                      hypotheses=rate_switch_hypotheses,
                                      N_B=N_B,
-                                     min_uniformity=args.min_uniformity,
                                      N_A_exact=N_exact,
                                      N_B_exact=N_B_exact)
             proc_ms = (time.monotonic() - t0) * 1000.0
@@ -1469,10 +1463,20 @@ def main():
                 tip_secondary = getattr(args, 'tip_secondary', None)
 
                 for det in detections:
-                    is_marginal = det.score_ratio < confidence_ratio
+                    # Fold quality: if any single fold carries >80% of the
+                    # total score, this is likely a transient (not a real
+                    # pulse train).  Matches uavrt_detection's
+                    # selectpeakindex heuristic.  Downgrade to SUBTHRESHOLD
+                    # rather than discarding.
+                    has_dominant_fold = det.fold_info['max_fold_fraction'] > 0.8
+                    is_marginal = det.score_ratio < confidence_ratio or has_dominant_fold
                     det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
                                   else DETECTION_STATUS_SUPERTHRESHOLD)
-                    confidence_flag = '  [LOW]' if is_marginal else ''
+                    confidence_flag = ''
+                    if has_dominant_fold:
+                        confidence_flag = '  [DOMINANT_FOLD]'
+                    elif det.score_ratio < confidence_ratio:
+                        confidence_flag = '  [LOW]'
                     hyp_flag = f'  hyp={det.hyp_label}' if det.hyp_label != 'A' else ''
 
                     # Map hypothesis label → group_ind encoding and
@@ -1523,7 +1527,7 @@ def main():
                               f'{proc_ms:.0f} ms{delta_str}{gap_flag}{confidence_flag}{hyp_flag}')
                     fold_snrs_str = ', '.join(f'{s:.1f}' for s in det.fold_info['fold_snrs'])
                     print(f'  [FOLDS] score_ratio={det.score_ratio:.3f}  '
-                          f'uniformity={det.fold_info["uniformity"]:.3f}  '
+                          f'max_fold_frac={det.fold_info["max_fold_fraction"]:.3f}  '
                           f'per_fold_snr=[{fold_snrs_str}] dB')
             else:
                 # Send a no-detection report so the controller/GCS knows
