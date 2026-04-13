@@ -8,12 +8,12 @@
 
 class MavlinkSystem;
 class TelemetryCache;
-class PulseHandler;
+class CommandHandler;
 
 class UDPPulseReceiver
 {
 public:
-	UDPPulseReceiver(std::string localIp, int localPort, PulseHandler* pulseHandler);
+	UDPPulseReceiver(std::string localIp, int localPort, CommandHandler* commandHandler);
 	~UDPPulseReceiver();
 
 	void start	(void);
@@ -28,5 +28,5 @@ private:
     std::string 	_localIp;
     int 			_localPort;
     int 			_fdSocket	{-1};
-	PulseHandler*	_pulseHandler;
+	CommandHandler*	_commandHandler;
 };

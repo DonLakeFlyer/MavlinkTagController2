@@ -5,7 +5,6 @@
 #include "TelemetryCache.h"
 #include "MavlinkSystem.h"
 #include "MavlinkFtpServer.h"
-#include "PulseHandler.h"
 #include "SimulatorTelemetryPublisher.h"
 #include "formatString.h"
 #include "LogFileManager.h"
@@ -81,12 +80,10 @@ int main(int argc, char** argv)
 
     auto ftpServer 			= MavlinkFtpServer { mavlink };
     auto telemetryCache     = new TelemetryCache(mavlink);
-	auto pulseHandler 		= new PulseHandler(mavlink, telemetryCache, simulatorMode);
-    auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), CommandHandler::kPulseUdpPort, pulseHandler };
+    auto commandHandler 	= CommandHandler { mavlink, telemetryCache, simulatorMode, simulatorPreset, debugDetector };
+    auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), CommandHandler::kPulseUdpPort, &commandHandler };
 
 	globalMavlinkSystem		= mavlink;
-
-    auto commandHandler 	= CommandHandler { mavlink, simulatorMode, simulatorPreset, debugDetector };
 
     udpPulseReceiver.start();
 

@@ -27,7 +27,8 @@ All three share a single packet header defined in [`shared/tagtracker_wireformat
 shared/                        Shared wire-format header (header-only library)
   tagtracker_wireformat/
     zmq_iq_packet.h            ZeroMQ IQ packet header definition
-  test_zmq_iq_packet.c         Wire-format unit tests
+  tests/
+    test_zmq_iq_packet.c       Wire-format unit tests
 
 controller/                    MAVLink tag controller
   CMakeLists.txt

@@ -48,6 +48,13 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
         }
         logDirPrefix = formatString("%s%s", _logsDirPrefix.c_str(), "RawCapture");
         break;
+    case ROTATION:
+        if (!_logDirRotation.empty()) {
+            logWarn() << "Previous rotation log directory not cleaned up, replacing";
+            _logDirRotation.clear();
+        }
+        logDirPrefix = formatString("%s%s", _logsDirPrefix.c_str(), "Rotation");
+        break;
     }
 
     // rPi time should be synchronized with vehicle time
@@ -74,13 +81,34 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
         logDebug() << "Created new raw capture log directory:" << logDir;
         _logDirRawCapture = logDir;
         break;
+    case ROTATION:
+        logDebug() << "Created new rotation log directory:" << logDir;
+        _logDirRotation = logDir;
+        break;
     }
 
 }
 
-void LogFileManager::detectorsStarted()
+void LogFileManager::detectorsStarted(float headingDeg)
 {
-    _createLogDir(DETECTORS);
+    if (headingDeg >= 0 && !_logDirRotation.empty()) {
+        // During rotation: create heading subdirectory under rotation parent
+        if (!_logDirDetectors.empty()) {
+            _logDirDetectors.clear();
+        }
+        std::string headingDir = formatString("%s/heading-%03.0f", _logDirRotation.c_str(), headingDeg);
+        std::error_code errorCode;
+        fs::create_directory(headingDir.c_str(), errorCode);
+        if (errorCode) {
+            logDebug() << "Failed to create heading directory " << headingDir << ": " << errorCode.message();
+            _createLogDir(DETECTORS);
+        } else {
+            logDebug() << "Created heading log directory:" << headingDir;
+            _logDirDetectors = headingDir;
+        }
+    } else {
+        _createLogDir(DETECTORS);
+    }
 }
 
 void LogFileManager::detectorsStopped()
@@ -91,6 +119,16 @@ void LogFileManager::detectorsStopped()
 void LogFileManager::rawCaptureStarted()
 {
     _createLogDir(RAW_CAPTURE);
+}
+
+void LogFileManager::rotationStarted()
+{
+    _createLogDir(ROTATION);
+}
+
+void LogFileManager::rotationStopped()
+{
+    _logDirRotation.clear();
 }
 
 std::string LogFileManager::filename(LogType_t logType, const char* root, const char* extension)
@@ -104,6 +142,9 @@ std::string LogFileManager::filename(LogType_t logType, const char* root, const 
     case RAW_CAPTURE:
         logDir = _logDirRawCapture;
         break;
+    case ROTATION:
+        logDir = _logDirRotation;
+        break;
     }
 
     return formatString("%s/%s.%s", logDir.c_str(), root, extension);
@@ -113,6 +154,8 @@ std::string LogFileManager::logDir(LogFileManager::LogType_t logType) const
 {
     if (logType == DETECTORS) {
         return _logDirDetectors;
+    } else if (logType == ROTATION) {
+        return _logDirRotation;
     } else {
         return _logDirRawCapture;
     }

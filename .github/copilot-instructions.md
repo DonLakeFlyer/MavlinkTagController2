@@ -54,7 +54,7 @@ The top-level CMakeLists.txt supports selective builds:
 
 ## Test requirements by change type
 
-- Wire-format change: update `shared/test_zmq_iq_packet.c` and `decimator/tests/test_main.cpp`.
+- Wire-format change: update `shared/tests/test_zmq_iq_packet.c` and `decimator/tests/test_main.cpp`.
 - Timing/rate change: validate behavior under nominal, drifted, and degraded-rate scenarios.
 - Error-handling change: verify anomaly-specific action paths and operator-visible logs.
 

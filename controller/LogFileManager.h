@@ -10,14 +10,19 @@ public:
 
 	typedef enum {
 		DETECTORS,
-		RAW_CAPTURE
+		RAW_CAPTURE,
+		ROTATION
 	} LogType_t;
 
-	void detectorsStarted();
+	void detectorsStarted(float headingDeg = -1);
 	void detectorsStopped();
     bool detectorsLogging() const { return !_logDirDetectors.empty(); }
 
 	void rawCaptureStarted();
+
+	void rotationStarted();
+	void rotationStopped();
+	bool rotationActive() const { return !_logDirRotation.empty(); }
 
 	void saveLogsToSDCard();
 	void cleanLocalLogs();
@@ -38,10 +43,11 @@ private:
 	void _createLogDir(LogType_t logType);
 	std::string _getSDCardPath();
 	std::list<std::string> _listLogFileDirs();
-	
+
 	std::string _homeDir;
 	std::string _logDirDetectors;
 	std::string _logDirRawCapture;
+	std::string _logDirRotation;
 
 	static const std::string _logsDirPrefix;
 

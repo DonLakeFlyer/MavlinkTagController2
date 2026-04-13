@@ -4,7 +4,7 @@
 #include "log.h"
 #include "MavlinkSystem.h"
 #include "TelemetryCache.h"
-#include "PulseHandler.h"
+#include "CommandHandler.h"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -22,10 +22,10 @@
 using namespace TunnelProtocol;
 
 
-UDPPulseReceiver::UDPPulseReceiver(std::string localIp, int localPort, PulseHandler* pulseHandler)
+UDPPulseReceiver::UDPPulseReceiver(std::string localIp, int localPort, CommandHandler* commandHandler)
     : _localIp	            (std::move(localIp))
     , _localPort            (localPort)
-    , _pulseHandler         (pulseHandler)
+    , _commandHandler       (commandHandler)
 {
 
 }
@@ -82,7 +82,7 @@ void UDPPulseReceiver::stop()
 void UDPPulseReceiver::_receive()
 {
     while (true) {
-        PulseHandler::UDPPulseInfo_T buffer[sizeof(PulseHandler::UDPPulseInfo_T) * 10];
+        CommandHandler::UDPPulseInfo_T buffer[10];
 
         auto cBytesReceived = recvfrom(_fdSocket, buffer, sizeof(buffer), 0, NULL, NULL);
 
@@ -93,11 +93,11 @@ void UDPPulseReceiver::_receive()
             return;
         }
 
-        int pulseCount = cBytesReceived / sizeof(PulseHandler::UDPPulseInfo_T);
+        int pulseCount = cBytesReceived / sizeof(CommandHandler::UDPPulseInfo_T);
         int pulseIndex = 0;
 
         while (pulseCount--) {
-            _pulseHandler->handlePulse(buffer[pulseIndex++]);
+            _commandHandler->handlePulse(buffer[pulseIndex++]);
         }
     }
 }

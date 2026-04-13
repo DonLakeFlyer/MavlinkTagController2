@@ -27,7 +27,7 @@ add_executable(MavlinkTagController2
     timeHelpers.cpp timeHelpers.h
     LogFileManager.cpp LogFileManager.h
     MavlinkFtpServer.cpp MavlinkFtpServer.h
-    PulseHandler.cpp PulseHandler.h
+    BearingCalculator.cpp BearingCalculator.h
     SimulatorTelemetryPublisher.cpp SimulatorTelemetryPublisher.h
 )
 
@@ -44,3 +44,12 @@ target_link_libraries(MavlinkTagController2
     mavlink
     PkgConfig::CONTROLLER_ZMQ
 )
+
+if(BUILD_TESTING)
+    add_executable(test_bearing_calculator
+        tests/test_bearing_calculator.cpp
+        BearingCalculator.cpp BearingCalculator.h
+    )
+    target_include_directories(test_bearing_calculator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME test_bearing_calculator COMMAND test_bearing_calculator)
+endif()
