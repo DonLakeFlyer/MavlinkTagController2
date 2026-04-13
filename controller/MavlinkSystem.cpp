@@ -7,7 +7,7 @@
 #include <mutex>
 #include <fstream>
 #include <functional>
-#include <sys/time.h>
+#include <cstdlib>
 
 static MavlinkSystem* _instance = nullptr;
 
@@ -241,31 +241,53 @@ void MavlinkSystem::_sendMessageOnConnection(const mavlink_message_t& message)
 	_connection->_sendMessage(message);
 }
 
+std::time_t MavlinkSystem::vehicleTimeNow() const
+{
+	if (!_vehicleTimeReceived.load()) {
+		return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+	}
+
+	std::scoped_lock<std::mutex> lock(_vehicleTimeMutex);
+	auto elapsed = std::chrono::steady_clock::now() - _vehicleTimeReceivedAt;
+	auto elapsedSeconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+	return static_cast<std::time_t>(_vehicleEpochSeconds + elapsedSeconds);
+}
+
 void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 {
-	static bool timeSetFailed = false;
-    mavlink_system_time_t system_time;
+	mavlink_system_time_t system_time;
+	mavlink_msg_system_time_decode(&message, &system_time);
 
-	if (timeSetFailed) {
+	if (system_time.time_unix_usec == 0) {
 		return;
 	}
 
-	mavlink_msg_system_time_decode(&message, &system_time);
-
 	auto vehicleEpochTimeSeconds = system_time.time_unix_usec / 1000000;
-	auto vehicleEpochTimeT = static_cast<std::time_t>(vehicleEpochTimeSeconds);
+	uint64_t previousEpochSeconds;
 
-    auto rpiEpochTimeT = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+	{
+		std::scoped_lock<std::mutex> lock(_vehicleTimeMutex);
+		previousEpochSeconds = _vehicleEpochSeconds;
+		_vehicleEpochSeconds = vehicleEpochTimeSeconds;
+		_vehicleTimeReceivedAt = std::chrono::steady_clock::now();
+	}
 
-	if (static_cast<uint64_t>(vehicleEpochTimeT) != static_cast<uint64_t>(rpiEpochTimeT)) {
-		struct timeval tv;
-
-		logInfo() << "Synchronizing rPi time to vehicle time";
-		tv.tv_sec = static_cast<uint64_t>(vehicleEpochTimeT);
-		tv.tv_usec = 0;
-		if (settimeofday(&tv, NULL) != 0) {
-			timeSetFailed = true;
-			logError() << "Failed to set rPi time of day: " << strerror(errno);
+	if (!_vehicleTimeReceived.exchange(true)) {
+		auto t = static_cast<std::time_t>(vehicleEpochTimeSeconds);
+		struct tm tm_buf;
+		char buf[32];
+		gmtime_r(&t, &tm_buf);
+		std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm_buf);
+		logInfo() << "Vehicle time tracking started - " << buf << " (will update as GPS locks)";
+	} else if (previousEpochSeconds > 0) {
+		int64_t delta = static_cast<int64_t>(vehicleEpochTimeSeconds) - static_cast<int64_t>(previousEpochSeconds);
+		if (std::abs(delta) > 60) {
+			auto t = static_cast<std::time_t>(vehicleEpochTimeSeconds);
+			struct tm tm_buf;
+			char buf[32];
+			gmtime_r(&t, &tm_buf);
+			std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm_buf);
+			logInfo() << "Vehicle time jumped by " << delta << "s (GPS lock?) - now " << buf;
 		}
 	}
 }

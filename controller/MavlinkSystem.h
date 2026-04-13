@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <queue>
 #include <mutex>
@@ -50,6 +51,8 @@ public:
 	void						setHeartbeatStatus			(uint16_t heartbeatStatus) { _heartbeatStatus.store(heartbeatStatus); }
 	uint32_t					detectionMode				() const { return _detectionMode.load(); }
 	void						setDetectionMode			(uint32_t mode) { _detectionMode.store(mode); }
+	std::time_t					vehicleTimeNow				() const;
+	bool						vehicleTimeAvailable		() const { return _vehicleTimeReceived.load(); }
 
 private:
 	MavlinkSystem();
@@ -67,6 +70,10 @@ private:
 	Telemetry 					_telemetry;
 	std::atomic<uint16_t>		_heartbeatStatus { HEARTBEAT_STATUS_IDLE };
 	std::atomic<uint32_t>		_detectionMode { DETECTION_MODE_UAVRT };
+	std::atomic<bool>			_vehicleTimeReceived { false };
+	uint64_t					_vehicleEpochSeconds { 0 };
+	std::chrono::steady_clock::time_point _vehicleTimeReceivedAt {};
+	mutable std::mutex			_vehicleTimeMutex {};
 
 	friend class MavlinkOutgoingMessageQueue;
 };

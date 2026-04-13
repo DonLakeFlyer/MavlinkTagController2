@@ -57,9 +57,9 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
         break;
     }
 
-    // rPi time should be synchronized with vehicle time
-    auto vehicleTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    auto vehicleTimeUTC = *std::gmtime(&vehicleTime);
+    auto vehicleTime = MavlinkSystem::instance()->vehicleTimeNow();
+    struct tm vehicleTimeUTC;
+    gmtime_r(&vehicleTime, &vehicleTimeUTC);
 
     char buffer[80];
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%d_%H-%M-%S", &vehicleTimeUTC);
