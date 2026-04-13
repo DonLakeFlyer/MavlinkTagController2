@@ -51,7 +51,7 @@ det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
 
 ```python
 is_marginal = (score_ratio < confidence_ratio
-               or fold_info['uniformity'] < min_uniformity)
+               or fold_info['max_fold_fraction'] > 0.8)
 det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
               else DETECTION_STATUS_SUPERTHRESHOLD)
 ```
@@ -59,7 +59,7 @@ det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
 ### New CLI argument
 
 ```
---min-uniformity  (default: 0.10)
+No additional CLI argument needed — the 0.8 threshold is built into the detector.
 ```
 
 ### Threshold rationale
@@ -128,7 +128,7 @@ Then in the classification:
 
 ```python
 is_marginal = (score_ratio < confidence_ratio
-               or fold_info['uniformity'] < min_uniformity
+               or fold_info['max_fold_fraction'] > 0.8
                or fold_info['contrast_db'] < min_contrast_db)
 ```
 

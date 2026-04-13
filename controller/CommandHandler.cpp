@@ -148,7 +148,7 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
     _processes.push_back(detectorProc);
 }
 
-void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio)
+void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector)
 {
     int     secondaryChannelIncrement   = secondaryChannel ? 1 : 0;
     int     tagId                       = tagInfo.id + secondaryChannelIncrement;
@@ -185,7 +185,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                 detectionMargin, confidenceRatio,
                                 cacheDir.c_str(),
                                 k);
-    if (_debugDetector) {
+    if (_debugDetector || debugDetector) {
         commandStr += " --debug";
     }
 
@@ -194,7 +194,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     // instead of requiring a separate detector process for the second rate.
     if (tagInfo.intra_pulse2_msecs != 0) {
         double tipSecondary = tagInfo.intra_pulse2_msecs / 1000.0;
-        commandStr += formatString(" --tip-secondary %f --min-uniformity 0.25", tipSecondary);
+        commandStr += formatString(" --tip-secondary %f", tipSecondary);
     }
 
     std::string logStem;
@@ -268,6 +268,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         logInfo() << "COMMAND_ID_START_DETECTION:";
         logInfo() << "\tradio_center_frequency_hz:" << startDetection.radio_center_frequency_hz;
         logInfo() << "\tdetection_margin:" << startDetection.detection_margin << " confidence_ratio:" << startDetection.confidence_ratio;
+        logInfo() << "\tdebug_detector:" << startDetection.debug_detector;
         const double centerFrequencyMhz = (double)startDetection.radio_center_frequency_hz / 1000000.0;
 
         std::string sdrPathStatus;
@@ -427,7 +428,8 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
             if (startDetection.detection_mode == DETECTION_MODE_PYTHON) {
                 // Python detector handles both rates in a single process via
                 // --tip-secondary, so only launch once per tag.
-                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio);
+                bool debugDet = (startDetection.debug_detector != 0);
+                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio, debugDet);
             } else {
                 _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
                 if (tagInfo.intra_pulse2_msecs != 0) {
@@ -643,6 +645,7 @@ std::string CommandHandler::_handleStartRotationDetection(const mavlink_tunnel_t
         _rotationStartDetection.detection_mode              = DETECTION_MODE_PYTHON;
         _rotationStartDetection.detection_margin            = rotationInfo.detection_margin;
         _rotationStartDetection.confidence_ratio            = rotationInfo.confidence_ratio;
+        _rotationStartDetection.debug_detector              = rotationInfo.debug_detector;
 
         _inRotation             = true;
         _currentHeadingDeg      = 0;
@@ -657,7 +660,8 @@ std::string CommandHandler::_handleStartRotationDetection(const mavlink_tunnel_t
               << " center_freq_hz:" << rotationInfo.radio_center_frequency_hz
               << " n_slices:" << rotationInfo.n_slices
               << " detection_margin:" << rotationInfo.detection_margin
-              << " confidence_ratio:" << rotationInfo.confidence_ratio;
+              << " confidence_ratio:" << rotationInfo.confidence_ratio
+              << " debug_detector:" << rotationInfo.debug_detector;
 
     return "";
 }

@@ -84,8 +84,7 @@ def _generate_segment(K: int, snr_db: float, freq_offset_hz: float = 0.0,
 
 def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
                 tip: float = TIP_REST, seed: int = 42,
-                detection_margin: float = 0.90,
-                min_uniformity: float = 0.0):
+                detection_margin: float = 0.90):
     """Full pipeline: generate IQ → STFT → fold_detect. Returns fold_detect output."""
     old_K = pulse_detector.K
     pulse_detector.K = K
@@ -106,7 +105,6 @@ def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
             fold_offsets=fo,
             W=W, Wf=Wf,
             detection_margin=detection_margin,
-            min_uniformity=min_uniformity,
         )
     finally:
         pulse_detector.K = old_K
@@ -153,7 +151,7 @@ class TestSingleRateK5:
     def test_fold_info_present(self):
         detections, _, _ = _run_detect(self.K, snr_db=25.0)
         assert len(detections) >= 1
-        assert 'uniformity' in detections[0].fold_info
+        assert 'max_fold_fraction' in detections[0].fold_info
         assert 'fold_snrs' in detections[0].fold_info
         assert len(detections[0].fold_info['fold_snrs']) == self.K
 
@@ -230,11 +228,11 @@ class TestSingleRateK20:
         bin_width = FS / NFFT
         assert abs(wrapped_diff - (-300.0)) < 2 * bin_width
 
-    def test_uniformity_filter(self):
-        """Strong signal should pass a moderate uniformity filter."""
-        detections, _, _ = _run_detect(self.K, snr_db=25.0, min_uniformity=0.25)
+    def test_max_fold_fraction_present(self):
+        """Strong signal should have a reasonable max_fold_fraction."""
+        detections, _, _ = _run_detect(self.K, snr_db=25.0)
         assert len(detections) >= 1
-        assert detections[0].fold_info['uniformity'] >= 0.25
+        assert 0.0 < detections[0].fold_info['max_fold_fraction'] <= 1.0
 
 
 # ===================================================================
@@ -298,8 +296,7 @@ def _run_detect_rate_switch(K: int, snr_db: float, change_point: int,
                             direction: str = 'A_to_B',
                             freq_offset_hz: float = 0.0,
                             seed: int = 42,
-                            detection_margin: float = 0.90,
-                            min_uniformity: float = 0.0):
+                            detection_margin: float = 0.90):
     """Full pipeline with multi-hypothesis fold_detect."""
     old_K = pulse_detector.K
     pulse_detector.K = K
@@ -320,7 +317,6 @@ def _run_detect_rate_switch(K: int, snr_db: float, change_point: int,
             W=W, Wf=Wf,
             detection_margin=detection_margin,
             hypotheses=hyps, N_B=N_MOVE,
-            min_uniformity=min_uniformity,
         )
     finally:
         pulse_detector.K = old_K
@@ -425,12 +421,12 @@ class TestRateSwitchK5:
         assert len(detections) == 0
         assert np.isfinite(noise_psd)
 
-    def test_uniformity_passes_correct_switch(self):
-        """Correct switch hypothesis should pass the uniformity filter."""
+    def test_max_fold_fraction_correct_switch(self):
+        """Correct switch hypothesis should have a reasonable max_fold_fraction."""
         detections, _, _ = _run_detect_rate_switch(
-            self.K, snr_db=25.0, change_point=2, min_uniformity=0.25)
+            self.K, snr_db=25.0, change_point=2)
         assert len(detections) >= 1
-        assert detections[0].fold_info['uniformity'] >= 0.25
+        assert 0.0 < detections[0].fold_info['max_fold_fraction'] <= 1.0
 
     def test_fold_info_has_k_entries(self):
         """Rate-switch detection fold_info should contain K per-fold SNRs."""

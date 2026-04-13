@@ -221,7 +221,6 @@ Python resets more aggressively on gaps (30 ms vs 1.0 s for zero-fill threshold)
 | `--detection-margin` | 0.90 | `startDetection.detection_margin` |
 | `--confidence-ratio` | 1.3 | `startDetection.confidence_ratio` |
 | `--tip-secondary` | None | `intra_pulse2_msecs / 1000` (if ≠ 0) |
-| `--min-uniformity` | 0.0 | 0.25 (when tip-secondary active) |
 | `--tag-id` | 0 | `tagInfo.id` |
 | `--freq` | 0 | `tagInfo.frequency_hz` |
 

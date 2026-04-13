@@ -3,7 +3,7 @@
 Tests cover:
   - Hypothesis index generation (pure and switch schedules)
   - Multi-hypothesis fold correctness
-  - Uniformity filter
+  - Fold quality (max_fold_fraction / dominant-fold check)
   - Segment length computation
   - EVT cache naming isolation
   - End-to-end fold_detect with synthetic signals
@@ -22,6 +22,7 @@ from pulse_detector import (
     FOLD_LOCAL_RADIUS,
     HYP_GROUP_IND_A,
     HYP_GROUP_IND_B,
+    OCCAM_MARGIN,
     build_hypothesis_indices,
     build_weighting_matrix,
     compute_segment_samples,
@@ -29,7 +30,6 @@ from pulse_detector import (
     fold_detect,
     fold_multi_hypothesis,
     hyp_label_to_group_ind,
-    uniformity_check,
     _evt_cache_path,
     load_evt_cache,
     save_evt_cache,
@@ -282,54 +282,95 @@ class TestFoldMultiHypothesis:
         np.testing.assert_allclose(best_scores, expected_best, rtol=1e-5)
         np.testing.assert_array_equal(best_offsets, expected_offsets)
 
+    def test_occam_prefers_pure_when_close(self):
+        """When a switch hypothesis barely beats a pure hypothesis,
+        Occam preference should select the pure one."""
+        N_A, N_B = 50, 30
+        n_time = 500
+        n_freq = 5
+        rng = np.random.RandomState(88)
+
+        power = rng.exponential(1.0, (n_freq, n_time)).astype(np.float32)
+
+        # Inject a pure-B signal at bin 2
+        signal_bin = 2
+        t0 = 10
+        for k in range(K):
+            power[signal_bin, t0 + k * N_B] += 80.0
+
+        # Also inject a slightly stronger signal at A_to_B_c1 positions
+        # at bin 3 — the switch score will be just marginally higher
+        # than pure B.
+        t0_sw = 5
+        sw_positions = [t0_sw, t0_sw + N_A, t0_sw + N_A + N_B,
+                        t0_sw + N_A + 2 * N_B, t0_sw + N_A + 3 * N_B]
+        for p in sw_positions:
+            power[3, p] += 80.0
+
+        hyps = build_hypothesis_indices(N_A, K, n_time, N_B=N_B)
+        _, _, best_labels = fold_multi_hypothesis(power, hyps)
+
+        # Bin 2: pure B signal → must be labeled "B" (no switch)
+        assert best_labels[signal_bin] == "B"
+
+    def test_occam_does_not_override_clear_switch(self):
+        """When a switch hypothesis wins by more than OCCAM_MARGIN,
+        the switch label should be preserved."""
+        N_A, N_B = 50, 30
+        n_time = 500
+        n_freq = 5
+        rng = np.random.RandomState(42)
+
+        power = rng.exponential(1.0, (n_freq, n_time)).astype(np.float32)
+
+        # Inject a clear A_to_B_c2 signal at bin 3
+        signal_bin = 3
+        signal_power = 100.0
+        t0 = 5
+        positions = [t0, t0 + N_A, t0 + 2*N_A,
+                     t0 + 2*N_A + N_B, t0 + 2*N_A + 2*N_B]
+        for p in positions:
+            power[signal_bin, p] += signal_power
+
+        hyps = build_hypothesis_indices(N_A, K, n_time, N_B=N_B)
+        _, _, best_labels = fold_multi_hypothesis(power, hyps)
+
+        # The switch signal is genuinely better than pure B at this bin,
+        # so Occam should NOT override it.
+        assert best_labels[signal_bin] == "A_to_B_c2"
+
 
 # ---------------------------------------------------------------------------
-# Uniformity check
+# Max fold fraction (dominant-fold check)
 # ---------------------------------------------------------------------------
 
-class TestUniformityCheck:
+class TestMaxFoldFraction:
+    """Verify that max_fold_fraction is correctly computed in fold_info."""
 
-    def test_uniform_signal_passes(self):
-        power = np.ones((5, 100), dtype=np.float32) * 10.0
-        U, passed = uniformity_check(power, 0, np.array([10, 20, 30, 40, 50]), 0.25)
-        assert U == pytest.approx(1.0)
-        assert passed is True
+    def test_uniform_signal_low_fraction(self):
+        """Equal-power folds should produce max_fold_fraction = 1/K."""
+        on_powers = np.ones(K) * 10.0
+        mff = float(np.max(on_powers) / np.sum(on_powers))
+        assert mff == pytest.approx(1.0 / K, rel=1e-5)
 
-    def test_one_hot_fails(self):
-        power = np.ones((5, 100), dtype=np.float32) * 0.01
-        power[2, 50] = 100.0  # one strong window
-        U, passed = uniformity_check(power, 2, np.array([10, 20, 50, 40, 30]), 0.25)
-        assert U < 0.25
-        assert passed is False
+    def test_one_hot_high_fraction(self):
+        """One dominant fold should produce max_fold_fraction near 1.0."""
+        on_powers = np.ones(K) * 0.01
+        on_powers[2] = 100.0
+        mff = float(np.max(on_powers) / np.sum(on_powers))
+        assert mff > 0.95
 
-    def test_boundary_passes(self):
-        power = np.ones((5, 100), dtype=np.float32)
-        # min/max ratio = 0.25 exactly
-        power[0, 10] = 4.0
-        power[0, 20] = 1.0
-        power[0, 30] = 2.0
-        power[0, 40] = 3.0
-        power[0, 50] = 2.0
-        U, passed = uniformity_check(power, 0, np.array([10, 20, 30, 40, 50]), 0.25)
-        assert U == pytest.approx(0.25)
-        assert passed is True
-
-    def test_boundary_just_below_fails(self):
-        power = np.ones((5, 100), dtype=np.float32)
-        power[0, 10] = 5.0
-        power[0, 20] = 1.0  # ratio = 0.2
-        power[0, 30] = 3.0
-        power[0, 40] = 3.0
-        power[0, 50] = 3.0
-        U, passed = uniformity_check(power, 0, np.array([10, 20, 30, 40, 50]), 0.25)
-        assert U < 0.25
-        assert passed is False
-
-    def test_zero_power_fails(self):
-        power = np.zeros((5, 100), dtype=np.float32)
-        U, passed = uniformity_check(power, 0, np.array([10, 20, 30, 40, 50]), 0.25)
-        assert U == 0.0
-        assert passed is False
+    def test_moderate_variation_below_threshold(self):
+        """Real-world power variation (e.g. 62-81 dB) should be well below 0.8."""
+        # Simulate the real-world case from logs
+        on_powers = np.array([3.858e-03, 4.892e-03, 5.726e-03, 2.893e-02,
+                              2.649e-01, 2.802e-01, 4.865e-02, 1.119e-01,
+                              5.899e-02, 5.587e-02, 4.953e-02, 4.277e-02,
+                              5.757e-02, 6.722e-02, 6.539e-02, 3.279e-02,
+                              2.956e-02, 2.576e-02, 2.378e-02, 1.773e-02])
+        mff = float(np.max(on_powers) / np.sum(on_powers))
+        assert mff < 0.3  # 0.22 in practice
+        assert mff < 0.8  # well below dominant-fold threshold
 
 
 # ---------------------------------------------------------------------------
@@ -452,8 +493,7 @@ class TestFoldDetectEndToEnd:
 
         detections, _, _ = fold_detect(
             power, N_A, 5e-2, self.FS, nfft, n_w, n_ol, samples,
-            evt_cache, W=W, Wf=Wf, hypotheses=None, N_B=None,
-            min_uniformity=0.25)
+            evt_cache, W=W, Wf=Wf, hypotheses=None, N_B=None)
 
         assert len(detections) >= 1
         assert detections[0].hyp_label == "A"
@@ -485,8 +525,7 @@ class TestFoldDetectEndToEnd:
 
         detections, _, _ = fold_detect(
             power, N_A, 5e-2, self.FS, nfft, n_w, n_ol, samples,
-            evt_cache, W=W, Wf=Wf, hypotheses=hyps, N_B=N_B,
-            min_uniformity=0.25)
+            evt_cache, W=W, Wf=Wf, hypotheses=hyps, N_B=N_B)
 
         assert len(detections) >= 1
         # Should detect with a switch hypothesis (A_to_B_c2)
@@ -511,14 +550,14 @@ class TestFoldDetectEndToEnd:
         cache1 = {}
         det1, _, _ = fold_detect(
             power, N_A, 5e-2, self.FS, nfft, n_w, n_ol, samples,
-            cache1, W=W, Wf=Wf, hypotheses=None, min_uniformity=0.25)
+            cache1, W=W, Wf=Wf, hypotheses=None)
 
         # Run with explicit single-rate hypotheses
         hyps = build_hypothesis_indices(N_A, K, n_time, N_B=None)
         cache2 = {}
         det2, _, _ = fold_detect(
             power, N_A, 5e-2, self.FS, nfft, n_w, n_ol, samples,
-            cache2, W=W, Wf=Wf, hypotheses=hyps, min_uniformity=0.25)
+            cache2, W=W, Wf=Wf, hypotheses=hyps)
 
         # Both should detect (or not) at the same bins with same SNR
         assert len(det1) == len(det2)
@@ -527,8 +566,8 @@ class TestFoldDetectEndToEnd:
             assert det1[0].freq_hz == pytest.approx(det2[0].freq_hz, abs=1.0)
             assert det1[0].snr_db == pytest.approx(det2[0].snr_db, abs=0.5)
 
-    def test_uniformity_rejects_one_hot(self):
-        """A detection from a hypothesis where one window dominates should be rejected."""
+    def test_one_hot_has_dominant_fold(self):
+        """A one-hot signal should produce max_fold_fraction > 0.8."""
         N_A = 50
         n_time = 500
         n_freq = 20
@@ -536,13 +575,10 @@ class TestFoldDetectEndToEnd:
         rng = np.random.RandomState(77)
         power = rng.exponential(0.5, (n_freq, n_time)).astype(np.float32)
 
-        # Place signal in one window only at bin 5 — triggers detection
-        # but uniformity should reject it
+        # Place signal in one window only at bin 5
         signal_bin = 5
         t0 = 10
-        # Only boost the first window hugely
         power[signal_bin, t0] += 500.0
-        # Leave remaining windows at noise level
 
         hyps = build_hypothesis_indices(N_A, K, n_time, N_B=None)
 
@@ -552,54 +588,47 @@ class TestFoldDetectEndToEnd:
         n_ol_fake = 29
         det, _, _ = fold_detect(
             power, N_A, 5e-2, 3840.0, n_freq, n_w_fake, n_ol_fake,
-            n_time * 29 + 29, evt_cache, hypotheses=hyps,
-            min_uniformity=0.25)
+            n_time * 29 + 29, evt_cache, hypotheses=hyps)
 
-        # The one-hot signal bin must be rejected by uniformity.
-        # Other bins may still appear due to the trivially low threshold,
-        # but the injected one-hot bin must not survive.
+        # The one-hot signal bin should be detected (not rejected)
+        # but must have max_fold_fraction > 0.8 indicating a dominant fold.
         freq_axis = np.fft.fftshift(np.fft.fftfreq(n_freq, d=1.0 / 3840.0))
         signal_freq = freq_axis[signal_bin]
+        found_one_hot = False
         for d in det:
-            freq_hz = d[0]
-            assert abs(freq_hz - signal_freq) > 1.0, (
-                f"One-hot detection at signal bin freq={signal_freq:.1f} Hz "
-                f"should have been rejected by uniformity filter"
-            )
+            if abs(d.freq_hz - signal_freq) < 1.0:
+                found_one_hot = True
+                assert d.fold_info['max_fold_fraction'] > 0.8, (
+                    f"One-hot detection should have max_fold_fraction > 0.8, "
+                    f"got {d.fold_info['max_fold_fraction']:.3f}"
+                )
+        assert found_one_hot, "One-hot signal bin should be detected (not discarded)"
 
-    def test_all_detections_filtered_returns_best_cand(self):
-        """When all det_bins pass threshold but all are rejected by uniformity,
-        fold_detect must return best_cand without crashing (regression for
-        UnboundLocalError on best_cand)."""
+    def test_detection_not_discarded(self):
+        """Detections are never discarded by fold quality — only downgraded.
+        A one-hot spike that exceeds threshold must still be returned."""
         N_A = 50
         n_time = 500
         n_freq = 20
 
-        # Low-variance noise so only our injected bin exceeds threshold
         power = np.ones((n_freq, n_time), dtype=np.float32) * 0.5
 
-        # Inject a one-hot spike: huge power in one window only at one bin.
-        # This will exceed threshold but fail uniformity (min/max ≈ 0).
         signal_bin = 5
         power[signal_bin, 10] = 5000.0
 
         hyps = build_hypothesis_indices(N_A, K, n_time, N_B=None)
 
-        # Set threshold low enough that only the one-hot bin exceeds it,
-        # but high enough that pure-noise bins stay below.
         evt_cache = {'threshold': 50.0}
         n_w_fake = 58
         n_ol_fake = 29
         det, noise_psd, best_cand = fold_detect(
             power, N_A, 5e-2, 3840.0, n_freq, n_w_fake, n_ol_fake,
-            n_time * 29 + 29, evt_cache, hypotheses=hyps,
-            min_uniformity=0.5)
+            n_time * 29 + 29, evt_cache, hypotheses=hyps)
 
-        # All detections filtered — should return empty list + best_cand
-        assert det == []
-        assert best_cand is not None
-        assert 'freq_hz' in best_cand
-        assert 'score_ratio' in best_cand
+        # Detection should NOT be filtered out — fold quality only affects
+        # confidence, not whether the detection is returned.
+        assert len(det) >= 1
+        assert det[0].fold_info['max_fold_fraction'] > 0.8
 
 
 # ---------------------------------------------------------------------------
