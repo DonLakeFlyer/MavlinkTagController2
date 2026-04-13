@@ -298,20 +298,25 @@ class TestFoldMultiHypothesis:
         for k in range(K):
             power[signal_bin, t0 + k * N_B] += 80.0
 
-        # Also inject a slightly stronger signal at A_to_B_c1 positions
-        # at bin 3 — the switch score will be just marginally higher
-        # than pure B.
-        t0_sw = 5
-        sw_positions = [t0_sw, t0_sw + N_A, t0_sw + N_A + N_B,
-                        t0_sw + N_A + 2 * N_B, t0_sw + N_A + 3 * N_B]
-        for p in sw_positions:
-            power[3, p] += 80.0
+        # Inject a pure-B signal at bin 3 as well, then add a tiny bump
+        # at the one A-rate position that A_to_B_c1 sees but pure-B doesn't.
+        # This makes A_to_B_c1 barely beat pure B (within OCCAM_MARGIN),
+        # so Occam should override and select "B".
+        occam_bin = 3
+        t0_b = 5
+        for k in range(K):
+            power[occam_bin, t0_b + k * N_B] += 80.0
+        # A_to_B_c1 first fold is at A-rate offset from t0.
+        # Add a small bump so the switch scores ~2% higher than pure B.
+        power[occam_bin, t0_b + N_A] += 2.0
 
         hyps = build_hypothesis_indices(N_A, K, n_time, N_B=N_B)
         _, _, best_labels = fold_multi_hypothesis(power, hyps)
 
         # Bin 2: pure B signal → must be labeled "B" (no switch)
         assert best_labels[signal_bin] == "B"
+        # Bin 3: marginal switch competition → Occam prefers pure B
+        assert best_labels[occam_bin] == "B"
 
     def test_occam_does_not_override_clear_switch(self):
         """When a switch hypothesis wins by more than OCCAM_MARGIN,
