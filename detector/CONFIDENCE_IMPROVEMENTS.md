@@ -56,26 +56,26 @@ det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
               else DETECTION_STATUS_SUPERTHRESHOLD)
 ```
 
-### New CLI argument
+### Threshold
 
-```
-No additional CLI argument needed — the 0.8 threshold is built into the detector.
-```
+No CLI argument — the `DOMINANT_FOLD_THRESHOLD` (0.8) constant is built
+into the detector.
 
-### Threshold rationale
+### Max-fold-fraction rationale
 
-| Uniformity | Meaning | Action |
-|------------|---------|--------|
-| < 0.10 | ≤1 fold dominates — transient/spike | Downgrade to LOW |
-| 0.10–0.25 | Marginal — possible weak signal with fading | Pass (conservative) |
-| > 0.25 | Multiple folds contributing — consistent pulse train | Pass |
+`max_fold_fraction = max(fold_powers) / sum(fold_powers)`.  Higher values
+are worse (a single fold dominates the score).
 
-The 0.10 starting point is deliberately conservative. It only rejects cases
-where one fold has ≥10× the power of the weakest — clearly not a periodic
-pulse. This would have rejected all 8 Flight 2 detections (uniformity
-0.000–0.004) without affecting any Flight 4 real detections.
+| max_fold_fraction | Meaning | Action |
+|-------------------|---------|--------|
+| > 0.8 | Single fold dominates — likely transient/spike | Downgrade to SUBTHRESHOLD |
+| 0.2–0.8 | Some variation across folds — normal for weak signals | Pass |
+| ~1/K | Uniform power across all folds — ideal pulse train | Pass |
 
-See [CROSS_RATE_REJECTION.md](CROSS_RATE_REJECTION.md) for the full design.
+This replaces the old `min/max` uniformity metric which was fundamentally
+broken at high SNR (all detections had U≈0.01 and were rejected).  The
+fraction-of-sum approach matches uavrt_detection's `selectpeakindex`
+heuristic and only flags genuine single-transient false alarms.
 
 ### Impact on existing detections
 

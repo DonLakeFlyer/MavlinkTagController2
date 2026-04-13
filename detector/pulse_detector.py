@@ -59,6 +59,11 @@ DETECTION_STATUS_NO_DETECTION   = 3  # Searched but no pulse found
 HYP_GROUP_IND_A = 0
 HYP_GROUP_IND_B = 1
 
+# If any single fold carries more than this fraction of the total K-fold
+# score, the detection is likely a transient rather than a real pulse train.
+# Matches uavrt_detection's selectpeakindex heuristic.
+DOMINANT_FOLD_THRESHOLD = 0.8
+
 
 class Detection(NamedTuple):
     """Single pulse detection result from fold_detect."""
@@ -707,7 +712,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     largest single fold's fraction of the total K-fold score.  This is
     used by the caller to downgrade confidence (not to discard
     detections).  A value > 0.8 indicates a single transient dominates
-    the score (matching uavrt_detection's ``selectpeakindex`` heuristic).
+    the score (see ``DOMINANT_FOLD_THRESHOLD``).
 
     Args:
         power:               (n_freq, n_time) float32 power spectrogram.
@@ -913,7 +918,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         # Sort by score ratio descending and show all hypotheses.
         hyp_diag.sort(key=lambda x: -x[1])
         top_str = '  '.join(
-            f'{lbl}:{rat:.1f}/F{mff:.2f}{"*" if mff > 0.8 else ""}'
+            f'{lbl}:{rat:.1f}/F{mff:.2f}{"*" if mff > DOMINANT_FOLD_THRESHOLD else ""}'
             for lbl, rat, mff in hyp_diag
         )
         n_above = len(det_bins)
@@ -1468,7 +1473,7 @@ def main():
                     # pulse train).  Matches uavrt_detection's
                     # selectpeakindex heuristic.  Downgrade to SUBTHRESHOLD
                     # rather than discarding.
-                    has_dominant_fold = det.fold_info['max_fold_fraction'] > 0.8
+                    has_dominant_fold = det.fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
                     is_marginal = det.score_ratio < confidence_ratio or has_dominant_fold
                     det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
                                   else DETECTION_STATUS_SUPERTHRESHOLD)
