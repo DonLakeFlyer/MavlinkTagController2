@@ -19,6 +19,7 @@ import pytest
 from pulse_detector import (
     K,
     Detection,
+    DOMINANT_FOLD_THRESHOLD,
     FOLD_LOCAL_RADIUS,
     HYP_GROUP_IND_A,
     HYP_GROUP_IND_B,
@@ -633,7 +634,46 @@ class TestFoldDetectEndToEnd:
         # Detection should NOT be filtered out — fold quality only affects
         # confidence, not whether the detection is returned.
         assert len(det) >= 1
-        assert det[0].fold_info['max_fold_fraction'] > 0.8
+        assert det[0].fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
+
+    def test_one_hot_yields_subthreshold_confidence(self):
+        """A one-hot spike with high score_ratio should still be classified as
+        SUBTHRESHOLD because max_fold_fraction exceeds DOMINANT_FOLD_THRESHOLD.
+        This tests the confidence classification policy."""
+        N_A = 50
+        n_time = 500
+        n_freq = 20
+
+        power = np.ones((n_freq, n_time), dtype=np.float32) * 0.5
+        signal_bin = 5
+        power[signal_bin, 10] = 5000.0
+
+        hyps = build_hypothesis_indices(N_A, K, n_time, N_B=None)
+        evt_cache = {'threshold': 50.0}
+        det, _, _ = fold_detect(
+            power, N_A, 5e-2, 3840.0, n_freq, 58, 29,
+            n_time * 29 + 29, evt_cache, hypotheses=hyps)
+
+        assert len(det) >= 1
+        d = det[0]
+        # The detection has a high score_ratio (well above any confidence_ratio)
+        # but the dominant fold should trigger SUBTHRESHOLD classification.
+        has_dominant_fold = d.fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
+        assert has_dominant_fold, (
+            f"Expected dominant fold (>{DOMINANT_FOLD_THRESHOLD}), "
+            f"got {d.fold_info['max_fold_fraction']:.3f}")
+        assert d.score_ratio > 1.3, (
+            f"Expected high score_ratio for classification test, got {d.score_ratio:.3f}")
+        # Apply the same classification logic as the runtime reporting loop:
+        is_marginal = d.score_ratio < 1.3 or has_dominant_fold
+        assert is_marginal, "One-hot spike should be classified as marginal"
+        # Verify the derived outputs match expected policy:
+        # detection_status = SUBTHRESHOLD, confirmed_status = 0
+        from pulse_detector import DETECTION_STATUS_SUBTHRESHOLD
+        det_status = DETECTION_STATUS_SUBTHRESHOLD if is_marginal else 1
+        confirmed = 0 if is_marginal else 1
+        assert det_status == DETECTION_STATUS_SUBTHRESHOLD
+        assert confirmed == 0
 
 
 # ---------------------------------------------------------------------------

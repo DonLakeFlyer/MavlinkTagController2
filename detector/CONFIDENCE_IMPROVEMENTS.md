@@ -80,10 +80,11 @@ heuristic and only flags genuine single-transient false alarms.
 
 ### Impact on existing detections
 
-Reviewing all field data:
+Reviewing all field data (uniformity values are from the legacy `min/max`
+metric, now replaced by `max_fold_fraction`):
 
-| Flight | Real signal? | Uniformity range | Affected? |
-|--------|-------------|------------------|-----------|
+| Flight | Real signal? | Uniformity (legacy) | Affected? |
+|--------|-------------|----------------------|-----------|
 | Apr-9 K=10 (4 km) | Yes | Not available (pre-uniformity) | No |
 | Apr-11 Flight 2 (5.75 km) | No — RFI | 0.000–0.004 | **Yes — all 8 downgraded** |
 | Apr-11 Flight 3 (7.03 km) | Marginal | 0.001–0.029 | Some at 0.001–0.004 |
