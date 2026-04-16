@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <future>
@@ -10,6 +11,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <spawn.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -28,6 +30,9 @@
 #include "LogFileManager.h"
 #include "TelemetryCache.h"
 #include "BearingCalculator.h"
+
+// POSIX requires the application to declare this; glibc only does so under _GNU_SOURCE.
+extern char **environ;
 
 using namespace TunnelProtocol;
 
@@ -245,14 +250,25 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         return "Controller in incorrect state";
     }
 
+    // Heartbeat stays HAS_TAGS until the worker finishes, so this is the only
+    // thing preventing a second START from launching a duplicate process set.
+    if (_detectionStarting.exchange(true)) {
+        logError() << "COMMAND_ID_START_DETECTION - ERROR: Detection start already in progress";
+        return "Detection start already in progress";
+    }
+
     std::string airspyError;
     auto deviceType = _simulatorMode ? AirSpyDeviceType::SIMULATOR : _connectedAirSpyType(&airspyError);
     if (deviceType == AirSpyDeviceType::NONE) {
         logError() << "COMMAND_ID_START_DETECTION - ERROR: AirSpy detection failed: " << airspyError;
+        _detectionStarting.store(false);
         return std::string("AirSpy detection failed: ") + airspyError;
     }
 
     auto logFileManager = LogFileManager::instance();
+    // Freeze before the log dir is named and before DETECTING is published, so a
+    // concurrent stop cannot unfreeze and then be re-frozen by this start.
+    _mavlink->setVehicleTimeFrozen(true);
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
         if (_inRotation) {
@@ -456,7 +472,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         _mavlink->sendStatusText(startedStr.c_str(), MAV_SEVERITY_INFO);
 
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_DETECTING);
-        _mavlink->setVehicleTimeFrozen(true);
+        _detectionStarting.store(false);
     }).detach();
 
     return ""; // Return empty string to indicate success
@@ -474,15 +490,35 @@ void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
         return;
     }
 
-    std::string cmd = formatString("\"%s\" -u \"%s\" \"%s\"",
-                                   pythonCmd.c_str(), script.c_str(), logDir.c_str());
+    logInfo() << "Running post-flight analysis:" << pythonCmd << "-u" << script << logDir;
 
-    logInfo() << "Running post-flight analysis:" << cmd;
+    // posix_spawnp with an argv array: no shell, and exec failures come back as errno.
+    // _analysisJobs keeps SAVE/CLEAN_LOGS from touching the directory mid-run.
+    _analysisJobs.fetch_add(1);
+    std::thread([this, pythonCmd, script, logDir]() {
+        struct JobGuard {
+            std::atomic<int>& n;
+            ~JobGuard() { n.fetch_sub(1); }
+        } guard{_analysisJobs};
 
-    std::thread([cmd]() {
-        int rc = system(cmd.c_str());
-        if (rc == -1) {
-            logWarn() << "Post-flight analysis: system() failed to launch";
+        char* const argv[] = {
+            const_cast<char*>(pythonCmd.c_str()),
+            const_cast<char*>("-u"),
+            const_cast<char*>(script.c_str()),
+            const_cast<char*>(logDir.c_str()),
+            nullptr
+        };
+
+        pid_t pid = 0;
+        int spawnErr = posix_spawnp(&pid, pythonCmd.c_str(), nullptr, nullptr, argv, environ);
+        if (spawnErr != 0) {
+            logWarn() << "Post-flight analysis: failed to launch" << pythonCmd << ":" << strerror(spawnErr);
+            return;
+        }
+
+        int rc = 0;
+        if (waitpid(pid, &rc, 0) == -1) {
+            logWarn() << "Post-flight analysis: waitpid() failed:" << strerror(errno);
         } else if (WIFEXITED(rc)) {
             int exitCode = WEXITSTATUS(rc);
             if (exitCode == 0) {
@@ -498,7 +534,7 @@ void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
     }).detach();
 }
 
-bool CommandHandler::_handleStopDetection(void)
+bool CommandHandler::_handleStopDetection(bool waitForCompletion)
 {
     logDebug() << "COMMAND_ID_STOP_DETECTION heartbeatStatus" << _mavlink->heartbeatStatus();
 
@@ -507,7 +543,32 @@ bool CommandHandler::_handleStopDetection(void)
         return false;
     }
 
-    std::thread([this]() {
+    // Heartbeat stays DETECTING until teardown finishes, so claim the stop
+    // here or two workers (e.g. STOP_ROTATION racing the UDP auto-stop) would
+    // both walk and clear _processes and double-delete _airspyPipe.
+    if (_detectionStopping.exchange(true)) {
+        if (waitForCompletion) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+            while (_mavlink->heartbeatStatus() == HEARTBEAT_STATUS_DETECTING &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return _mavlink->heartbeatStatus() != HEARTBEAT_STATUS_DETECTING;
+        }
+        logDebug() << "COMMAND_ID_STOP_DETECTION already in progress";
+        return false;
+    }
+
+    // Snapshot now: the caller may clear _inRotation before the thread below
+    // reaches its checks (rotation teardown), which would wrongly unfreeze
+    // time and run a per-detector analysis.
+    bool inRotation;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        inRotation = _inRotation;
+    }
+
+    std::thread stopThread([this, inRotation]() {
         for (MonitoredProcess* process: _processes) {
             process->stop();
         }
@@ -519,15 +580,11 @@ bool CommandHandler::_handleStopDetection(void)
         _simPhase = 0;
 
         _mavlink->setDetectionMode(DETECTION_MODE_UAVRT);
-        _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
 
-        // Only unfreeze vehicle time if we're not inside a rotation session.
-        // Rotation keeps time frozen across all its per-heading detection cycles.
-        {
-            std::lock_guard<std::mutex> lock(_rotationMutex);
-            if (!_inRotation) {
-                _mavlink->setVehicleTimeFrozen(false);
-            }
+        // Rotation keeps time frozen across all its per-heading detection
+        // cycles and runs its own analysis after bearing computation.
+        if (!inRotation) {
+            _mavlink->setVehicleTimeFrozen(false);
         }
 
         auto logFileManager = LogFileManager::instance();
@@ -537,15 +594,20 @@ bool CommandHandler::_handleStopDetection(void)
 
         logFileManager->detectorsStopped();
 
-        // Run post-flight analysis if we're not inside a rotation session
-        // (rotation runs its own analysis after all headings complete).
-        {
-            std::lock_guard<std::mutex> lock(_rotationMutex);
-            if (!_inRotation && !detLogDir.empty()) {
-                _runPostFlightAnalysis(detLogDir);
-            }
+        if (!inRotation && !detLogDir.empty()) {
+            _runPostFlightAnalysis(detLogDir);
         }
-    }).detach();
+
+        // Last: HAS_TAGS gates new START_* commands, so nothing can begin mid-teardown.
+        _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
+        _detectionStopping.store(false);
+    });
+
+    if (waitForCompletion) {
+        stopThread.join();
+    } else {
+        stopThread.detach();
+    }
 
     return true;
 }
@@ -780,27 +842,40 @@ std::string CommandHandler::_handleStartDetectionAtHeading(const mavlink_tunnel_
 
 std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t& /* tunnel */)
 {
-    std::vector<RotationSlice> slicesCopy;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
         if (!_inRotation) {
             logError() << "COMMAND_ID_STOP_ROTATION_DETECTION - ERROR: Not in rotation mode";
             return "Not in rotation mode";
         }
+    }
 
-        slicesCopy = std::move(_rotationSlices);
-        _rotationSlices.clear();
+    // A heading start may still be launching processes; wait for it to publish
+    // DETECTING so the stop below actually tears those processes down.
+    const auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (_detectionStarting.load() && std::chrono::steady_clock::now() < startDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (_detectionStarting.load()) {
+        // Leave rotation active so the operator can retry once startup settles.
+        logError() << "COMMAND_ID_STOP_ROTATION_DETECTION - ERROR: detection start still in progress";
+        return "Detection start still in progress; retry";
     }
 
     // Stop any running detection while _inRotation is still true so the
     // stop-detection thread skips unfreezing time and post-flight analysis
-    // (rotation handles both after bearing computation).
+    // (rotation handles both after bearing computation). Wait for teardown
+    // so the detectors' .jsonl files are complete before analysis reads them.
     if (_mavlink->heartbeatStatus() == HEARTBEAT_STATUS_DETECTING) {
-        _handleStopDetection();
+        _handleStopDetection(true /* waitForCompletion */);
     }
 
+    // Snapshot only after teardown so a final pulse delivered mid-stop is kept.
+    std::vector<RotationSlice> slicesCopy;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
+        slicesCopy = std::move(_rotationSlices);
+        _rotationSlices.clear();
         _inRotation = false;
     }
 
@@ -828,10 +903,17 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
         }
     }
 
-    // Compute mean lat/lon per tag from the rotation slices
+    // Compute mean lat/lon per tag from the rotation slices. TelemetryCache
+    // returns (0,0) when it has no fix yet; exclude that sentinel.
     std::map<uint32_t, std::pair<double, double>> tagLatLonSum;
     std::map<uint32_t, int> tagLatLonCount;
     for (const auto& slice : slicesCopy) {
+        if (!std::isfinite(slice.latitude) || !std::isfinite(slice.longitude)) {
+            continue;
+        }
+        if (slice.latitude == 0.0 && slice.longitude == 0.0) {
+            continue;
+        }
         tagLatLonSum[slice.tag_id].first  += slice.latitude;
         tagLatLonSum[slice.tag_id].second += slice.longitude;
         tagLatLonCount[slice.tag_id]++;
@@ -872,6 +954,9 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
 
     // Capture rotation log dir before rotationStopped() clears it
     std::string rotLogDir = logFileManager->logDir(LogFileManager::ROTATION);
+
+    // Flush the CSV before the analyzer reads it.
+    bearingLog.close();
 
     logFileManager->rotationStopped();
 
@@ -1039,6 +1124,11 @@ bool CommandHandler::_handleSaveLogs(void)
         _mavlink->sendStatusText("Command failed. Controller is not idle", MAV_SEVERITY_ALERT);
         return false;
     }
+    if (_analysisJobs.load() > 0) {
+        logError() << "COMMAND_ID_SAVE_LOGS called while post-flight analysis is running";
+        _mavlink->sendStatusText("Command failed. Post-flight analysis still running", MAV_SEVERITY_ALERT);
+        return false;
+    }
 
     std::thread([]() {
         auto logFileManager = LogFileManager::instance();
@@ -1055,6 +1145,11 @@ bool CommandHandler::_handleCleanLogs(void)
     if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_IDLE && _mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
         logError() << "COMMAND_ID_CLEAN_LOGS called when not idle";
         _mavlink->sendStatusText("Command failed. Controller is not idle", MAV_SEVERITY_ALERT);
+        return false;
+    }
+    if (_analysisJobs.load() > 0) {
+        logError() << "COMMAND_ID_CLEAN_LOGS called while post-flight analysis is running";
+        _mavlink->sendStatusText("Command failed. Post-flight analysis still running", MAV_SEVERITY_ALERT);
         return false;
     }
 

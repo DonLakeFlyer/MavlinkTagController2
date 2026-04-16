@@ -25,9 +25,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..', 'shared'))
 from log_schema import (read_jsonl, entries_by_type,
                         STARTUP, DETECTION, NO_DETECTION, FOLDS, TIMING,
-                        NOISE_STATS, NOISE_ELEVATED, GAP_EVENT,
-                        EVT_THRESHOLD, HYPOTHESIS, SESSION_END,
-                        STFT_DEBUG, SPECTROGRAM_DUMP)
+                        NOISE_ELEVATED, GAP_EVENT,
+                        EVT_THRESHOLD, HYPOTHESIS, SESSION_END)
+
+# Decimator rate warnings beyond this count are treated as a sustained mismatch
+# rather than a startup transient (measured-rate check runs ~1/s).
+RATE_WARNING_TRANSIENT_MAX = 10
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +38,7 @@ from log_schema import (read_jsonl, entries_by_type,
 # ---------------------------------------------------------------------------
 
 def generate_spectrogram_png(power_path: str, out_png: str,
-                             heading: str = '') -> bool:
+                             heading: str = '', tag: str = '') -> bool:
     """Generate a spectrogram PNG from a power .npy file.
 
     Returns True on success, False if dependencies are missing or data
@@ -54,8 +57,12 @@ def generate_spectrogram_png(power_path: str, out_png: str,
     except Exception:
         return False
 
+    if power.ndim != 2 or power.size == 0:
+        return False
+
     # Load companion metadata if available
     meta_path = power_path.replace('_power.npy', '_meta.json')
+    meta = {}
     fs = None
     nfft = None
     detections = []
@@ -67,7 +74,7 @@ def generate_spectrogram_png(power_path: str, out_png: str,
             nfft = meta.get('nfft')
             detections = meta.get('detections', [])
         except Exception:
-            pass
+            meta = {}
 
     n_freq, n_time = power.shape
 
@@ -78,13 +85,17 @@ def generate_spectrogram_png(power_path: str, out_png: str,
     vmax = np.percentile(power_db, 99)
 
     if fs and nfft:
-        freq_axis = np.linspace(-fs / 2, fs / 2, n_freq)
+        freq_axis = np.fft.fftshift(np.fft.fftfreq(n_freq, d=1.0 / fs))
         # Time axis: use STFT geometry from metadata when available
-        n_w = meta.get('n_w', nfft // 2) if meta else nfft // 2
-        n_ol = meta.get('n_ol', n_w // 2) if meta else n_w // 2
+        n_w = meta.get('n_w', nfft // 2)
+        n_ol = meta.get('n_ol', n_w // 2)
         hop = n_w - n_ol
         t_axis = np.arange(n_time) * hop / fs
-        extent = [t_axis[0], t_axis[-1], freq_axis[0], freq_axis[-1]]
+        # imshow extent is pixel edges, so pad the bin centers by half a bin
+        df = fs / n_freq
+        dt = hop / fs
+        extent = [t_axis[0] - dt / 2, t_axis[-1] + dt / 2,
+                  freq_axis[0] - df / 2, freq_axis[-1] + df / 2]
         ax.imshow(power_db, aspect='auto', origin='lower',
                   extent=extent, cmap='viridis', vmin=vmin, vmax=vmax)
         ax.set_xlabel('Time (s)')
@@ -95,7 +106,11 @@ def generate_spectrogram_png(power_path: str, out_png: str,
         ax.set_xlabel('Time bin')
         ax.set_ylabel('Frequency bin')
 
-    title = f'Spectrogram — heading {heading}°' if heading else 'Spectrogram'
+    title = 'Spectrogram'
+    if tag:
+        title += f' — tag {tag}'
+    if heading:
+        title += f' — heading {heading}°'
     if detections:
         det_info = detections[0]
         snr = det_info.get('snr_db', 0)
@@ -149,7 +164,8 @@ class DetectionCycle:
     confidence: str = ''
     hyp_label: str = ''
     detection_status: int = 0
-    inter_pulse_delta_ms: Optional[float] = None
+    # Interval between consecutive detected segments (not individual pulses)
+    inter_detection_delta_ms: Optional[float] = None
     # Folds (populated from FOLDS entry)
     max_fold_fraction: float = 0.0
     fold_snrs: List[float] = field(default_factory=list)
@@ -227,6 +243,13 @@ def parse_decimator_log(path: str) -> dict:
     queue_drop_events: List[str] = []
     input_rate = 0.0
     output_rate = 0.0
+    # Decimator prints only the first 10 warnings then every 100th, with a
+    # cumulative warnings= counter; the max counter is the true count.
+    rate_warning_count = 0
+    # Drop/queue-drop event lines carry cumulative totals too; they can
+    # postdate the last perf line or exist in a run with no perf line at all.
+    event_dropped = 0
+    event_queue_drops = 0
 
     perf_pat = re.compile(
         r'perf\s+.*?out_sps=([\d.e+-]+).*?cpu_duty_pct=([\d.e+-]+).*?'
@@ -236,7 +259,7 @@ def parse_decimator_log(path: str) -> dict:
         r'dropped=(\d+).*?out_of_order=(\d+)')
     rate_warn_pat = re.compile(
         r'bad incoming.*(?:sample.rate|sample_rate).*?=([\d.e+-]+).*?'
-        r'error_ppm=([\d.e+-]+)')
+        r'error_ppm=([\d.e+-]+)(?:.*?warnings=(\d+))?')
     lock_pat = re.compile(
         r'locked input rate=([\d.e+-]+)\s+outputRate=([\d.e+-]+)')
     drop_pat = re.compile(
@@ -272,23 +295,38 @@ def parse_decimator_log(path: str) -> dict:
                 if rw:
                     rate_warnings.append(
                         f'rate={rw.group(1)} error_ppm={rw.group(2)}')
+                    if rw.group(3):
+                        rate_warning_count = max(rate_warning_count,
+                                                 int(rw.group(3)))
+                    else:
+                        rate_warning_count = max(rate_warning_count,
+                                                 len(rate_warnings))
 
                 dm = drop_pat.search(line)
                 if dm:
                     drop_events.append(
                         f'dropped {dm.group(1)} packet(s), '
                         f'total={dm.group(2)}')
+                    event_dropped = max(event_dropped, int(dm.group(2)))
 
                 qm = queue_drop_pat.search(line)
                 if qm:
                     queue_drop_events.append(
                         f'queue drop total={qm.group(1)}')
+                    event_queue_drops = max(event_queue_drops,
+                                            int(qm.group(1)))
     except FileNotFoundError:
         pass
 
+    last = perfs[-1] if perfs else DecimatorPerf()
     return {
         'perfs': perfs,
         'rate_warnings': rate_warnings,
+        'rate_warning_count': rate_warning_count,
+        'dropped': max(last.dropped, event_dropped),
+        'malformed': last.malformed,
+        'queue_drops': max(last.queue_drops, event_queue_drops),
+        'out_of_order': last.out_of_order,
         'drop_events': drop_events,
         'queue_drop_events': queue_drop_events,
         'input_rate': input_rate,
@@ -358,7 +396,7 @@ def parse_detector_jsonl(path: str) -> DetectorSummary:
             confidence=e.get('confidence', ''),
             hyp_label=e.get('hyp_label', ''),
             detection_status=e.get('detection_status', 0),
-            inter_pulse_delta_ms=e.get('inter_pulse_delta_ms'),
+            inter_detection_delta_ms=e.get('inter_detection_delta_ms'),
             max_fold_fraction=folds_e.get('max_fold_fraction', 0.0),
             fold_snrs=folds_e.get('fold_snrs', []),
             fold_windows=folds_e.get('fold_windows', []),
@@ -479,30 +517,44 @@ def generate_report(log_dir: str) -> str:
         jsonl_files = []
         for d in heading_dirs:
             jsonl_files.extend(sorted(
-                glob.glob(os.path.join(d, 'detector_*.jsonl'))))
+                glob.glob(os.path.join(d, 'detector*.jsonl'))))
         dump_files = []
         for d in heading_dirs:
             dump_files.extend(sorted(
-                glob.glob(os.path.join(d, 'cycle_*_power.npy'))))
+                glob.glob(os.path.join(d, 'tag*_cycle_*_power.npy'))))
     else:
         # Plain detection: single directory
         dec_paths = [os.path.join(log_dir, 'airspyhf_decimator.log')]
         jsonl_files = sorted(glob.glob(
-            os.path.join(log_dir, 'detector_*.jsonl')))
+            os.path.join(log_dir, 'detector*.jsonl')))
         dump_files = sorted(glob.glob(
-            os.path.join(log_dir, 'cycle_*_power.npy')))
+            os.path.join(log_dir, 'tag*_cycle_*_power.npy')))
 
     # --- Parse ---
-    # Merge decimator perf from all heading directories
+    # Merge decimator perf from all heading directories. Each heading runs a
+    # fresh decimator, so the cumulative counters restart per log: sum each
+    # log's final counters rather than reading the last log only.
     dec: dict = {'perfs': [], 'rate_warnings': [], 'drop_events': [],
                  'queue_drop_events': [], 'input_rate': 0.0,
-                 'output_rate': 0.0}
+                 'output_rate': 0.0,
+                 'dropped': 0, 'malformed': 0, 'queue_drops': 0,
+                 'out_of_order': 0, 'rate_warning_count': 0,
+                 'rate_warning_max': 0}
     for dp in dec_paths:
         d = parse_decimator_log(dp)
         dec['perfs'].extend(d['perfs'])
         dec['rate_warnings'].extend(d['rate_warnings'])
+        # Sum for display; classify on the per-log max since each heading's
+        # decimator restarts its counter (N startup transients != sustained).
+        dec['rate_warning_count'] += d['rate_warning_count']
+        dec['rate_warning_max'] = max(dec['rate_warning_max'],
+                                      d['rate_warning_count'])
         dec['drop_events'].extend(d['drop_events'])
         dec['queue_drop_events'].extend(d['queue_drop_events'])
+        dec['dropped'] += d['dropped']
+        dec['malformed'] += d['malformed']
+        dec['queue_drops'] += d['queue_drops']
+        dec['out_of_order'] += d['out_of_order']
         if d['input_rate'] > 0:
             dec['input_rate'] = d['input_rate']
         if d['output_rate'] > 0:
@@ -575,7 +627,15 @@ def generate_report(log_dir: str) -> str:
     dump_on = any(det.dump_spectrogram for det in detectors)
     w(f'| Spectrogram dump | {"ON" if dump_on else "OFF"} |')
     if dump_files:
-        total_bytes = sum(os.path.getsize(f) for f in dump_files)
+        # Each cycle has _power.npy, _iq.npy and _meta.json siblings.
+        total_bytes = 0
+        for pf in dump_files:
+            prefix = pf[:-len('_power.npy')]
+            for suffix in ('_power.npy', '_iq.npy', '_meta.json'):
+                try:
+                    total_bytes += os.path.getsize(prefix + suffix)
+                except OSError:
+                    pass
         w(f'| Dump files | {len(dump_files)} cycles, '
           f'{total_bytes / 1048576:.1f} MB |')
 
@@ -589,7 +649,13 @@ def generate_report(log_dir: str) -> str:
     if total_cycles > 0:
         w(f'| Detection rate | {total_dets}/{total_cycles} '
           f'({100 * total_dets / total_cycles:.0f}%) |')
-    total_elapsed = sum(det.elapsed_s for det in detectors)
+    # Detectors for different tags run concurrently, so take the max per
+    # heading and sum headings (plain sessions are a single None heading).
+    elapsed_by_heading: Dict[Optional[str], float] = {}
+    for det in detectors:
+        elapsed_by_heading[det.heading] = max(
+            elapsed_by_heading.get(det.heading, 0.0), det.elapsed_s)
+    total_elapsed = sum(elapsed_by_heading.values())
     if total_elapsed > 0:
         w(f'| Session duration | {total_elapsed:.0f} s |')
     w()
@@ -599,15 +665,18 @@ def generate_report(log_dir: str) -> str:
         w('## Pipeline Health — Decimator')
         w()
         perfs = dec['perfs']
-        last = perfs[-1]
-        total_drops = last.dropped
-        total_malformed = last.malformed
-        total_queue_drops = last.queue_drops
-        total_ooo = last.out_of_order
+        total_drops = dec['dropped']
+        total_malformed = dec['malformed']
+        total_queue_drops = dec['queue_drops']
+        total_ooo = dec['out_of_order']
         max_queue = max(p.queue_depth for p in perfs)
+        # Measured-rate check runs once per second; more than this many
+        # warnings in a single decimator run means the mismatch outlasted startup.
+        rate_sustained = dec['rate_warning_max'] > RATE_WARNING_TRANSIENT_MAX
 
         if (total_drops == 0 and total_malformed == 0
-                and total_queue_drops == 0 and total_ooo == 0):
+                and total_queue_drops == 0 and total_ooo == 0
+                and not rate_sustained):
             w('- **Status:** Healthy — no drops, no malformed packets')
         else:
             issues = []
@@ -619,6 +688,9 @@ def generate_report(log_dir: str) -> str:
                 issues.append(f'{total_queue_drops} queue drops')
             if total_ooo:
                 issues.append(f'{total_ooo} out-of-order')
+            if rate_sustained:
+                issues.append(f'sustained sample-rate mismatch '
+                              f'({dec["rate_warning_count"]} warnings)')
             w(f'- **Status:** WARNING — {", ".join(issues)}')
 
         out_rates = [p.out_sps for p in perfs if p.out_sps > 0]
@@ -643,9 +715,9 @@ def generate_report(log_dir: str) -> str:
             w(f'- **Queue overflow events:** '
               f'{len(dec["queue_drop_events"])}')
 
-        if dec['rate_warnings']:
-            w(f'- **Rate warnings:** {len(dec["rate_warnings"])} '
-              f'(startup transient)')
+        if dec['rate_warning_count']:
+            label = ('sustained' if rate_sustained else 'startup transient')
+            w(f'- **Rate warnings:** {dec["rate_warning_count"]} ({label})')
         w()
 
     # ========== Rotation Overview ==========
@@ -686,27 +758,29 @@ def generate_report(log_dir: str) -> str:
                 w()
                 break
 
-        # Generate spectrogram plots for each heading
-        if dump_files:
-            w('### Spectrograms')
-            w()
-            for hdir in heading_dirs:
-                heading_label = os.path.basename(hdir).replace('heading-', '')
-                power_files = sorted(
-                    glob.glob(os.path.join(hdir, 'cycle_*_power.npy')))
-                for pf in power_files:
-                    cycle_match = re.search(r'cycle_(\d+)_power', pf)
-                    cycle_label = (cycle_match.group(1)
-                                   if cycle_match else '')
-                    png_name = (f'spectrogram_{heading_label}'
-                                f'_cycle_{cycle_label}.png')
-                    png_path = os.path.join(log_dir, png_name)
-                    ok = generate_spectrogram_png(
-                        pf, png_path, heading=heading_label)
-                    if ok:
-                        w(f'![heading {heading_label}° cycle {cycle_label}]'
-                          f'({png_name})')
-                        w()
+    # ========== Spectrograms (both session types) ==========
+    if dump_files:
+        w('## Spectrograms')
+        w()
+        for pf in dump_files:
+            hm = re.match(r'heading-(\d+)',
+                          os.path.basename(os.path.dirname(pf)))
+            heading_label = hm.group(1) if hm else ''
+            fm = re.search(r'tag(\d+)_cycle_(\d+)_power',
+                           os.path.basename(pf))
+            tag_label = fm.group(1) if fm else ''
+            cycle_label = fm.group(2) if fm else ''
+            png_name = ('spectrogram'
+                        + (f'_h{heading_label}' if heading_label else '')
+                        + f'_tag{tag_label}_cycle_{cycle_label}.png')
+            png_path = os.path.join(log_dir, png_name)
+            if generate_spectrogram_png(pf, png_path, heading=heading_label,
+                                        tag=tag_label):
+                alt = f'tag {tag_label} cycle {cycle_label}'
+                if heading_label:
+                    alt = f'heading {heading_label}° ' + alt
+                w(f'![{alt}]({png_name})')
+                w()
 
     # ========== Per-Detector Analysis ==========
     for det in detectors:
@@ -988,17 +1062,22 @@ def generate_report(log_dir: str) -> str:
                 f'Tag {det.tag_id}: {n_dom} detection(s) with '
                 f'DOMINANT_FOLD \u2014 likely transient interference')
 
-    if dec['perfs']:
-        last = dec['perfs'][-1]
-        if last.dropped > 0:
+    # Counters can come from event lines even when no perf line was logged.
+    if dec_paths:
+        if dec['dropped'] > 0:
             anomalies.append(
-                f'Decimator: {last.dropped} dropped ZMQ packets')
-        if last.queue_drops > 0:
+                f'Decimator: {dec["dropped"]} dropped ZMQ packets')
+        if dec['queue_drops'] > 0:
             anomalies.append(
-                f'Decimator: {last.queue_drops} queue overflow drops')
-        if last.out_of_order > 0:
+                f'Decimator: {dec["queue_drops"]} queue overflow drops')
+        if dec['out_of_order'] > 0:
             anomalies.append(
-                f'Decimator: {last.out_of_order} out-of-order packets')
+                f'Decimator: {dec["out_of_order"]} out-of-order packets')
+        if dec['rate_warning_max'] > RATE_WARNING_TRANSIENT_MAX:
+            anomalies.append(
+                f'Decimator: sustained sample-rate mismatch '
+                f'({dec["rate_warning_count"]} warnings) — check SDR '
+                f'clock / --input-rate')
 
     for b in bearings:
         if b.r_squared < 0.5:
@@ -1028,9 +1107,9 @@ def generate_report(log_dir: str) -> str:
     # ========== Observations ==========
     observations: List[str] = []
 
-    if dec['rate_warnings']:
+    if 0 < dec['rate_warning_max'] <= RATE_WARNING_TRANSIENT_MAX:
         observations.append(
-            f'Decimator had {len(dec["rate_warnings"])} rate '
+            f'Decimator had {dec["rate_warning_count"]} rate '
             f'warning(s) during startup \u2014 transient, '
             f'self-corrects within seconds.')
 

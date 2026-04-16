@@ -54,7 +54,6 @@ public:
 	std::time_t					vehicleTimeNow				() const;
 	bool						vehicleTimeAvailable		() const { return _vehicleTimeReceived.load(); }
 	void						setVehicleTimeFrozen		(bool frozen) { _vehicleTimeFrozen.store(frozen); if (!frozen) _vehicleTimeSuppressLogged.store(false); }
-	bool						vehicleTimeFrozen			() const { return _vehicleTimeFrozen.load(); }
 
 private:
 	MavlinkSystem();

@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from log_schema import (StructuredLogger, STARTUP, DETECTION, NO_DETECTION,
                         FOLDS, TIMING, NOISE_STATS, NOISE_ELEVATED,
                         GAP_EVENT, EVT_THRESHOLD, HYPOTHESIS, SESSION_END,
-                        STFT_DEBUG, SPECTROGRAM_DUMP)
+                        STFT_DEBUG)
 
 import numpy as np
 from scipy.linalg import toeplitz as scipy_toeplitz
@@ -701,6 +701,24 @@ def save_evt_cache(cache_dir, N_A, K, mu, sigma, N_B=None,
 
 
 # ---------------------------------------------------------------------------
+# Per-cycle spectrogram dump
+# ---------------------------------------------------------------------------
+
+def write_cycle_dump(log_dir, tag_id, cycle, power, segment, meta):
+    """Write tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json} for offline analysis.
+
+    The tag id keeps concurrent detectors sharing one log dir from colliding.
+    Returns the path prefix. Raises OSError on I/O failure.
+    """
+    prefix = os.path.join(log_dir, f'tag{tag_id}_cycle_{cycle:04d}')
+    np.save(f'{prefix}_power.npy', power.astype(np.float32))
+    np.save(f'{prefix}_iq.npy', segment.astype(np.complex64))
+    with open(f'{prefix}_meta.json', 'w', encoding='utf-8') as f:
+        json.dump(meta, f, indent=1)
+    return prefix
+
+
+# ---------------------------------------------------------------------------
 # Fold & detect
 # ---------------------------------------------------------------------------
 
@@ -826,29 +844,32 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                       fully_masked_bins=int(n_all_masked_bins))
         else:
             print(_noise_human)
-        med_noise_dbg = np.median(noise_power)
-        elevated_mask = noise_power > 5.0 * med_noise_dbg
-        n_elevated = int(np.sum(elevated_mask))
-        if n_elevated > 0:
-            freq_axis_noise = Wf if Wf is not None else np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / Fs))
-            elev_idx = np.where(elevated_mask)[0]
-            elev_parts = []
-            elev_data = []
-            for ei in elev_idx:
-                ratio = noise_power[ei] / med_noise_dbg
-                elev_parts.append(f'#{ei} ({freq_axis_noise[ei]:+.1f} Hz) '
-                                  f'{noise_power[ei]:.3e} ({ratio:.0f}x median)')
-                elev_data.append({'bin': int(ei),
-                                  'freq_hz': float(freq_axis_noise[ei]),
-                                  'power': float(noise_power[ei]),
-                                  'ratio_to_median': float(ratio)})
-            _elev_human = (f'[DEBUG NOISE] {n_elevated} elevated bins: '
-                  + '  '.join(elev_parts))
-            if slog:
-                slog.emit(NOISE_ELEVATED, _elev_human,
-                          n_elevated=n_elevated, bins=elev_data)
-            else:
-                print(_elev_human)
+
+    # Elevated-bin check is cheap and feeds the analyzer's RFI anomaly, so it
+    # always runs; the human line is debug-only.
+    med_noise_dbg = np.median(noise_power)
+    elevated_mask = noise_power > 5.0 * med_noise_dbg
+    n_elevated = int(np.sum(elevated_mask))
+    if n_elevated > 0:
+        freq_axis_noise = Wf if Wf is not None else np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / Fs))
+        elev_idx = np.where(elevated_mask)[0]
+        elev_parts = []
+        elev_data = []
+        for ei in elev_idx:
+            ratio = noise_power[ei] / med_noise_dbg
+            elev_parts.append(f'#{ei} ({freq_axis_noise[ei]:+.1f} Hz) '
+                              f'{noise_power[ei]:.3e} ({ratio:.0f}x median)')
+            elev_data.append({'bin': int(ei),
+                              'freq_hz': float(freq_axis_noise[ei]),
+                              'power': float(noise_power[ei]),
+                              'ratio_to_median': float(ratio)})
+        _elev_human = (f'[DEBUG NOISE] {n_elevated} elevated bins: '
+              + '  '.join(elev_parts)) if debug else None
+        if slog:
+            slog.emit(NOISE_ELEVATED, _elev_human,
+                      n_elevated=n_elevated, bins=elev_data)
+        elif _elev_human:
+            print(_elev_human)
 
     # --- EVT threshold ---
     n_hypotheses = len(hypotheses) if hypotheses else 1
@@ -1197,9 +1218,6 @@ def main():
         sys.exit(f'Error: --k must be >= 2, got {args.k}')
     if args.dump_spectrogram and not args.log_dir:
         sys.exit('Error: --dump-spectrogram requires --log-dir')
-    if args.dump_spectrogram:
-        os.makedirs(args.log_dir, exist_ok=True)
-        print(f'Spectrogram dump → {args.log_dir}/', flush=True)
     if args.warmup_seconds < 0:
         sys.exit(f'Error: --warmup-seconds must be >= 0, got {args.warmup_seconds}')
     if args.tip_secondary is not None:
@@ -1214,6 +1232,8 @@ def main():
         os.makedirs(args.log_dir, exist_ok=True)
         _tag_suffix = f'_{args.tag_id}' if args.tag_id else ''
         _jsonl_path = os.path.join(args.log_dir, f'detector{_tag_suffix}.jsonl')
+        if args.dump_spectrogram:
+            print(f'Spectrogram dump → {args.log_dir}/', flush=True)
     slog = StructuredLogger(jsonl_path=_jsonl_path)
 
     # --- STFT geometry ---
@@ -1633,23 +1653,14 @@ def main():
                                      N_B_exact=N_B_exact,
                                      slog=slog)
             t_fold_end = time.monotonic()
-            proc_ms = (t_fold_end - t0) * 1000.0
-            if args.debug:
-                stft_ms = (t_stft_end - t_stft_start) * 1000.0
-                fold_ms = (t_fold_end - t_fold_start) * 1000.0
-                slog.emit(TIMING,
-                          f'[DEBUG TIMING] stft={stft_ms:.0f} ms  '
-                          f'fold={fold_ms:.0f} ms  '
-                          f'total={proc_ms:.0f} ms',
-                          cycle=cycle, stft_ms=stft_ms,
-                          fold_ms=fold_ms, total_ms=proc_ms)
+            stft_ms = (t_stft_end - t_stft_start) * 1000.0
+            fold_ms = (t_fold_end - t_fold_start) * 1000.0
 
             # ---- per-cycle spectrogram / IQ dump ----
+            dump_ms = 0.0
             if args.dump_spectrogram and args.log_dir:
+                t_dump_start = time.monotonic()
                 try:
-                    prefix = os.path.join(args.log_dir, f'cycle_{cycle:04d}')
-                    np.save(f'{prefix}_power.npy', power.astype(np.float32))
-                    np.save(f'{prefix}_iq.npy', segment.astype(np.complex64))
                     meta = {
                         'cycle': cycle,
                         'timestamp_ns': seg_ts,
@@ -1671,13 +1682,18 @@ def main():
                         ] if detections else [],
                         'best_candidate': best_candidate,
                     }
-                    with open(f'{prefix}_meta.json', 'w') as f:
-                        json.dump(meta, f, indent=1)
+                    write_cycle_dump(args.log_dir, args.tag_id, cycle, power, segment, meta)
                 except OSError as exc:
                     print(f'WARNING: disabling spectrogram dump after I/O '
                           f'error on cycle {cycle}: {exc}',
                           file=sys.stderr, flush=True)
                     args.dump_spectrogram = False
+                dump_ms = (time.monotonic() - t_dump_start) * 1000.0
+
+            # Processing time shown on the DETECTED line (STFT + fold + dump).
+            # TIMING itself is emitted at the end of the cycle, once the UDP
+            # send and log writes are done, so total_ms is the full stall.
+            proc_ms = (time.monotonic() - t0) * 1000.0
 
             # Timestamp string (UTC) for the start of this segment
             # seg_ts is in nanoseconds; convert to seconds for datetime
@@ -1698,12 +1714,13 @@ def main():
             if detections:
                 det_total += len(detections)
 
-                # Calculate inter-pulse delta
+                # Interval between detected segments (each covers K pulses),
+                # not a pulse-to-pulse delta.
                 delta_str = ''
-                inter_pulse_delta_ms = None
+                inter_detection_delta_ms = None
                 if last_detection_ts is not None and current_ts is not None:
                     delta_s = (current_ts - last_detection_ts) / 1e9  # Convert ns to seconds
-                    inter_pulse_delta_ms = delta_s * 1000.0
+                    inter_detection_delta_ms = delta_s * 1000.0
                     delta_str = f'  Δt={delta_s:.3f}s'
                 if current_ts is not None:
                     last_detection_ts = current_ts
@@ -1791,7 +1808,7 @@ def main():
                               confidence=confidence_tag,
                               hyp_label=det.hyp_label,
                               detection_status=det_status,
-                              inter_pulse_delta_ms=inter_pulse_delta_ms)
+                              inter_detection_delta_ms=inter_detection_delta_ms)
                     fold_snrs_str = ', '.join(f'{s:.1f}' for s in det.fold_info['fold_snrs'])
                     fold_wins_str = ', '.join(str(w) for w in det.fold_info['fold_windows'])
                     slog.emit(FOLDS,
@@ -1844,6 +1861,14 @@ def main():
                           cycle=cycle, timestamp_ns=current_ts,
                           proc_ms=proc_ms, had_gap=had_gap,
                           best_candidate=best_candidate)
+
+            total_ms = (time.monotonic() - t0) * 1000.0
+            slog.emit(TIMING,
+                      (f'[DEBUG TIMING] stft={stft_ms:.0f} ms  '
+                       f'fold={fold_ms:.0f} ms  dump={dump_ms:.0f} ms  '
+                       f'total={total_ms:.0f} ms') if args.debug else None,
+                      cycle=cycle, stft_ms=stft_ms, fold_ms=fold_ms,
+                      dump_ms=dump_ms, total_ms=total_ms)
 
     except KeyboardInterrupt:
         pass  # Handled by signal handler
