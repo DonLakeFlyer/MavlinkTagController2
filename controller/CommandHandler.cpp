@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include <mavlink.h>
 
@@ -480,10 +481,19 @@ void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
 
     std::thread([cmd]() {
         int rc = system(cmd.c_str());
-        if (rc == 0) {
-            logInfo() << "Post-flight analysis completed successfully";
+        if (rc == -1) {
+            logWarn() << "Post-flight analysis: system() failed to launch";
+        } else if (WIFEXITED(rc)) {
+            int exitCode = WEXITSTATUS(rc);
+            if (exitCode == 0) {
+                logInfo() << "Post-flight analysis completed successfully";
+            } else {
+                logWarn() << "Post-flight analysis failed with exit code" << exitCode;
+            }
+        } else if (WIFSIGNALED(rc)) {
+            logWarn() << "Post-flight analysis killed by signal" << WTERMSIG(rc);
         } else {
-            logWarn() << "Post-flight analysis failed with exit code" << rc;
+            logWarn() << "Post-flight analysis exited abnormally (wait status" << rc << ")";
         }
     }).detach();
 }

@@ -79,9 +79,9 @@ def generate_spectrogram_png(power_path: str, out_png: str,
 
     if fs and nfft:
         freq_axis = np.linspace(-fs / 2, fs / 2, n_freq)
-        # Time axis: each column is one STFT hop
-        n_w = nfft // 2 if nfft else n_freq
-        n_ol = n_w // 2
+        # Time axis: use STFT geometry from metadata when available
+        n_w = meta.get('n_w', nfft // 2) if meta else nfft // 2
+        n_ol = meta.get('n_ol', n_w // 2) if meta else n_w // 2
         hop = n_w - n_ol
         t_axis = np.arange(n_time) * hop / fs
         extent = [t_axis[0], t_axis[-1], freq_axis[0], freq_axis[-1]]
