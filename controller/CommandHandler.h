@@ -70,10 +70,11 @@ private:
     bool _handleCleanLogs       (void);
     void _handleTunnelMessage   (const mavlink_message_t& message);
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
-    void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector);
+    void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram);
     std::string _handleStartRotationDetection  (const mavlink_tunnel_t& tunnel);
     std::string _handleStartDetectionAtHeading (const mavlink_tunnel_t& tunnel);
     std::string _handleStopRotationDetection   (const mavlink_tunnel_t& tunnel);
+    void _runPostFlightAnalysis (const std::string& logDir);
     AirSpyDeviceType _connectedAirSpyType(std::string* errorMessage = nullptr);
     std::string _sdrPathStatusText(AirSpyDeviceType deviceType, double frequencyMhz) const;
     std::string _checkForAirSpy  (void);

@@ -53,6 +53,8 @@ public:
 	void						setDetectionMode			(uint32_t mode) { _detectionMode.store(mode); }
 	std::time_t					vehicleTimeNow				() const;
 	bool						vehicleTimeAvailable		() const { return _vehicleTimeReceived.load(); }
+	void						setVehicleTimeFrozen		(bool frozen) { _vehicleTimeFrozen.store(frozen); if (!frozen) _vehicleTimeSuppressLogged = false; }
+	bool						vehicleTimeFrozen			() const { return _vehicleTimeFrozen.load(); }
 
 private:
 	MavlinkSystem();
@@ -71,6 +73,8 @@ private:
 	std::atomic<uint16_t>		_heartbeatStatus { HEARTBEAT_STATUS_IDLE };
 	std::atomic<uint32_t>		_detectionMode { DETECTION_MODE_UAVRT };
 	std::atomic<bool>			_vehicleTimeReceived { false };
+	std::atomic<bool>			_vehicleTimeFrozen { false };
+	bool						_vehicleTimeSuppressLogged { false };
 	uint64_t					_vehicleEpochSeconds { 0 };
 	std::chrono::steady_clock::time_point _vehicleTimeReceivedAt {};
 	mutable std::mutex			_vehicleTimeMutex {};

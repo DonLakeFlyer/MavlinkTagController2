@@ -26,6 +26,7 @@ Examples:
 
 import argparse
 import datetime
+import json
 import os
 import signal
 import socket
@@ -34,6 +35,13 @@ import sys
 import threading
 import time
 from typing import NamedTuple
+
+# Structured logging (shared contract with analyzer)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared'))
+from log_schema import (StructuredLogger, STARTUP, DETECTION, NO_DETECTION,
+                        FOLDS, TIMING, NOISE_STATS, NOISE_ELEVATED,
+                        GAP_EVENT, EVT_THRESHOLD, HYPOTHESIS, SESSION_END,
+                        STFT_DEBUG, SPECTROGRAM_DUMP)
 
 import numpy as np
 from scipy.linalg import toeplitz as scipy_toeplitz
@@ -700,7 +708,8 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                 evt_threshold_cache, fold_offsets=None, W=None, Wf=None,
                 debug=False, detection_margin=0.90,
                 hypotheses=None, N_B=None,
-                N_A_exact=None, N_B_exact=None):
+                N_A_exact=None, N_B_exact=None,
+                slog=None):
     """Fold power spectrogram and detect pulses.
 
     Supports both single-rate and multi-hypothesis rate-switch detection.
@@ -798,12 +807,48 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         n_outlier = np.sum(outlier_mask)
         n_total = outlier_mask.size
         n_all_masked_bins = np.sum(all_masked) if np.any(all_masked) else 0
-        print(f'[DEBUG NOISE] noise_power: min={noise_power.min():.6e}  '
-              f'max={noise_power.max():.6e}  mean={noise_power.mean():.6e}  '
-              f'std={noise_power.std():.6e}')
-        print(f'[DEBUG NOISE] outlier mask: {n_outlier}/{n_total} '
-              f'({100.0*n_outlier/n_total:.1f}%) masked  |  '
-              f'{n_all_masked_bins} freq bins fully masked')
+        _noise_human = (
+            f'[DEBUG NOISE] noise_power: min={noise_power.min():.6e}  '
+            f'max={noise_power.max():.6e}  mean={noise_power.mean():.6e}  '
+            f'std={noise_power.std():.6e}\n'
+            f'[DEBUG NOISE] outlier mask: {n_outlier}/{n_total} '
+            f'({100.0*n_outlier/n_total:.1f}%) masked  |  '
+            f'{n_all_masked_bins} freq bins fully masked'
+        )
+        if slog:
+            slog.emit(NOISE_STATS, _noise_human,
+                      noise_min=float(noise_power.min()),
+                      noise_max=float(noise_power.max()),
+                      noise_mean=float(noise_power.mean()),
+                      noise_std=float(noise_power.std()),
+                      outlier_masked=int(n_outlier),
+                      outlier_total=int(n_total),
+                      fully_masked_bins=int(n_all_masked_bins))
+        else:
+            print(_noise_human)
+        med_noise_dbg = np.median(noise_power)
+        elevated_mask = noise_power > 5.0 * med_noise_dbg
+        n_elevated = int(np.sum(elevated_mask))
+        if n_elevated > 0:
+            freq_axis_noise = Wf if Wf is not None else np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / Fs))
+            elev_idx = np.where(elevated_mask)[0]
+            elev_parts = []
+            elev_data = []
+            for ei in elev_idx:
+                ratio = noise_power[ei] / med_noise_dbg
+                elev_parts.append(f'#{ei} ({freq_axis_noise[ei]:+.1f} Hz) '
+                                  f'{noise_power[ei]:.3e} ({ratio:.0f}x median)')
+                elev_data.append({'bin': int(ei),
+                                  'freq_hz': float(freq_axis_noise[ei]),
+                                  'power': float(noise_power[ei]),
+                                  'ratio_to_median': float(ratio)})
+            _elev_human = (f'[DEBUG NOISE] {n_elevated} elevated bins: '
+                  + '  '.join(elev_parts))
+            if slog:
+                slog.emit(NOISE_ELEVATED, _elev_human,
+                          n_elevated=n_elevated, bins=elev_data)
+            else:
+                print(_elev_human)
 
     # --- EVT threshold ---
     n_hypotheses = len(hypotheses) if hypotheses else 1
@@ -815,8 +860,14 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                                    n_hypotheses=n_hypotheses)
         if mu is not None and sigma is not None and np.isfinite(mu) and np.isfinite(sigma) and sigma > 0:
             base_threshold = max(gumbel_r.ppf(1.0 - pf, loc=mu, scale=sigma), 0.0)
-            print(f'  [Loaded EVT cache: mu={mu:.4e}, sigma={sigma:.4e}, '
-                  f'threshold={base_threshold:.4e}]', flush=True)
+            _evt_human = (f'  [Loaded EVT cache: mu={mu:.4e}, sigma={sigma:.4e}, '
+                  f'threshold={base_threshold:.4e}]')
+            if slog:
+                slog.emit(EVT_THRESHOLD, _evt_human,
+                          source='cache', mu=float(mu), sigma=float(sigma),
+                          threshold=float(base_threshold))
+            else:
+                print(_evt_human, flush=True)
         else:
             n_hyp_str = f' ({n_hypotheses} hypotheses)' if n_hypotheses > 1 else ''
             print(f'  [Generating EVT threshold via 100 noise trials{n_hyp_str}...]',
@@ -842,8 +893,14 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     # The two-tier confidence system classifies these via confidence_ratio.
     base_threshold *= detection_margin
     if detection_margin != 1.0 and not evt_threshold_cache.get('margin_logged'):
-        print(f'  [Detection margin={detection_margin:.2f} applied: '
-              f'effective threshold={base_threshold:.4e}]', flush=True)
+        _margin_human = (f'  [Detection margin={detection_margin:.2f} applied: '
+              f'effective threshold={base_threshold:.4e}]')
+        if slog:
+            slog.emit(EVT_THRESHOLD, _margin_human,
+                      source='margin', detection_margin=detection_margin,
+                      effective_threshold=float(base_threshold))
+        else:
+            print(_margin_human, flush=True)
         evt_threshold_cache['margin_logged'] = True
 
     # Scale threshold by per-bin noise power (frequency-dependent)
@@ -922,9 +979,18 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
             for lbl, rat, mff in hyp_diag
         )
         n_above = len(det_bins)
-        print(f'  [HYP] best_bin={diag_bin} winner={diag_label} '
+        _hyp_human = (f'  [HYP] best_bin={diag_bin} winner={diag_label} '
               f'ratio={diag_ratio:.1f} above_thresh={n_above}  '
-              f'top: {top_str}', flush=True)
+              f'top: {top_str}')
+        _hyp_data = [{'label': lbl, 'ratio': rat, 'max_fold_frac': mff}
+                     for lbl, rat, mff in hyp_diag]
+        if slog:
+            slog.emit(HYPOTHESIS, _hyp_human,
+                      best_bin=int(diag_bin), winner=diag_label,
+                      winner_ratio=diag_ratio, above_thresh=n_above,
+                      hypotheses=_hyp_data)
+        else:
+            print(_hyp_human, flush=True)
 
         # Show per-fold SNR vectors for every hypothesis so we can inspect
         # which specific folds are weak/strong across the full bank.
@@ -933,11 +999,14 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
             noise_at_bin = float(noise_power[diag_bin])
             fold_snrs = [f'{10*np.log10(p/noise_at_bin):.1f}' if p > 0
                          else '-inf' for p in fpow]
-            print(f'  [HYP detail] {lbl} ratio={rat:.1f} t0={off} wins={widx} '
+            _hd_human = (f'  [HYP detail] {lbl} ratio={rat:.1f} t0={off} wins={widx} '
                   f'n_time={n_time} F={mff:.4f} '
                   f'fold_pwr=[{", ".join(f"{p:.3e}" for p in fpow)}] '
-                  f'fold_snr=[{", ".join(fold_snrs)}] dB',
-                  flush=True)
+                  f'fold_snr=[{", ".join(fold_snrs)}] dB')
+            if slog:
+                slog.emit_raw(_hd_human)
+            else:
+                print(_hd_human, flush=True)
 
     if len(det_bins) == 0:
         median_noise_psd = float(np.median(noise_power) / psd_scale)
@@ -974,7 +1043,8 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         p_sum = float(np.sum(on_powers))
         max_fold_fraction = float(np.max(on_powers) / max(p_sum, 1e-30))
         fold_info = {'max_fold_fraction': max_fold_fraction,
-                     'fold_snrs': fold_snrs_db}
+                     'fold_snrs': fold_snrs_db,
+                     'fold_windows': [int(x) for x in on_idx]}
         results.append(Detection(
             freq_hz=freq_axis[b], snr_db=snr_db, offset=offset,
             noise_psd=float(noise_power[b] / psd_scale),
@@ -999,6 +1069,55 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     if len(merged) == 0:
         median_noise_psd = float(np.median(noise_power) / psd_scale)
         return [], median_noise_psd, best_cand
+
+    # Per-detection hypothesis detail (complement to the diag_bin block
+    # which only covers the global best bin, not actual detection bins).
+    if debug and hypotheses is not None and len(hypotheses) > 0:
+        for det in merged:
+            det_bin = int(np.argmin(np.abs(freq_axis - det.freq_hz)))
+            if det_bin == best_idx:
+                continue  # already covered by diag_bin block above
+            det_thresh = float(threshold[det_bin])
+            hyp_det = []
+            for label, pidx in hypotheses:
+                fold_scores_h = _compute_fold_scores(
+                    power[det_bin:det_bin + 1, :], pidx,
+                    local_radius=FOLD_LOCAL_RADIUS)[0]
+                h_best_score = float(np.max(fold_scores_h))
+                h_best_offset = int(np.argmax(fold_scores_h))
+                h_ratio = h_best_score / max(det_thresh, 1e-30)
+                on_idx_h = pidx[h_best_offset]
+                on_powers_h = _local_peak_powers_1d(
+                    power[det_bin], on_idx_h, local_radius=FOLD_LOCAL_RADIUS)
+                p_sum_h = float(np.sum(on_powers_h))
+                mff_h = float(np.max(on_powers_h) / max(p_sum_h, 1e-30))
+                noise_at_bin = float(noise_power[det_bin])
+                fold_snrs_h = [f'{10*np.log10(p/noise_at_bin):.1f}' if p > 0
+                               else '-inf' for p in on_powers_h]
+                hyp_det.append((label, h_ratio, h_best_offset,
+                                on_idx_h.tolist(), on_powers_h.tolist(),
+                                mff_h, fold_snrs_h))
+            hyp_det.sort(key=lambda x: -x[1])
+            top_str = '  '.join(
+                f'{lbl}:{rat:.1f}/F{mff:.2f}{"*" if mff > DOMINANT_FOLD_THRESHOLD else ""}'
+                for lbl, rat, _, _, _, mff, _ in hyp_det
+            )
+            _hdet_human = (f'  [HYP DET] bin={det_bin} freq={det.freq_hz:+.1f} Hz '
+                  f'winner={det.hyp_label} ratio={det.score_ratio:.1f}  '
+                  f'top: {top_str}')
+            if slog:
+                slog.emit_raw(_hdet_human)
+            else:
+                print(_hdet_human, flush=True)
+            for lbl, rat, off, widx, fpow, mff, fsnrs in hyp_det:
+                _hddet_human = (f'  [HYP DET detail] {lbl} ratio={rat:.1f} t0={off} '
+                      f'wins={widx} F={mff:.4f} '
+                      f'fold_pwr=[{", ".join(f"{p:.3e}" for p in fpow)}] '
+                      f'fold_snr=[{", ".join(fsnrs)}] dB')
+                if slog:
+                    slog.emit_raw(_hddet_human)
+                else:
+                    print(_hddet_human, flush=True)
 
     return merged, None, None
 
@@ -1049,6 +1168,11 @@ def main():
     ap.add_argument('--warmup-seconds', type=float, default=5.0,
                     help='Seconds of initial IQ data to discard before '
                          'detection starts (default: 5.0).')
+    ap.add_argument('--log-dir', type=str, default=None,
+                    help='Directory for log and diagnostic output files.')
+    ap.add_argument('--dump-spectrogram', action='store_true', default=False,
+                    help='Save per-cycle spectrogram, IQ, and metadata '
+                         'to --log-dir (requires --log-dir).')
     args = ap.parse_args()
 
     global K
@@ -1071,6 +1195,11 @@ def main():
         sys.exit(f'Error: --confidence-ratio must be positive, got {args.confidence_ratio}')
     if args.k < 2:
         sys.exit(f'Error: --k must be >= 2, got {args.k}')
+    if args.dump_spectrogram and not args.log_dir:
+        sys.exit('Error: --dump-spectrogram requires --log-dir')
+    if args.dump_spectrogram:
+        os.makedirs(args.log_dir, exist_ok=True)
+        print(f'Spectrogram dump → {args.log_dir}/', flush=True)
     if args.warmup_seconds < 0:
         sys.exit(f'Error: --warmup-seconds must be >= 0, got {args.warmup_seconds}')
     if args.tip_secondary is not None:
@@ -1078,6 +1207,14 @@ def main():
             sys.exit(f'Error: --tip-secondary must be positive, got {args.tip_secondary}')
         if args.tp >= args.tip_secondary:
             sys.exit(f'Error: --tp ({args.tp}s) must be < --tip-secondary ({args.tip_secondary}s)')
+
+    # --- Structured logger ---
+    _jsonl_path = None
+    if args.log_dir:
+        os.makedirs(args.log_dir, exist_ok=True)
+        _tag_suffix = f'_{args.tag_id}' if args.tag_id else ''
+        _jsonl_path = os.path.join(args.log_dir, f'detector{_tag_suffix}.jsonl')
+    slog = StructuredLogger(jsonl_path=_jsonl_path)
 
     # --- STFT geometry ---
     n_w  = int(np.ceil(args.tp * args.fs))
@@ -1159,29 +1296,49 @@ def main():
     fa_per_hour = (3600.0 / seg_sec) * args.pf
     n_hyp = len(rate_switch_hypotheses) if rate_switch_hypotheses else 1
 
-    print('=== VHF Pulse Detector ===')
-    print(f'  Pulse width     {args.tp * 1000:.1f} ms')
-    print(f'  Inter-pulse     {args.tip:.3f} s')
-    if N_B is not None:
-        print(f'  Inter-pulse 2   {args.tip_secondary:.3f} s  (N_B={N_B} windows)')
-    print(f'  Folds (K)       {K}')
-    print(f'  Hypotheses      {n_hyp}')
-    print(f'  Sample rate     {args.fs:.1f} Hz')
-    print(f'  STFT            window={n_w}  overlap={n_ol}  step={n_ws}')
-    print(f'  PRI (N)         {N} STFT windows  (exact {N_exact:.4f})')
-    print(f'  Freq bins       {nfft}  ({freq_res:.1f} Hz resolution, W matrix)')
-    print(f'  Segment         {samples_needed} samples  ({seg_sec:.1f} s)')
-    print(f'  False alarm %   {args.pf * 100:.2g}%  '
-          f'(~{fa_per_hour:.2f} false alarms/hour)')
-    print(f'  Det margin      {args.detection_margin:.2f}')
-    print(f'  Conf ratio      {args.confidence_ratio:.2f}')
-    print(f'  UDP port        {args.port}')
-    print(f'  Warmup discard  {args.warmup_seconds:.1f} s')
-    if args.center_freq > 0:
-        print(f'  Center freq     {args.center_freq:.6f} MHz')
-    if args.threshold_cache_dir:
-        print(f'  EVT cache dir   {args.threshold_cache_dir}')
-    print()
+    _tip2_line = (f'\n  Inter-pulse 2   {args.tip_secondary:.3f} s  (N_B={N_B} windows)'
+                  if N_B is not None else '')
+    _cfreq_line = (f'\n  Center freq     {args.center_freq:.6f} MHz'
+                   if args.center_freq > 0 else '')
+    _cache_line = (f'\n  EVT cache dir   {args.threshold_cache_dir}'
+                   if args.threshold_cache_dir else '')
+    _startup_human = (
+        f'=== VHF Pulse Detector ===\n'
+        f'  Pulse width     {args.tp * 1000:.1f} ms\n'
+        f'  Inter-pulse     {args.tip:.3f} s'
+        f'{_tip2_line}\n'
+        f'  Folds (K)       {K}\n'
+        f'  Hypotheses      {n_hyp}\n'
+        f'  Sample rate     {args.fs:.1f} Hz\n'
+        f'  STFT            window={n_w}  overlap={n_ol}  step={n_ws}\n'
+        f'  PRI (N)         {N} STFT windows  (exact {N_exact:.4f})\n'
+        f'  Freq bins       {nfft}  ({freq_res:.1f} Hz resolution, W matrix)\n'
+        f'  Segment         {samples_needed} samples  ({seg_sec:.1f} s)\n'
+        f'  False alarm %   {args.pf * 100:.2g}%  '
+        f'(~{fa_per_hour:.2f} false alarms/hour)\n'
+        f'  Det margin      {args.detection_margin:.2f}\n'
+        f'  Conf ratio      {args.confidence_ratio:.2f}\n'
+        f'  UDP port        {args.port}\n'
+        f'  Warmup discard  {args.warmup_seconds:.1f} s'
+        f'{_cfreq_line}'
+        f'{_cache_line}\n'
+    )
+    slog.emit(STARTUP, _startup_human,
+              tp=args.tp, tip=args.tip,
+              tip_secondary=args.tip_secondary,
+              K=K, n_hypotheses=n_hyp,
+              fs=args.fs, n_w=n_w, n_ol=n_ol, n_ws=n_ws,
+              N=N, N_exact=N_exact, N_B=N_B,
+              nfft=nfft, freq_res=freq_res,
+              samples_needed=samples_needed, seg_sec=seg_sec,
+              pf=args.pf, fa_per_hour=fa_per_hour,
+              detection_margin=args.detection_margin,
+              confidence_ratio=args.confidence_ratio,
+              port=args.port, warmup_seconds=args.warmup_seconds,
+              center_freq=args.center_freq,
+              tag_id=args.tag_id, freq=args.freq,
+              log_dir=args.log_dir,
+              dump_spectrogram=args.dump_spectrogram)
 
     # --- UDP socket ---
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1235,6 +1392,7 @@ def main():
     gap_zerofill_count = 0
     gap_reset_count = 0
     segment_has_gap = False
+    segment_gap_fills = []  # list of (sample_offset, n_zeros) for current segment
 
     # Single gap threshold (conservative), in nanoseconds
     gap_threshold_reset = args.tp * 2.0  # ≥ 2×tp: reset, < 2×tp: zero-fill
@@ -1322,18 +1480,22 @@ def main():
                 if gap_size_ns < 0:
                     gap_reset_count += 1
                     gap_ms = gap_size_ns / 1_000_000.0
-                    print(f'\n*** NEGATIVE GAP (timestamp regression): {gap_ms:.1f} ms ***',
-                          flush=True)
-                    print(f'    Last packet ts={last_packet_ts} ns, '
-                          f'current ts={ts} ns', flush=True)
-                    print(f'    Expected delta={expected_delta_ns / 1_000_000.0:.1f} ms, '
-                          f'got {actual_delta_ns / 1_000_000.0:.1f} ms\n', flush=True)
+                    slog.emit(GAP_EVENT,
+                              f'\n*** NEGATIVE GAP (timestamp regression): {gap_ms:.1f} ms ***\n'
+                              f'    Last packet ts={last_packet_ts} ns, current ts={ts} ns\n'
+                              f'    Expected delta={expected_delta_ns / 1_000_000.0:.1f} ms, '
+                              f'got {actual_delta_ns / 1_000_000.0:.1f} ms\n',
+                              kind='negative', gap_ms=gap_ms,
+                              last_ts_ns=last_packet_ts, current_ts_ns=ts,
+                              expected_delta_ms=expected_delta_ns / 1e6,
+                              actual_delta_ms=actual_delta_ns / 1e6)
 
                     # Reset buffer and start a new segment from this packet
                     buf_parts.clear()
                     buf_len = 0
                     seg_ts = ts
                     segment_has_gap = False
+                    segment_gap_fills.clear()
                 else:
                     # Calculate missing samples (only act if ≥1 sample missing)
                     missing_samples = int(round(gap_size_ns / (1e9 / args.fs)))
@@ -1344,30 +1506,40 @@ def main():
                         if gap_size_ns >= gap_threshold_reset_ns:
                             # LARGE GAP: Discard segment and reset
                             gap_reset_count += 1
-                            print(f'\n*** GAP ≥ RESET THRESHOLD: {gap_ms:.1f} ms '
-                                  f'(≥{gap_threshold_reset*1000:.1f} ms) ***',
-                                  flush=True)
-                            print(f'    Discarding {buf_len} buffered samples and resetting segment',
-                                  flush=True)
-                            print(f'    Expected packet after {expected_delta_ns / 1_000_000.0:.1f} ms, '
-                                  f'got {actual_delta_ns / 1_000_000.0:.1f} ms\n', flush=True)
+                            slog.emit(GAP_EVENT,
+                                      f'\n*** GAP ≥ RESET THRESHOLD: {gap_ms:.1f} ms '
+                                      f'(≥{gap_threshold_reset*1000:.1f} ms) ***\n'
+                                      f'    Discarding {buf_len} buffered samples and resetting segment\n'
+                                      f'    Expected packet after {expected_delta_ns / 1_000_000.0:.1f} ms, '
+                                      f'got {actual_delta_ns / 1_000_000.0:.1f} ms\n',
+                                      kind='reset', gap_ms=gap_ms,
+                                      threshold_ms=gap_threshold_reset * 1000,
+                                      discarded_samples=buf_len,
+                                      expected_delta_ms=expected_delta_ns / 1e6,
+                                      actual_delta_ms=actual_delta_ns / 1e6)
 
                             # Reset buffer
                             buf_parts.clear()
                             buf_len = 0
                             seg_ts = ts
                             segment_has_gap = False
+                            segment_gap_fills.clear()
 
                         else:
                             # GAP BELOW THRESHOLD: Zero-fill
                             gap_zerofill_count += 1
                             segment_has_gap = True
 
-                            print(f'GAP < THRESHOLD: {gap_ms:.1f} ms '
-                                  f'(< {gap_threshold_reset*1000:.1f} ms) - '
-                                  f'zero-filling {missing_samples} samples', flush=True)
+                            slog.emit(GAP_EVENT,
+                                      f'GAP < THRESHOLD: {gap_ms:.1f} ms '
+                                      f'(< {gap_threshold_reset*1000:.1f} ms) - '
+                                      f'zero-filling {missing_samples} samples',
+                                      kind='zerofill', gap_ms=gap_ms,
+                                      threshold_ms=gap_threshold_reset * 1000,
+                                      missing_samples=missing_samples)
 
                             # Insert zeros to maintain continuity
+                            segment_gap_fills.append((buf_len, missing_samples))
                             zeros = np.zeros(missing_samples, dtype=np.complex64)
                             buf_parts.append(zeros)
                             buf_len += missing_samples
@@ -1394,22 +1566,47 @@ def main():
 
             # Check if this segment had gaps
             had_gap = segment_has_gap
+            had_gap_fills = list(segment_gap_fills)
             segment_has_gap = False
+            segment_gap_fills.clear()
 
+            t_stft_start = time.monotonic()
             power, n_win = compute_stft_power(segment, n_w, n_ol, nfft, W=W,
                                                min_windows=K)
+            t_stft_end = time.monotonic()
 
             if args.debug:
                 seg_mag = np.abs(segment)
-                print(f'[DEBUG STFT] IQ: len={len(segment)}  '
-                      f'mean_mag={seg_mag.mean():.6e}  max_mag={seg_mag.max():.6e}')
-                print(f'[DEBUG STFT] power: shape={power.shape}  '
-                      f'min={power.min():.6e}  max={power.max():.6e}  '
-                      f'mean={power.mean():.6e}  median={np.median(power):.6e}')
                 pwr_per_freq = power.mean(axis=1)
-                print(f'[DEBUG STFT] per-freq mean power: min={pwr_per_freq.min():.6e}  '
-                      f'max={pwr_per_freq.max():.6e}  '
-                      f'ratio={pwr_per_freq.max()/max(pwr_per_freq.min(), 1e-30):.1f}')
+                _stft_human = (
+                    f'[DEBUG STFT] IQ: len={len(segment)}  '
+                    f'mean_mag={seg_mag.mean():.6e}  max_mag={seg_mag.max():.6e}\n'
+                    f'[DEBUG STFT] power: shape={power.shape}  '
+                    f'min={power.min():.6e}  max={power.max():.6e}  '
+                    f'mean={power.mean():.6e}  median={np.median(power):.6e}\n'
+                    f'[DEBUG STFT] per-freq mean power: min={pwr_per_freq.min():.6e}  '
+                    f'max={pwr_per_freq.max():.6e}  '
+                    f'ratio={pwr_per_freq.max()/max(pwr_per_freq.min(), 1e-30):.1f}'
+                )
+                slog.emit(STFT_DEBUG, _stft_human, cycle=cycle,
+                          iq_len=len(segment),
+                          iq_mean_mag=float(seg_mag.mean()),
+                          iq_max_mag=float(seg_mag.max()),
+                          power_shape=list(power.shape),
+                          power_min=float(power.min()),
+                          power_max=float(power.max()),
+                          power_mean=float(power.mean()),
+                          power_median=float(np.median(power)),
+                          freq_power_min=float(pwr_per_freq.min()),
+                          freq_power_max=float(pwr_per_freq.max()),
+                          freq_power_ratio=float(pwr_per_freq.max()/max(pwr_per_freq.min(), 1e-30)))
+                if had_gap_fills:
+                    for gf_offset, gf_len in had_gap_fills:
+                        win_start = max(0, (gf_offset - n_ol) // n_ws)
+                        win_end = (gf_offset + gf_len - 1) // n_ws
+                        slog.emit_raw(f'[DEBUG GAP] zero-fill: offset={gf_offset} '
+                              f'len={gf_len} samples '
+                              f'(covers STFT windows {win_start}-{win_end})')
 
             # Invalidate EVT cache if geometry changed
             n_freq_cur = power.shape[0]
@@ -1421,6 +1618,7 @@ def main():
                 evt_threshold_cache['n_freq'] = n_freq_cur
                 evt_threshold_cache['n_time'] = n_time_cur
 
+            t_fold_start = time.monotonic()
             detections, nodet_noise_psd, best_candidate = fold_detect(
                                      power, N, args.pf, args.fs, nfft,
                                      n_w, n_ol, samples_needed,
@@ -1432,17 +1630,58 @@ def main():
                                      hypotheses=rate_switch_hypotheses,
                                      N_B=N_B,
                                      N_A_exact=N_exact,
-                                     N_B_exact=N_B_exact)
-            proc_ms = (time.monotonic() - t0) * 1000.0
+                                     N_B_exact=N_B_exact,
+                                     slog=slog)
+            t_fold_end = time.monotonic()
+            proc_ms = (t_fold_end - t0) * 1000.0
+            if args.debug:
+                stft_ms = (t_stft_end - t_stft_start) * 1000.0
+                fold_ms = (t_fold_end - t_fold_start) * 1000.0
+                slog.emit(TIMING,
+                          f'[DEBUG TIMING] stft={stft_ms:.0f} ms  '
+                          f'fold={fold_ms:.0f} ms  '
+                          f'total={proc_ms:.0f} ms',
+                          cycle=cycle, stft_ms=stft_ms,
+                          fold_ms=fold_ms, total_ms=proc_ms)
+
+            # ---- per-cycle spectrogram / IQ dump ----
+            if args.dump_spectrogram and args.log_dir:
+                prefix = os.path.join(args.log_dir, f'cycle_{cycle:04d}')
+                np.save(f'{prefix}_power.npy', power.astype(np.float32))
+                np.save(f'{prefix}_iq.npy', segment.astype(np.complex64))
+                meta = {
+                    'cycle': cycle,
+                    'timestamp_ns': seg_ts,
+                    'fs': args.fs,
+                    'nfft': nfft,
+                    'n_w': n_w,
+                    'n_ol': n_ol,
+                    'power_shape': list(power.shape),
+                    'had_gap': had_gap,
+                    'gap_fills': had_gap_fills,
+                    'detections': [
+                        {
+                            'freq_hz': d.freq_hz,
+                            'snr_db': d.snr_db,
+                            'score_ratio': d.score_ratio,
+                            'noise_psd': d.noise_psd,
+                            'hyp_label': d.hyp_label,
+                        } for d in detections
+                    ] if detections else [],
+                    'best_candidate': best_candidate,
+                }
+                with open(f'{prefix}_meta.json', 'w') as f:
+                    json.dump(meta, f, indent=1)
 
             # Timestamp string (UTC) for the start of this segment
             # seg_ts is in nanoseconds; convert to seconds for datetime
             ts_str = ''
             current_ts = seg_ts  # Save before clearing
             if seg_ts and seg_ts > 1e9:
-                ts_str = datetime.datetime.fromtimestamp(
+                dt = datetime.datetime.fromtimestamp(
                     seg_ts / 1e9, tz=datetime.timezone.utc
-                ).strftime('%H:%M:%S')
+                )
+                ts_str = dt.strftime('%H:%M:%S') + f'.{dt.microsecond // 1000:03d}'
             seg_ts = None
 
             # Append gap warning to output if segment had discontinuities
@@ -1455,8 +1694,10 @@ def main():
 
                 # Calculate inter-pulse delta
                 delta_str = ''
+                inter_pulse_delta_ms = None
                 if last_detection_ts is not None and current_ts is not None:
                     delta_s = (current_ts - last_detection_ts) / 1e9  # Convert ns to seconds
+                    inter_pulse_delta_ms = delta_s * 1000.0
                     delta_str = f'  Δt={delta_s:.3f}s'
                 if current_ts is not None:
                     last_detection_ts = current_ts
@@ -1516,7 +1757,7 @@ def main():
 
                     if args.center_freq > 0:
                         abs_mhz = args.center_freq + det.freq_hz / 1e6
-                        print(f'[{cycle:4d} {ts_str}]  DETECTED  '
+                        _det_human = (f'[{cycle:4d} {ts_str}]  DETECTED  '
                               f'{abs_mhz:.6f} MHz  '
                               f'({det.freq_hz:+.1f} Hz)  '
                               f'SNR {det.snr_db:.1f} dB  '
@@ -1524,16 +1765,36 @@ def main():
                               f'noise {det.noise_psd:.3e}  '
                               f'{proc_ms:.0f} ms{delta_str}{gap_flag}{confidence_flag}{hyp_flag}')
                     else:
-                        print(f'[{cycle:4d} {ts_str}]  DETECTED  '
+                        _det_human = (f'[{cycle:4d} {ts_str}]  DETECTED  '
                               f'{det.freq_hz:+.1f} Hz  '
                               f'SNR {det.snr_db:.1f} dB  '
                               f'score_ratio {det.score_ratio:.3f}  '
                               f'noise {det.noise_psd:.3e}  '
                               f'{proc_ms:.0f} ms{delta_str}{gap_flag}{confidence_flag}{hyp_flag}')
+                    slog.emit(DETECTION, _det_human,
+                              cycle=cycle, timestamp_ns=current_ts,
+                              freq_hz=det.freq_hz,
+                              snr_db=det.snr_db,
+                              score_ratio=det.score_ratio,
+                              noise_psd=det.noise_psd,
+                              proc_ms=proc_ms,
+                              had_gap=had_gap,
+                              confidence=confidence_flag.strip(),
+                              hyp_label=det.hyp_label,
+                              detection_status=det_status,
+                              inter_pulse_delta_ms=inter_pulse_delta_ms)
                     fold_snrs_str = ', '.join(f'{s:.1f}' for s in det.fold_info['fold_snrs'])
-                    print(f'  [FOLDS] score_ratio={det.score_ratio:.3f}  '
+                    fold_wins_str = ', '.join(str(w) for w in det.fold_info['fold_windows'])
+                    slog.emit(FOLDS,
+                          f'  [FOLDS] score_ratio={det.score_ratio:.3f}  '
                           f'max_fold_frac={det.fold_info["max_fold_fraction"]:.3f}  '
-                          f'per_fold_snr=[{fold_snrs_str}] dB')
+                          f'per_fold_snr=[{fold_snrs_str}] dB  '
+                          f'windows=[{fold_wins_str}]',
+                          cycle=cycle,
+                          score_ratio=det.score_ratio,
+                          max_fold_fraction=det.fold_info['max_fold_fraction'],
+                          fold_snrs=det.fold_info['fold_snrs'],
+                          fold_windows=det.fold_info['fold_windows'])
             else:
                 # Send a no-detection report so the controller/GCS knows
                 # we searched this cycle and found nothing.  Uses
@@ -1568,18 +1829,28 @@ def main():
                                 f'SNR {best_candidate["snr_db"]:.1f} dB '
                                 f'ratio {best_candidate["score_ratio"]:.3f} '
                                 f'noise {best_candidate["noise_psd"]:.3e}')
-                print(f'[{cycle:4d} {ts_str}]  no detection  '
-                      f'{proc_ms:.0f} ms{gap_flag}{cand_str}')
+                slog.emit(NO_DETECTION,
+                          f'[{cycle:4d} {ts_str}]  no detection  '
+                          f'{proc_ms:.0f} ms{gap_flag}{cand_str}',
+                          cycle=cycle, timestamp_ns=current_ts,
+                          proc_ms=proc_ms, had_gap=had_gap,
+                          best_candidate=best_candidate)
 
     except KeyboardInterrupt:
         pass  # Handled by signal handler
     finally:
         elapsed = time.monotonic() - run_start
-        print(f'\n--- Detection stopped after {cycle} cycles ({elapsed:.0f} s) ---', flush=True)
-        print(f'  Detections:        {det_total}', flush=True)
-        print(f'  Zero-filled gaps:  {gap_zerofill_count} (< {gap_threshold_reset*1000:.1f} ms)', flush=True)
-        print(f'  Reset gaps:        {gap_reset_count} (≥ {gap_threshold_reset*1000:.1f} ms, segments discarded)', flush=True)
-        print(f'  Total gap events:  {gap_zerofill_count + gap_reset_count}', flush=True)
+        slog.emit(SESSION_END,
+                  f'\n--- Detection stopped after {cycle} cycles ({elapsed:.0f} s) ---\n'
+                  f'  Detections:        {det_total}\n'
+                  f'  Zero-filled gaps:  {gap_zerofill_count} (< {gap_threshold_reset*1000:.1f} ms)\n'
+                  f'  Reset gaps:        {gap_reset_count} (≥ {gap_threshold_reset*1000:.1f} ms, segments discarded)\n'
+                  f'  Total gap events:  {gap_zerofill_count + gap_reset_count}',
+                  cycles=cycle, elapsed_s=elapsed,
+                  detections=det_total,
+                  gap_zerofill_count=gap_zerofill_count,
+                  gap_reset_count=gap_reset_count)
+        slog.close()
         heartbeat_stop.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=2.0)
