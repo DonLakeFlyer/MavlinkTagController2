@@ -1646,32 +1646,38 @@ def main():
 
             # ---- per-cycle spectrogram / IQ dump ----
             if args.dump_spectrogram and args.log_dir:
-                prefix = os.path.join(args.log_dir, f'cycle_{cycle:04d}')
-                np.save(f'{prefix}_power.npy', power.astype(np.float32))
-                np.save(f'{prefix}_iq.npy', segment.astype(np.complex64))
-                meta = {
-                    'cycle': cycle,
-                    'timestamp_ns': seg_ts,
-                    'fs': args.fs,
-                    'nfft': nfft,
-                    'n_w': n_w,
-                    'n_ol': n_ol,
-                    'power_shape': list(power.shape),
-                    'had_gap': had_gap,
-                    'gap_fills': had_gap_fills,
-                    'detections': [
-                        {
-                            'freq_hz': d.freq_hz,
-                            'snr_db': d.snr_db,
-                            'score_ratio': d.score_ratio,
-                            'noise_psd': d.noise_psd,
-                            'hyp_label': d.hyp_label,
-                        } for d in detections
-                    ] if detections else [],
-                    'best_candidate': best_candidate,
-                }
-                with open(f'{prefix}_meta.json', 'w') as f:
-                    json.dump(meta, f, indent=1)
+                try:
+                    prefix = os.path.join(args.log_dir, f'cycle_{cycle:04d}')
+                    np.save(f'{prefix}_power.npy', power.astype(np.float32))
+                    np.save(f'{prefix}_iq.npy', segment.astype(np.complex64))
+                    meta = {
+                        'cycle': cycle,
+                        'timestamp_ns': seg_ts,
+                        'fs': args.fs,
+                        'nfft': nfft,
+                        'n_w': n_w,
+                        'n_ol': n_ol,
+                        'power_shape': list(power.shape),
+                        'had_gap': had_gap,
+                        'gap_fills': had_gap_fills,
+                        'detections': [
+                            {
+                                'freq_hz': d.freq_hz,
+                                'snr_db': d.snr_db,
+                                'score_ratio': d.score_ratio,
+                                'noise_psd': d.noise_psd,
+                                'hyp_label': d.hyp_label,
+                            } for d in detections
+                        ] if detections else [],
+                        'best_candidate': best_candidate,
+                    }
+                    with open(f'{prefix}_meta.json', 'w') as f:
+                        json.dump(meta, f, indent=1)
+                except OSError as exc:
+                    print(f'WARNING: disabling spectrogram dump after I/O '
+                          f'error on cycle {cycle}: {exc}',
+                          file=sys.stderr, flush=True)
+                    args.dump_spectrogram = False
 
             # Timestamp string (UTC) for the start of this segment
             # seg_ts is in nanoseconds; convert to seconds for datetime
@@ -1718,10 +1724,13 @@ def main():
                     is_marginal = det.score_ratio < confidence_ratio or has_dominant_fold
                     det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
                                   else DETECTION_STATUS_SUPERTHRESHOLD)
+                    confidence_tag = ''
                     confidence_flag = ''
                     if has_dominant_fold:
+                        confidence_tag = 'DOMINANT_FOLD'
                         confidence_flag = '  [DOMINANT_FOLD]'
                     elif det.score_ratio < confidence_ratio:
+                        confidence_tag = 'LOW'
                         confidence_flag = '  [LOW]'
                     hyp_flag = f'  hyp={det.hyp_label}' if det.hyp_label != 'A' else ''
 
@@ -1779,7 +1788,7 @@ def main():
                               noise_psd=det.noise_psd,
                               proc_ms=proc_ms,
                               had_gap=had_gap,
-                              confidence=confidence_flag.strip(),
+                              confidence=confidence_tag,
                               hyp_label=det.hyp_label,
                               detection_status=det_status,
                               inter_pulse_delta_ms=inter_pulse_delta_ms)
