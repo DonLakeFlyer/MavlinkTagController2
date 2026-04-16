@@ -5,6 +5,7 @@
 #include "BearingCalculator.h"
 #include "boost_process_compat.h"
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -64,7 +65,7 @@ private:
     bool _handleEndTags         (void);
     bool _handleTag             (const mavlink_tunnel_t& tunnel);
     std::string _handleStartDetection  (const mavlink_tunnel_t& tunnel);
-    bool _handleStopDetection   (void);
+    bool _handleStopDetection   (bool waitForCompletion = false);
     std::string _handleRawCapture      (const mavlink_tunnel_t& tunnel);
     bool _handleSaveLogs        (void);
     bool _handleCleanLogs       (void);
@@ -93,6 +94,9 @@ private:
     bp::pipe*                       _airspyPipe             = nullptr;
     std::string                     _airspyPath;
     int                            _rawCaptureCount         = 0;
+    std::atomic<int>                _analysisJobs           { 0 };      // post-flight analyzers still running
+    std::atomic<bool>               _detectionStarting      { false };  // start worker has not yet published DETECTING
+    std::atomic<bool>               _detectionStopping      { false };  // stop worker owns _processes teardown
     bool                            _simulatorMode          = false;
     std::string                     _simulatorPreset;
     bool                            _debugDetector          = false;

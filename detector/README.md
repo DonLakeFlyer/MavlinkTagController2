@@ -249,6 +249,8 @@ GAP < THRESHOLD: 15.3 ms (< 30.0 ms) - zero-filling 59 samples
 | `--port` | `10000` | UDP port for IQ data |
 | `--pf` | `5e-2` | False-alarm probability (per cycle) |
 | `--center-freq` | `0.0` | Channel center freq (MHz, display only) |
+| `--log-dir` | none | Write `detector_<tag>.jsonl` structured log here (see `shared/log_schema.py`) |
+| `--dump-spectrogram` | off | Save `tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json}` per cycle to `--log-dir` (~0.9 MB/cycle, ~330 MB/hour) |
 
 ### False Alarm Probability (P<sub>f</sub>)
 

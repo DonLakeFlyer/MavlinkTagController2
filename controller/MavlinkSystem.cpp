@@ -271,13 +271,15 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 	// session started before GPS time was initialized.
 	if (_vehicleTimeFrozen.load()) {
 		bool alreadyInitialized;
+		uint64_t frozenEpoch;
 		{
 			std::scoped_lock<std::mutex> lock(_vehicleTimeMutex);
-			alreadyInitialized = (_vehicleEpochSeconds > 0);
+			frozenEpoch = _vehicleEpochSeconds;
+			alreadyInitialized = (frozenEpoch > 0);
 		}
 		if (alreadyInitialized) {
 			if (!_vehicleTimeSuppressLogged.load()) {
-				int64_t delta = static_cast<int64_t>(vehicleEpochTimeSeconds) - static_cast<int64_t>(_vehicleEpochSeconds);
+				int64_t delta = static_cast<int64_t>(vehicleEpochTimeSeconds) - static_cast<int64_t>(frozenEpoch);
 				logInfo() << "Vehicle time updates suppressed during detection (initial delta=" << delta << "s)";
 				_vehicleTimeSuppressLogged.store(true);
 			}

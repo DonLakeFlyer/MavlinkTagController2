@@ -4,7 +4,10 @@ Provides a StructuredLogger that writes human-readable text to stdout and
 structured JSON Lines (.jsonl) to a sidecar file.  The analyzer reads the
 .jsonl — no regex, no fragile coupling to printf format strings.
 
-Entry type constants below define the contract between writer and reader.
+Contract: the .jsonl carries the *analyzable events* named by the entry type
+constants below.  Free-form diagnostics (EVT trial progress, weighting-matrix
+checks, per-hypothesis detail, malformed-packet notices, ...) are stdout-only
+via emit_raw()/print and are intentionally not part of the schema.
 Adding a field to an emit() call automatically appears in the .jsonl record.
 """
 
@@ -28,7 +31,6 @@ EVT_THRESHOLD    = 'evt_threshold'
 HYPOTHESIS       = 'hypothesis'
 SESSION_END      = 'session_end'
 STFT_DEBUG       = 'stft_debug'
-SPECTROGRAM_DUMP = 'spectrogram_dump'
 
 
 # ---------------------------------------------------------------------------
@@ -69,26 +71,39 @@ class StructuredLogger:
     def __init__(self, jsonl_path: Optional[str] = None):
         self._jsonl: Optional[TextIO] = None
         if jsonl_path:
-            self._jsonl = open(jsonl_path, 'w')
+            self._jsonl = open(jsonl_path, 'w',
+                               encoding='utf-8', newline='\n')
 
     @property
     def active(self) -> bool:
         """True if a .jsonl file is being written."""
         return self._jsonl is not None
 
-    def emit(self, entry_type: str, human: str, flush: bool = True, **data):
+    def emit(self, entry_type: str, human: Optional[str], flush: bool = True, **data):
         """Write a log entry.
 
-        *human* is printed to stdout as-is.
+        *human* is printed to stdout as-is; pass None to record to .jsonl only.
         *entry_type* + *data* are written as a JSON object to the .jsonl file.
         """
-        print(human, flush=flush)
+        if human is not None:
+            print(human, flush=flush)
         if self._jsonl is not None:
             record = {'type': entry_type}
             record.update(data)
-            self._jsonl.write(json.dumps(record, default=_json_default) + '\n')
-            if flush:
-                self._jsonl.flush()
+            try:
+                self._jsonl.write(json.dumps(record, default=_json_default,
+                                             ensure_ascii=False) + '\n')
+                if flush:
+                    self._jsonl.flush()
+            except OSError as exc:
+                # Losing log storage (e.g. ENOSPC) must not stop detection.
+                print(f'WARNING: structured log write failed ({exc}); '
+                      f'continuing stdout-only', file=sys.stderr, flush=True)
+                try:
+                    self._jsonl.close()
+                except OSError:
+                    pass
+                self._jsonl = None
 
     def emit_raw(self, human: str, flush: bool = True):
         """Write a human-only line (not recorded in .jsonl)."""
@@ -109,13 +124,23 @@ def read_jsonl(path: str):
     """Read all structured log entries from a .jsonl file.
 
     Returns a list of dicts, each with at least a ``'type'`` key.
+    Malformed lines (e.g. a partial trailing line from a killed writer)
+    are skipped with a warning on stderr.
     """
     entries = []
-    with open(path) as f:
-        for line in f:
+    bad_lines = []
+    with open(path, encoding='utf-8') as f:
+        for lineno, line in enumerate(f, 1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                bad_lines.append(lineno)
+    if bad_lines:
+        print(f'WARNING: {path}: skipped {len(bad_lines)} malformed line(s) '
+              f'at {bad_lines[:10]}', file=sys.stderr)
     return entries
 
 
