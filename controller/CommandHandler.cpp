@@ -778,14 +778,20 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
             return "Not in rotation mode";
         }
 
-        _inRotation = false;
         slicesCopy = std::move(_rotationSlices);
         _rotationSlices.clear();
     }
 
-    // Stop any running detection
+    // Stop any running detection while _inRotation is still true so the
+    // stop-detection thread skips unfreezing time and post-flight analysis
+    // (rotation handles both after bearing computation).
     if (_mavlink->heartbeatStatus() == HEARTBEAT_STATUS_DETECTING) {
         _handleStopDetection();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        _inRotation = false;
     }
 
     _mavlink->setVehicleTimeFrozen(false);
