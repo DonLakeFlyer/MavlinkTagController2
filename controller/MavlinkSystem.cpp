@@ -265,6 +265,21 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 	auto vehicleEpochTimeSeconds = system_time.time_unix_usec / 1000000;
 	uint64_t previousEpochSeconds;
 
+	// Suppress time updates while detection or rotation is active to keep
+	// timestamps consistent throughout the session.  Log the suppressed
+	// update so post-flight analysis can see what the GPS wanted to do.
+	if (_vehicleTimeFrozen.load()) {
+		if (!_vehicleTimeSuppressLogged) {
+			std::scoped_lock<std::mutex> lock(_vehicleTimeMutex);
+			if (_vehicleEpochSeconds > 0) {
+				int64_t delta = static_cast<int64_t>(vehicleEpochTimeSeconds) - static_cast<int64_t>(_vehicleEpochSeconds);
+				logInfo() << "Vehicle time updates suppressed during detection (initial delta=" << delta << "s)";
+			}
+			_vehicleTimeSuppressLogged = true;
+		}
+		return;
+	}
+
 	{
 		std::scoped_lock<std::mutex> lock(_vehicleTimeMutex);
 		previousEpochSeconds = _vehicleEpochSeconds;

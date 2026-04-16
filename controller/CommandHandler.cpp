@@ -1,8 +1,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <future>
+#include <map>
 #include <memory>
 #include <thread>
 #include <stdlib.h>
@@ -148,7 +150,7 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
     _processes.push_back(detectorProc);
 }
 
-void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector)
+void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram)
 {
     int     secondaryChannelIncrement   = secondaryChannel ? 1 : 0;
     int     tagId                       = tagInfo.id + secondaryChannelIncrement;
@@ -187,6 +189,16 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                 k);
     if (_debugDetector || debugDetector) {
         commandStr += " --debug";
+    }
+
+    // Always pass the log directory so the detector can write to it
+    std::string detectorLogDir = logFileManager->logDir(LogFileManager::DETECTORS);
+    if (!detectorLogDir.empty()) {
+        commandStr += formatString(" --log-dir \"%s\"", detectorLogDir.c_str());
+    }
+
+    if (dumpSpectrogram && !detectorLogDir.empty()) {
+        commandStr += " --dump-spectrogram";
     }
 
     // If the tag has a secondary PRI, pass it as --tip-secondary so the
@@ -429,7 +441,8 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 // Python detector handles both rates in a single process via
                 // --tip-secondary, so only launch once per tag.
                 bool debugDet = (startDetection.debug_detector != 0);
-                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio, debugDet);
+                bool dumpSpec = (startDetection.dump_spectrogram != 0);
+                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio, debugDet, dumpSpec);
             } else {
                 _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
                 if (tagInfo.intra_pulse2_msecs != 0) {
@@ -442,9 +455,37 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         _mavlink->sendStatusText(startedStr.c_str(), MAV_SEVERITY_INFO);
 
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_DETECTING);
+        _mavlink->setVehicleTimeFrozen(true);
     }).detach();
 
     return ""; // Return empty string to indicate success
+}
+
+void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
+{
+    std::string repoDir    = formatString("%s/repos/MavlinkTagController2", _homePath);
+    std::string venvPython = formatString("%s/.venv/bin/python3", repoDir.c_str());
+    std::string pythonCmd  = (access(venvPython.c_str(), X_OK) == 0) ? venvPython : std::string("python3");
+    std::string script     = formatString("%s/analyzer/post_flight_analysis.py", repoDir.c_str());
+
+    if (access(script.c_str(), R_OK) != 0) {
+        logWarn() << "Post-flight analysis script not found:" << script;
+        return;
+    }
+
+    std::string cmd = formatString("\"%s\" -u \"%s\" \"%s\"",
+                                   pythonCmd.c_str(), script.c_str(), logDir.c_str());
+
+    logInfo() << "Running post-flight analysis:" << cmd;
+
+    std::thread([cmd]() {
+        int rc = system(cmd.c_str());
+        if (rc == 0) {
+            logInfo() << "Post-flight analysis completed successfully";
+        } else {
+            logWarn() << "Post-flight analysis failed with exit code" << rc;
+        }
+    }).detach();
 }
 
 bool CommandHandler::_handleStopDetection(void)
@@ -470,8 +511,30 @@ bool CommandHandler::_handleStopDetection(void)
         _mavlink->setDetectionMode(DETECTION_MODE_UAVRT);
         _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
 
+        // Only unfreeze vehicle time if we're not inside a rotation session.
+        // Rotation keeps time frozen across all its per-heading detection cycles.
+        {
+            std::lock_guard<std::mutex> lock(_rotationMutex);
+            if (!_inRotation) {
+                _mavlink->setVehicleTimeFrozen(false);
+            }
+        }
+
         auto logFileManager = LogFileManager::instance();
+
+        // Capture log dir before detectorsStopped() clears it
+        std::string detLogDir = logFileManager->logDir(LogFileManager::DETECTORS);
+
         logFileManager->detectorsStopped();
+
+        // Run post-flight analysis if we're not inside a rotation session
+        // (rotation runs its own analysis after all headings complete).
+        {
+            std::lock_guard<std::mutex> lock(_rotationMutex);
+            if (!_inRotation && !detLogDir.empty()) {
+                _runPostFlightAnalysis(detLogDir);
+            }
+        }
     }).detach();
 
     return true;
@@ -646,12 +709,15 @@ std::string CommandHandler::_handleStartRotationDetection(const mavlink_tunnel_t
         _rotationStartDetection.detection_margin            = rotationInfo.detection_margin;
         _rotationStartDetection.confidence_ratio            = rotationInfo.confidence_ratio;
         _rotationStartDetection.debug_detector              = rotationInfo.debug_detector;
+        _rotationStartDetection.dump_spectrogram             = rotationInfo.dump_spectrogram;
 
         _inRotation             = true;
         _currentHeadingDeg      = 0;
         _rotationAutoStopping   = false;
         _rotationSlices.clear();
     }
+
+    _mavlink->setVehicleTimeFrozen(true);
 
     auto logFileManager = LogFileManager::instance();
     logFileManager->rotationStarted();
@@ -722,6 +788,8 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
         _handleStopDetection();
     }
 
+    _mavlink->setVehicleTimeFrozen(false);
+
     logInfo() << "COMMAND_ID_STOP_ROTATION_DETECTION: computing bearing from"
               << slicesCopy.size() << "slices";
 
@@ -740,8 +808,17 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
         std::string logPath = logFileManager->filename(LogFileManager::ROTATION, "bearing_result", "log");
         bearingLog.open(logPath);
         if (bearingLog.is_open()) {
-            bearingLog << "tag_id,bearing_deg,r_squared,n_valid_slices,best_snr\n";
+            bearingLog << "tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude\n";
         }
+    }
+
+    // Compute mean lat/lon per tag from the rotation slices
+    std::map<uint32_t, std::pair<double, double>> tagLatLonSum;
+    std::map<uint32_t, int> tagLatLonCount;
+    for (const auto& slice : slicesCopy) {
+        tagLatLonSum[slice.tag_id].first  += slice.latitude;
+        tagLatLonSum[slice.tag_id].second += slice.longitude;
+        tagLatLonCount[slice.tag_id]++;
     }
 
     for (const auto& result : results) {
@@ -761,15 +838,31 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
                                   result.n_valid_slices, result.best_snr);
 
         if (bearingLog.is_open()) {
+            double lat = 0.0, lon = 0.0;
+            auto it = tagLatLonCount.find(result.tag_id);
+            if (it != tagLatLonCount.end() && it->second > 0) {
+                lat = tagLatLonSum[result.tag_id].first  / it->second;
+                lon = tagLatLonSum[result.tag_id].second / it->second;
+            }
             bearingLog << result.tag_id << ","
                        << result.bearing_deg << ","
                        << result.r_squared << ","
                        << result.n_valid_slices << ","
-                       << result.best_snr << "\n";
+                       << result.best_snr << ","
+                       << std::fixed << std::setprecision(8)
+                       << lat << "," << lon << "\n";
         }
     }
 
+    // Capture rotation log dir before rotationStopped() clears it
+    std::string rotLogDir = logFileManager->logDir(LogFileManager::ROTATION);
+
     logFileManager->rotationStopped();
+
+    // Run post-flight analysis on the rotation log directory
+    if (!rotLogDir.empty()) {
+        _runPostFlightAnalysis(rotLogDir);
+    }
 
     return "";
 }
