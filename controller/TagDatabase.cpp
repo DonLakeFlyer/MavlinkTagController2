@@ -60,7 +60,6 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
     fprintf(fp, "ipCntrl:\t127.0.0.1\n");
     fprintf(fp, "portCntrl:\t30000\n");
     fprintf(fp, "processedOuputPath:\t%s\n",                    logDir.c_str());
-    fprintf(fp, "ros2enable:\tfalse\n");
     fprintf(fp, "startInRunState:\ttrue\n");
     fprintf(fp, "timeStamp:\t1646403180.469\n");
 

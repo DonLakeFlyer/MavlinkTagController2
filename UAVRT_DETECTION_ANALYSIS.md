@@ -415,7 +415,7 @@ This happens in two main scenarios:
 
 2. **Failed confirmation**: A pulse was detected, but when compared to the prior segment's pulse (see checks below), it did not align in time, frequency, or SNR. The detector does *not* trust it and falls back to **Search mode (S)**.
 
-An unconfirmed pulse is still **reported** over UDP/ROS2 with `confirmed_status = 0`. The ground station can see that the detector found something but hasn't yet verified it. Critically, unconfirmed detections **do not trigger tracking mode** — the detector continues searching the full frequency/time space, which is computationally more expensive but avoids locking onto a false alarm.
+An unconfirmed pulse is still **reported** over UDP with `confirmed_status = 0`. The ground station can see that the detector found something but hasn't yet verified it. Critically, unconfirmed detections **do not trigger tracking mode** — the detector continues searching the full frequency/time space, which is computationally more expensive but avoids locking onto a false alarm.
 
 ### 8b. Confirmed Pulse (`con_dec = true`)
 
@@ -469,7 +469,7 @@ Segment N (Tracking — signal lost):
 
 ### 8d. Impact on Downstream Consumers
 
-The `confirmed_status` field in the UDP/ROS2 pulse message tells the ground control station (GCS) how much to trust the detection:
+The `confirmed_status` field in the UDP pulse message tells the ground control station (GCS) how much to trust the detection:
 
 | `detection_status` | `confirmed_status` | Meaning |
 |----|----|----|
@@ -507,8 +507,7 @@ The posteriori becomes the **priori for the next segment**, propagated via `ps_p
 ## 11. Output & Reporting
 
 Detected pulses are transmitted via:
-- **UDP** (`pulseInfoStruct.sendOverUDP()`) to a ground control station
-- **ROS2** (`ros2PulseSend`) for integration with the UAV flight stack
+- **UDP** (`pulseInfoStruct.sendOverUDP()`) to MavlinkTagController2, which relays them to the ground control station over MAVLink tunnel messages
 - **CSV log** (`wfmcsvwrite`) of spectrograms for post-flight analysis
 
 Each pulse report includes: tag ID, frequency (absolute MHz), start time, predicted next pulse time, SNR, STFT score, group sequence counter, noise PSD estimate, detection and confirmation status.
@@ -530,5 +529,5 @@ UDP IQ Packets
     → Peeling algorithm extracts peaks & sidebands
     → State machine (D → C → T) with confirmation
     → Posteriori update → next segment's priori
-    → Pulse report via UDP/ROS2
+    → Pulse report via UDP
 ```
