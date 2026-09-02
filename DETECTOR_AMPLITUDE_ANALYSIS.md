@@ -1,10 +1,14 @@
 # Detector Analysis: Amplitude vs Detection
 
-**Status: modelled, not measured.** Every number below comes from Monte-Carlo
-simulation of the detector's own algorithm at its real parameters, not from
-flight data. See `FLIGHT_DATA_ANALYSIS.md` for the checks that confirm or
-falsify it. The first of those checks is cheap and would invalidate this whole
-document if it fails — run it before acting on any of this.
+**Status: modelled, and since validated against flight data.** Every number
+below comes from Monte-Carlo simulation of the detector's own algorithm at its
+real parameters. The checks in `FLIGHT_DATA_ANALYSIS.md` have now been run
+against the April 2026 PDC testing data (see its Results section): the SNR
+floor was confirmed to ~0.1 dB at K=20, the rear-heading energy is consistent
+with noise rather than multipath (not yet conclusive — needs rear-heading
+filtering around the empirical carrier and a collar-OFF control), and offline
+IQ replay confirmed the fixed-offset estimator recovers range-tracking
+amplitude the current metric compresses to floor.
 
 ---
 
@@ -151,20 +155,21 @@ K×noise pedestal.
 
 ```python
 def amplitude_at_known_pulse(power, freq_bin, pulse_indices, noise_power):
-    """Signal energy in units of noise power. May be negative — do not clamp."""
+    """Absolute signal energy sum(power) - K*noise. May be negative — do not clamp."""
     idx = np.asarray(pulse_indices, dtype=np.int64)
     idx = idx[(idx >= 0) & (idx < power.shape[1])]
     if idx.size == 0:
         return float('nan')
     n = float(noise_power[freq_bin])
-    return (float(power[freq_bin, idx].sum()) - idx.size * n) / n
+    return float(power[freq_bin, idx].sum()) - idx.size * n
 ```
 
 `pulse_indices` is one row of the `(search_range, K)` array from
 `build_hypothesis_indices()`, selected by the `best_offsets` recorded at lock.
 
 Verified over 200k trials — the estimator is exactly linear in signal power
-(`K·S`) and unbiased:
+(`K·S`) and unbiased. The table shows estimate/N (noise units) for scale
+only; the returned value is absolute power:
 
 | true per-pulse SNR | estimate (K=5) |
 |---|---|
@@ -187,6 +192,19 @@ Two rules that matter:
   detection robustness but `max(S+N, N, N)` is not linear in S, so it
   re-introduces a signal-dependent bias.
 
+A third rule, for the bearing consumer: **report absolute power, not a noise
+ratio.** At 146 MHz the noise is external and the antenna samples it through
+its own pattern, so an anisotropic noise field (a town or repeater on one
+horizon) makes the per-heading noise floor pattern-shaped:
+N(θ) ≈ N₀ + G(θ−φₛᵣᶜ)·Nₛᵣᶜ. Dividing by N(θ) then biases the bearing fit
+toward or away from the noise source. Keep the noise *subtraction* (the
+pedestal removal) but drop the division: send
+`sum(power) − K·noise` in absolute units, with `noise` alongside as a
+separate diagnostic. This is valid because the receiver runs AGC-off with a
+fixed gain chain, so absolute power is comparable across headings within a
+rotation. (Drone self-noise is exempt from the concern either way — it
+rotates with the airframe, costing range but not skewing bearings.)
+
 Keep `snr` as-is — the README documents it as deliberately uavrt-comparable.
 Send this as an additional field.
 
@@ -195,6 +213,31 @@ Send this as an additional field.
 Follows directly from 1: measurement has no threshold, so all 8 headings produce
 a valid number every rotation — including the rear ones the solve has never seen.
 This turns ~1 usable point per rotation into 8.
+
+**Architecture prerequisite: the detector must survive the rotation.** The
+current flight procedure (custom QGC → controller) starts a fresh detector at
+each heading stop and kills it after K captures. That breaks everything above:
+
+- A lock's phase (`t₀ + n·PRI`) is expressed in the detector's own sample
+  timebase; a restarted process has a fresh counter, so the phase from the lock
+  heading is meaningless at the next one. Every heading degenerates back to a
+  cold-start max-over-offsets search.
+- Escalating K over "already-buffered samples" (change 7) is impossible — the
+  buffer dies with the process, so a deeper look means a full re-dwell.
+- Startup settling and all pulses arriving during rotation between stops are
+  discarded — paid-for integration thrown away.
+
+Fix: run **one detector instance across the whole rotation** on an unbroken
+sample stream, and have the controller send heading annotations ("heading 090
+from t=X to t=Y") instead of start/stop. The readout stage bins per-pulse
+amplitudes by heading using the annotations. A lock established at any heading
+is then valid for the entire rotation — that is exactly the 50 ppm / 2.5 min
+lock-lifetime budget in change 4. This is a controller/QGC protocol change,
+not detector math, and it removes process churn at every stop.
+
+(The alternative — expressing t₀ in absolute stream time so a restarted
+detector can inherit it — smears timing correctness across three components
+and still loses the buffer and the inter-stop pulses. Not recommended.)
 
 ### 3. Select the lock retrospectively
 
@@ -265,6 +308,14 @@ Fitting a linear-power pattern shape to dB-valued data is dimensionally
 inconsistent and degenerates to "flat plus one bump at boresight", discarding
 precisely the rear-lobe structure that separates front from back.
 
+Fit **absolute** power, per the third rule in change 1 — not SNR. If the
+inputs are noise ratios, an anisotropic noise floor N(θ) leaks into the
+pattern fit as a spurious lobe pointed at the noise source. With absolute
+power, `B` absorbs any residual pedestal and the per-heading noise N(θ)
+becomes a separate curve worth plotting on its own: structure in N(θ) is an
+RFI-direction diagnostic, flat N(θ) validates the simpler ratio treatment
+retrospectively.
+
 ### 7. Lock at K=20, measure at K=5
 
 Measurement has no threshold to clear, so only the lock heading needs the full
@@ -273,6 +324,28 @@ Measurement has no threshold to clear, so only the lock heading needs the full
 
 First rotation: dwell K=20 per heading only until a candidate passes tests 1–3,
 then drop to K=5. From the second rotation on, lock on the previous bearing.
+
+**Large K as escalation, not default.** The integration window is K × PRI, and
+"no detection" cannot be declared before the window closes — the whole premise of
+a large-K fold is that the signal is invisible in shorter ones, so there is no
+early exit on absence (a strong signal *can* fire early via a shorter sub-fold).
+At the 2 s collar:
+
+| K | min window per look | 8-heading rotation (windows only) |
+|---|---|---|
+| 5 | 10 s | ~80 s |
+| 10 | 20 s | ~160 s |
+| 20 | 40 s | ~320 s |
+| 40 | 80 s | ~640 s (~11 min) |
+
+A blanket K=40 lock therefore multiplies the "move on, tag's not here" verdict
+time by 4–8×, which dominates aerial search cost. Instead, escalate: run K=10
+continuously
+(20 s verdicts); only when K=10 is negative *and* the search plan says the tag
+may be near max range, extend the fold over the already-buffered samples to
+K=20/K=40 — extending is more folding on a longer buffer, not a restart. K=40 is
+an acquisition-range play (~+1–2 km); it never enters the rotation loop, because
+per-heading measurement uses the fixed-offset readout at small K regardless.
 
 ### 8. On pf
 
