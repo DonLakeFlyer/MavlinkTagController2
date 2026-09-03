@@ -65,7 +65,7 @@ def decode_timestamp(raw_8bytes):
 # Envelope detection (mix to baseband + lowpass)
 # ---------------------------------------------------------------------------
 
-def extract_envelope(iq, Fs, freq_hz, lpf_cutoff_hz=30.0):
+def extract_envelope(iq, Fs, freq_hz, lpf_cutoff_hz=500.0):
     """Extract the power envelope at a specific frequency.
 
     Mixes the signal to baseband at freq_hz, lowpass filters, and returns
@@ -75,7 +75,7 @@ def extract_envelope(iq, Fs, freq_hz, lpf_cutoff_hz=30.0):
         iq:             1-D complex64 array
         Fs:             Sample rate in Hz
         freq_hz:        Frequency to extract (Hz offset from DC)
-        lpf_cutoff_hz:  Lowpass filter cutoff in Hz (default: 30)
+        lpf_cutoff_hz:  Lowpass filter cutoff in Hz (default: 500)
 
     Returns:
         envelope: 1-D float32 array of power values at sample rate Fs
@@ -91,9 +91,10 @@ def extract_envelope(iq, Fs, freq_hz, lpf_cutoff_hz=30.0):
     # I/Q separately when the frequency estimate is imperfect.
     inst_power = (mixed.real**2 + mixed.imag**2).astype(np.float64)
 
-    # Moving-average lowpass filter on the power envelope.
-    # At 3840 Hz with 30 Hz cutoff → 128-sample kernel (~33 ms).
-    # This smooths out noise while preserving 15 ms pulse edges adequately.
+    # Moving-average lowpass on the power envelope. The kernel must be much
+    # shorter than the pulse (15–20 ms for typical collars) or the measured
+    # width is biased toward the kernel length. 500 Hz at 3840 Hz → 7 samples
+    # (~1.8 ms).
     kernel_len = max(int(Fs / lpf_cutoff_hz), 3)
     if kernel_len % 2 == 0:
         kernel_len += 1
@@ -175,7 +176,8 @@ def measure_pulses(power_time_series, time_step_s, threshold_db_above_noise=6.0)
     if is_on[-1]:
         fall_indices = np.concatenate((fall_indices, [len(is_on)]))
 
-    # Pair up rises and falls
+    # Pair up rises and falls. Width is measured at half of each pulse's own
+    # peak (above noise) so it is independent of SNR and threshold choice.
     pulse_widths_ms = []
     pulse_starts = []
 
@@ -187,9 +189,10 @@ def measure_pulses(power_time_series, time_step_s, threshold_db_above_noise=6.0)
         if len(falls_after) == 0:
             break
         fall = falls_after[0]
-        width_s = (fall - rise) * time_step_s
+        start_s, width_s = _half_max_width(power_time_series, rise, fall,
+                                           noise_floor, time_step_s)
         pulse_widths_ms.append(width_s * 1000.0)
-        pulse_starts.append(rise * time_step_s)
+        pulse_starts.append(start_s)
 
     # Inter-pulse intervals (start-to-start)
     intervals_s = []
@@ -219,6 +222,41 @@ def measure_pulses(power_time_series, time_step_s, threshold_db_above_noise=6.0)
         result['rep_rate_hz'] = None
 
     return result
+
+
+def _half_max_width(power, rise, fall, noise_floor, time_step_s):
+    """Return (start_s, width_s) of the pulse in [rise, fall) at half-max.
+
+    Half-max is relative to the noise floor. The peak search and the outward
+    walk are confined to [rise, fall) so a weak pulse (half-max below the
+    threshold) cannot wander into neighbouring noise; each edge crossing is
+    then linearly interpolated between the boundary sample and its neighbour
+    just outside, so start_s may land in [rise-1, rise].
+    """
+    n = len(power)
+    hi = min(fall, n)
+    peak_idx = rise + int(np.argmax(power[rise:hi]))
+    half = noise_floor + 0.5 * (power[peak_idx] - noise_floor)
+
+    def _cross(a, b):
+        # Fractional position between samples a and b where power crosses half
+        pa, pb = power[a], power[b]
+        if pb == pa:
+            return float(b)
+        return float(np.clip(a + (half - pa) / (pb - pa), a, b))
+
+    left = peak_idx
+    while left > rise and power[left - 1] >= half:
+        left -= 1
+    t_start = _cross(left - 1, left) if left > 0 else float(left)
+
+    right = peak_idx
+    last = min(fall, n) - 1
+    while right < last and power[right + 1] >= half:
+        right += 1
+    t_end = _cross(right, right + 1) if right < n - 1 else float(right)
+
+    return t_start * time_step_s, (t_end - t_start) * time_step_s
 
 
 def _empty_result():

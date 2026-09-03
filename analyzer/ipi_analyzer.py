@@ -58,13 +58,14 @@ def decode_timestamp(raw_8bytes):
 def extract_power_at_freq(iq, Fs, freq_hz, n_w, n_ol):
     """Extract power time-series at a specific frequency using STFT.
 
-    Returns (power_ts, time_step_s) where power_ts has one sample per
-    STFT window step.
+    Returns (power_ts, consumed) where power_ts has one sample per STFT
+    window step and consumed is the number of leading IQ samples fully
+    accounted for (the remainder must be carried to the next call).
     """
     n_ws = n_w - n_ol
     n_windows = (len(iq) - n_ol) // n_ws
     if n_windows < 1:
-        return np.array([], dtype=np.float32), float(n_ws) / Fs
+        return np.array([], dtype=np.float32), 0
 
     # Gather windowed segments
     starts = np.arange(n_windows) * n_ws
@@ -78,7 +79,18 @@ def extract_power_at_freq(iq, Fs, freq_hz, n_w, n_ol):
     scores = segments @ tone.conj()
     power_ts = (scores.real**2 + scores.imag**2).astype(np.float32)
 
-    return power_ts, float(n_ws) / Fs
+    return power_ts, n_windows * n_ws
+
+
+def stft_stream_step(carry, iq, Fs, freq_hz, n_w, n_ol):
+    """Run the STFT over carry+iq; return (power_ts, new_carry).
+
+    Consecutive calls produce exactly the window sequence a single call over
+    the concatenated stream would, regardless of how it is chunked.
+    """
+    buf = np.concatenate((carry, iq)) if len(carry) else iq
+    power_ts, consumed = extract_power_at_freq(buf, Fs, freq_hz, n_w, n_ol)
+    return power_ts, buf[consumed:]
 
 
 def find_peak_frequency_fft(iq, Fs, exclude_dc_hz=50.0):
@@ -104,11 +116,12 @@ class PulseEdgeTracker:
     """
 
     def __init__(self, time_step_s, threshold_db=10.0, min_pulse_windows=1,
-                 max_pulse_windows=10):
+                 max_pulse_windows=10, refractory_windows=0):
         self.time_step = time_step_s
         self.threshold_db = threshold_db
         self.min_pulse_windows = min_pulse_windows
         self.max_pulse_windows = max_pulse_windows
+        self.refractory_windows = refractory_windows
 
         self.noise_floor = None
         self.noise_alpha = 0.02
@@ -148,7 +161,9 @@ class PulseEdgeTracker:
             if self._init_count < self._init_target:
                 return
             warmup = np.concatenate(self._init_buf)
-            self.noise_floor = float(np.percentile(warmup, 25))
+            # Per-window noise power is ~exponential; median/ln2 estimates its
+            # mean robustly even when pulses are present in the warmup.
+            self.noise_floor = float(np.median(warmup)) / np.log(2.0)
             if self.noise_floor <= 0:
                 self.noise_floor = float(np.mean(warmup)) * 0.1
             self._init_buf.clear()
@@ -156,8 +171,12 @@ class PulseEdgeTracker:
             self.global_idx = len(warmup)
             return
 
-        yield from self._scan(power_ts, self.global_idx)
-        self.global_idx += len(power_ts)
+        yield from self._scan(power_ts, self.global_idx)  # _scan advances global_idx
+
+    def reset_after_gap(self):
+        """Forget the in-progress pulse so no IPI is measured across lost data."""
+        self.is_on = False
+        self.last_rise_idx = None
 
     def _scan(self, power_ts, base_idx):
         thresh = self._threshold()
@@ -169,13 +188,16 @@ class PulseEdgeTracker:
 
             if not self.is_on:
                 if val > thresh:
+                    if (self.last_rise_idx is not None
+                            and idx - self.last_rise_idx < self.refractory_windows):
+                        continue  # tail of the same pulse; ignore, keep state
+
                     self.is_on = True
                     self.on_start_idx = idx
 
                     if self.last_rise_idx is not None:
                         ipi_windows = idx - self.last_rise_idx
-                        ipi_s = ipi_windows * self.time_step
-                        yield (ipi_s, idx)
+                        yield (ipi_windows * self.time_step, idx)
 
                     self.last_rise_idx = idx
                 else:
@@ -241,9 +263,10 @@ def main():
                     help='UDP port for decimated IQ (default: 10000)')
     ap.add_argument('--fs', type=float, default=3840.0,
                     help='Decimated sample rate in Hz (default: 3840)')
-    ap.add_argument('--threshold', type=float, default=10.0,
-                    help='Pulse detection threshold in dB above noise '
-                         '(default: 10)')
+    ap.add_argument('--threshold', type=float, default=15.0,
+                    help='Pulse detection threshold in dB above mean noise; '
+                         'single-window STFT noise needs >=15 dB to avoid '
+                         'false edges (default: 15)')
     ap.add_argument('--tolerance', type=float, default=0.15,
                     help='Fractional tolerance for A/B classification '
                          '(default: 0.15)')
@@ -295,7 +318,8 @@ def main():
     # Auto-detect frequency from first N seconds of data
     freq_hz = args.freq_offset
     autodetect_buf = []
-    autodetect_samples = int(2.0 * Fs)  # 2 seconds for FFT resolution
+    # Need several pulses in the FFT for the tag to beat noise peaks
+    autodetect_samples = int(5.0 * max(tip_a, tip_b) * Fs)
     autodetect_done = freq_hz is not None
 
     tracker = PulseEdgeTracker(
@@ -303,15 +327,33 @@ def main():
         threshold_db=args.threshold,
         min_pulse_windows=1,
         max_pulse_windows=max(int(args.tp * 5.0 / time_step_s), 3),
+        # Suppresses tail re-crossings of one pulse, but also hides any real
+        # interval shorter than half the fast rate (e.g. 750 ms at 1.5 s).
+        refractory_windows=int(0.5 * min(tip_a, tip_b) / time_step_s),
     )
 
+    # Samples not yet covered by a full STFT window; carried to the next packet
+    carry = np.zeros(0, dtype=np.complex64)
+    stream_t0_ns = None  # wall-clock of the first IQ sample (STFT index 0)
+    expected_ts_ns = None  # where the next packet should start if no loss
+    # UDP loss shows up as a jump in the packet timestamp. Anything beyond one
+    # STFT step would misplace every later timestamp and shorten the IPI that
+    # spans it, so re-anchor and drop the in-progress pulse.
+    gap_tol_ns = time_step_s * 1e9
+    n_gaps = 0
+
     # Stats
-    ipi_count = 0
     counts = {'A': 0, 'B': 0, 'ANOM': 0}
     all_ipis = []
     run_start = time.monotonic()
     last_ipi_label = None
     transition_log = []  # (pulse_number, from_label, to_label, ipi_s)
+
+    def report(ipi_s, rise_idx):
+        nonlocal last_ipi_label
+        last_ipi_label = _report_ipi(
+            ipi_s, rise_idx, stream_t0_ns, time_step_s, tip_a, tip_b,
+            args.tolerance, counts, all_ipis, transition_log, last_ipi_label)
 
     print('Waiting for data ...\n')
     print(f'{"#":>5}  {"time":>8}  {"IPI (s)":>9}  {"class":>5}  '
@@ -331,11 +373,28 @@ def main():
                 ts = decode_timestamp(data[:8])
             except (struct.error, ValueError):
                 continue
+            if stream_t0_ns is None:
+                stream_t0_ns = ts
 
             payload = data[8:]
             n_samp = len(payload) // 8
             if n_samp == 0:
                 continue
+
+            if expected_ts_ns is not None and ts > 1e9:
+                gap_ns = ts - expected_ts_ns
+                if abs(gap_ns) > gap_tol_ns:
+                    n_gaps += 1
+                    print(f'  *** GAP {gap_ns / 1e6:+.1f} ms in IQ stream '
+                          f'(#{n_gaps}); next interval discarded ***',
+                          flush=True)
+                    # Keep later timestamps honest: index 0 now maps to a
+                    # later wall-clock instant by the missing span plus the
+                    # received-but-unwindowed carry we are discarding.
+                    stream_t0_ns += gap_ns + int(len(carry) / Fs * 1e9)
+                    carry = np.zeros(0, dtype=np.complex64)
+                    tracker.reset_after_gap()
+            expected_ts_ns = ts + int(n_samp / Fs * 1e9)
 
             iq = np.frombuffer(payload[:n_samp * 8],
                                dtype=np.complex64).copy()
@@ -355,50 +414,18 @@ def main():
                 autodetect_done = True
 
                 # Process the autodetect buffer through STFT power + tracker
-                power_ts, _ = extract_power_at_freq(combined, Fs, freq_hz,
-                                                    n_w, n_ol)
+                power_ts, carry = stft_stream_step(carry, combined, Fs, freq_hz,
+                                                   n_w, n_ol)
                 for ipi_s, rise_idx in tracker.process(power_ts):
-                    _report_ipi(ipi_s, rise_idx, ts, Fs, tip_a, tip_b,
-                                args.tolerance, counts, all_ipis,
-                                transition_log, last_ipi_label)
-                    ipi_count += 1
-                    last_ipi_label = classify_ipi(ipi_s, tip_a, tip_b,
-                                                  args.tolerance)
+                    report(ipi_s, rise_idx)
                 continue
 
             # Normal streaming: STFT power at target freq → edge tracker
-            power_ts, _ = extract_power_at_freq(iq, Fs, freq_hz, n_w, n_ol)
+            power_ts, carry = stft_stream_step(carry, iq, Fs, freq_hz, n_w, n_ol)
             if len(power_ts) == 0:
                 continue
             for ipi_s, rise_idx in tracker.process(power_ts):
-                ipi_count += 1
-                label = classify_ipi(ipi_s, tip_a, tip_b, args.tolerance)
-
-                # Detect transitions
-                notes = ''
-                if last_ipi_label is not None and label != last_ipi_label:
-                    notes = f'  *** {last_ipi_label}→{label} ***'
-                    transition_log.append(
-                        (ipi_count, last_ipi_label, label, ipi_s))
-
-                delta_a = ipi_s - tip_a
-                delta_b = ipi_s - tip_b
-
-                # Timestamp
-                ts_str = ''
-                if ts and ts > 1e9:
-                    # Approximate: rise_sample gives offset from stream start
-                    ts_str = datetime.datetime.fromtimestamp(
-                        ts / 1e9, tz=datetime.timezone.utc
-                    ).strftime('%H:%M:%S')
-
-                print(f'{ipi_count:5d}  {ts_str:>8}  {ipi_s:9.4f}  '
-                      f'{label:>5}  {delta_a:+9.4f}  {delta_b:+9.4f}'
-                      f'{notes}', flush=True)
-
-                counts[label] += 1
-                all_ipis.append(ipi_s)
-                last_ipi_label = label
+                report(ipi_s, rise_idx)
 
     except KeyboardInterrupt:
         pass
@@ -407,29 +434,32 @@ def main():
         sock.close()
         _print_summary(elapsed, counts, all_ipis, tip_a, tip_b,
                         transition_log)
+        if n_gaps:
+            print(f'  IQ stream gaps: {n_gaps} (one interval discarded each)\n',
+                  flush=True)
 
 
-def _report_ipi(ipi_s, rise_sample, ts, Fs, tip_a, tip_b, tolerance,
-                counts, all_ipis, transition_log, last_label):
-    """Report a single IPI (used during autodetect buffer replay)."""
+def _report_ipi(ipi_s, rise_idx, stream_t0_ns, time_step_s, tip_a, tip_b,
+                tolerance, counts, all_ipis, transition_log, last_label):
+    """Print and record one IPI. Returns its label."""
     label = classify_ipi(ipi_s, tip_a, tip_b, tolerance)
-    delta_a = ipi_s - tip_a
-    delta_b = ipi_s - tip_b
     n = len(all_ipis) + 1
     notes = ''
     if last_label is not None and label != last_label:
         notes = f'  *** {last_label}→{label} ***'
         transition_log.append((n, last_label, label, ipi_s))
     ts_str = ''
-    if ts and ts > 1e9:
+    if stream_t0_ns and stream_t0_ns > 1e9:
+        pulse_ns = stream_t0_ns + rise_idx * time_step_s * 1e9
         ts_str = datetime.datetime.fromtimestamp(
-            ts / 1e9, tz=datetime.timezone.utc
+            pulse_ns / 1e9, tz=datetime.timezone.utc
         ).strftime('%H:%M:%S')
     print(f'{n:5d}  {ts_str:>8}  {ipi_s:9.4f}  '
-          f'{label:>5}  {delta_a:+9.4f}  {delta_b:+9.4f}'
+          f'{label:>5}  {ipi_s - tip_a:+9.4f}  {ipi_s - tip_b:+9.4f}'
           f'{notes}', flush=True)
     counts[label] += 1
     all_ipis.append(ipi_s)
+    return label
 
 
 def _print_summary(elapsed, counts, all_ipis, tip_a, tip_b, transition_log):
