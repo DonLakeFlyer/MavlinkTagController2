@@ -15,6 +15,16 @@ plus four flights of manual 8-heading dwells). Tools:
 `analyzer/flight_checks.py` (log-driven, Checks 0–5) and
 `analyzer/iq_replay.py` (offline IQ replay, Check 6).
 
+**Pulse-width caveat.** All flights and the original replay ran the detector
+at `--tp 0.015`; the collar's pulse width is 19 ms. The mismatched
+rectangular window captures 15/19 of the pulse energy, so every SNR
+measured from this data is ~1.0 dB pessimistic (10·log10(15/19)). Re-running
+the replay at `--tp 0.019` confirmed the gain is that 1 dB and nothing else.
+The floor (Check 1) is unaffected — it is a max-selection artefact
+independent of pulse width, and the simulation it was compared against also
+used `--tp 0.015`, so the comparison is like-for-like. Range figures below are
+correspondingly ~6–9 % conservative; no conclusion changes.
+
 | Check | Verdict |
 |---|---|
 | 0 — slices/rotation | **Model holds.** Genuine detections cluster on 1–2 adjacent headings; the rest are floor hits. |
