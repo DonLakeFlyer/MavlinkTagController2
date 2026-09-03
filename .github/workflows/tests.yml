@@ -66,8 +66,6 @@ jobs:
       - name: Install dependencies
         run: |
           ./setup_venv.sh
-          source .venv/bin/activate
-          pip install pytest
 
       - name: Syntax check
         run: |

@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 #
-# Run the full signal analysis pipeline with Airspy HF+:
+# Run the inter-pulse-interval analyzer live against the Airspy HF+:
 #
-#   airspyhf_zeromq_rx  →  [ZMQ]  →  decimator  →  [UDP]  →  signal_analyzer.py
-#
-# The radio is tuned 10 kHz above the expected frequency so the signal
-# lands away from the DC spike in the decimated output.
+#   airspyhf_zeromq_rx  →  [ZMQ]  →  decimator  →  [UDP]  →  ipi_analyzer.py
 #
 # Usage:
-#   ./run_analyzer.sh --expected-freq 148.515
-#   ./run_analyzer.sh --expected-freq 148.515 --duration 15
+#   ./run_ipi_analyzer.sh --expected-freq 147.970 --tip-a 2.0 --tip-b 1.5 [--tp 0.019 ...]
 #
-# Stop:   Ctrl-C (kills all three processes)
+# Start with the collar still, then move it, then set it down, to see the
+# rate switch in the per-interval log.  Stop with Ctrl-C.
 #
-# All extra arguments are forwarded to signal_analyzer.py.
+# All extra arguments are forwarded to ipi_analyzer.py.
 
 set -euo pipefail
 
@@ -23,19 +20,17 @@ BUILD_DIR="$REPO_DIR/build"
 
 RX="$BUILD_DIR/airspyhf_zeromq/tools/src/airspyhf_zeromq_rx"
 DEC="$BUILD_DIR/decimator/airspyhf_decimator"
-ANALYZER="$SCRIPT_DIR/signal_analyzer.py"
+ANALYZER="$SCRIPT_DIR/ipi_analyzer.py"
 
 ZMQ_PORT=5555
 UDP_PORT=10001        # Different from detector default to allow both
 SHIFT_KHZ=10          # Tune offset to avoid DC spike
 
-# --- Activate venv if present ---
 if [ -f "$REPO_DIR/.venv/bin/activate" ]; then
     # shellcheck disable=SC1091
     source "$REPO_DIR/.venv/bin/activate"
 fi
 
-# --- Parse --expected-freq from args so we can compute radio freq ---
 EXPECTED_FREQ=""
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -57,33 +52,26 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ -z "$EXPECTED_FREQ" ]; then
-    echo "Error: --expected-freq is required (e.g. --expected-freq 148.515)" >&2
-    echo "Usage: $0 --expected-freq <MHz> [signal_analyzer.py options]" >&2
+    echo "Error: --expected-freq is required (e.g. --expected-freq 147.970)" >&2
+    echo "Usage: $0 --expected-freq <MHz> --tip-a <s> --tip-b <s> [ipi_analyzer.py options]" >&2
     exit 1
 fi
 
-# Radio tunes 10 kHz above expected so decimator --shift-khz 10 places
-# the expected frequency at DC in the decimated output, away from the
-# radio's own DC spike.
+# Radio tunes SHIFT_KHZ above expected so the decimator's shift places the
+# expected frequency at DC in the decimated output, away from the radio's DC spike.
 RADIO_FREQ=$(python3 -c 'import sys; print(f"{float(sys.argv[1]) + float(sys.argv[2]) / 1000.0:.6f}")' \
     "$EXPECTED_FREQ" "$SHIFT_KHZ" 2>/dev/null) || {
     echo "Error: --expected-freq must be numeric, got '$EXPECTED_FREQ'" >&2
     exit 1
 }
 
-# --- preflight checks ---
 for bin in "$RX" "$DEC"; do
     if [ ! -x "$bin" ]; then
         echo "Error: $bin not found or not executable. Run: cmake --build build" >&2
         exit 1
     fi
 done
-if ! command -v python3 &>/dev/null; then
-    echo "Error: python3 not found" >&2
-    exit 1
-fi
 
-# --- cleanup on exit ---
 PIDS=()
 cleanup() {
     trap - EXIT INT TERM  # run once even when INT/TERM is followed by EXIT
@@ -114,14 +102,13 @@ require_alive() {
     fi
 }
 
-echo "=== Signal Analyzer Pipeline ==="
+echo "=== IPI Analyzer Pipeline ==="
 echo "  Expected freq   ${EXPECTED_FREQ} MHz"
 echo "  Radio tuned to  ${RADIO_FREQ} MHz (+${SHIFT_KHZ} kHz offset)"
 echo "  ZMQ port        ${ZMQ_PORT}"
 echo "  UDP port        ${UDP_PORT}"
 echo ""
 
-# --- 1. airspy HF+ ZMQ reader ---
 # Log prefixes via process substitution so $! is the producer, not sed.
 echo "Starting airspyhf_zeromq_rx at ${RADIO_FREQ} MHz (ZMQ port ${ZMQ_PORT})..."
 "$RX" -f "$RADIO_FREQ" -P "$ZMQ_PORT" > >(sed 's/^/[rx]  /') 2>&1 &
@@ -130,7 +117,6 @@ PIDS+=("$RX_PID")
 sleep 1
 require_alive "$RX_PID" "airspyhf_zeromq_rx"
 
-# --- 2. decimator ---
 echo "Starting decimator (ZMQ → UDP:${UDP_PORT})..."
 "$DEC" \
     --zmq-endpoint "tcp://127.0.0.1:${ZMQ_PORT}" \
@@ -142,15 +128,14 @@ PIDS+=("$DEC_PID")
 sleep 1
 require_alive "$DEC_PID" "airspyhf_decimator"
 
-# --- 3. signal analyzer ---
-echo "Starting signal analyzer (expected ${EXPECTED_FREQ} MHz)..."
+echo "Starting IPI analyzer (expected ${EXPECTED_FREQ} MHz)..."
 echo ""
 # Backgrounded + wait so INT/TERM traps fire promptly (bash defers traps
 # while a foreground command runs).
 python3 -u "$ANALYZER" \
     --port "$UDP_PORT" \
     "${EXTRA_ARGS[@]}" \
-    > >(sed -u 's/^/[ana] /') 2>&1 &
+    > >(sed -u 's/^/[ipi] /') 2>&1 &
 ANA_PID=$!
 PIDS+=("$ANA_PID")
 # Propagate the analyzer's status (130 on Ctrl-C, nonzero on bind/arg

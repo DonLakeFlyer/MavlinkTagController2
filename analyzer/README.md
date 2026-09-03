@@ -4,8 +4,8 @@ Tools in this folder:
 
 | Tool | Input | Purpose |
 |------|-------|---------|
-| `signal_analyzer.py` (`run_analyzer.sh`) | live SDR | Measure pulse width and repetition rate of a strong signal |
-| `ipi_analyzer.py` (`run_ipi_capture.sh`) | live SDR | Inter-pulse-interval measurement |
+| `signal_analyzer.py` (`run_analyzer.sh`) | live SDR | Characterize an unknown collar: pulse width, PRI, frequency offset |
+| `ipi_analyzer.py` (`run_ipi_analyzer.sh`) | live SDR | Observe rate-switch behaviour: log every inter-pulse gap and classify it as resting / moving / anomalous |
 | `flight_checks.py` | recorded logs | Run the FLIGHT_DATA_ANALYSIS.md checks against flight logs |
 | `iq_replay.py` | raw IQ capture | Offline detector replay + fixed-offset amplitude (Check 6) |
 
@@ -83,6 +83,54 @@ On exit, prints aggregate statistics:
   Pulse width:     mean=14.82 ms  median=14.84 ms  std=0.21 ms  (n=30)
   Repetition:      mean=2.0008 s  (0.4998 Hz)  std=0.0012 s  (n=24)
 ```
+
+---
+
+# ipi_analyzer.py — Rate-Switch Observation
+
+Use this *after* `signal_analyzer.py` has told you the collar's two PRIs.
+Its job is to answer questions the K-fold detector cannot: how quickly does
+the collar switch from resting to moving rate (and back) when the animal
+starts/stops moving, and is there a partial or odd-length interval at the
+transition that the `--tip-secondary` / switch-time logic in
+`pulse_detector.py` must tolerate?
+
+Unlike `signal_analyzer.py` (fixed 10 s windows, aggregate statistics) it
+keeps a rolling buffer and prints **each individual inter-pulse interval as
+it occurs**, labelled `A` (resting), `B` (moving), or `ANOM` (matches
+neither within `--tolerance`). No pulse is lost at a window boundary, so
+transition intervals are seen exactly once. It does not measure pulse width
+or frequency beyond locating the signal.
+
+```bash
+# Collar labelled 147.970 MHz, resting 2.0 s, moving 1.5 s, 19 ms pulses
+./analyzer/run_ipi_analyzer.sh --expected-freq 147.970 --tip-a 2.0 --tip-b 1.5 --tp 0.019
+```
+
+`run_ipi_analyzer.sh` starts the SDR, decimator and analyzer (same pipeline
+as `run_analyzer.sh`) and forwards any extra arguments to `ipi_analyzer.py`.
+
+Start with the collar still, then pick it up and move it for a minute, then
+set it down and wait. The per-interval log shows the exact pulse at which
+the rate changes and how long the collar takes to fall back to resting.
+Measured on a Lotek collar (Sep 2026) the switch is clean in both
+directions — no partial interval — and the fall back to resting takes
+only a few seconds:
+
+```
+   13  19:03:32     2.0042      A
+   14  19:03:33     1.4935      B     *** A→B ***
+   15  19:03:34     1.5031      B
+   ...
+   32  19:04:01     1.5031      B
+   33  19:04:04     1.9945      A     *** B→A ***
+```
+
+A `3.0063 ANOM` (exactly 2 × 1.5 s) is a missed pulse, not a collar
+artifact — typically antenna orientation changing while the collar is
+handled.
+
+On exit it prints counts and min/max/mean per class.
 
 ---
 
