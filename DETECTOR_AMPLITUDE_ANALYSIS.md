@@ -347,19 +347,50 @@ K=20/K=40 — extending is more folding on a longer buffer, not a restart. K=40 
 an acquisition-range play (~+1–2 km); it never enters the rotation loop, because
 per-heading measurement uses the fixed-offset readout at small K regardless.
 
-### 8. On pf
+### 8. On pf — leave it at 0.05, narrow the search instead
 
-Tightening it is nearly free — and largely unnecessary once 5 and 4.3 are in
-place, since those reject false locks without costing sensitivity:
+**Recommendation: do not tighten pf.** It is the one lever here that costs
+range, and change 5 does the same job with the opposite sign.
+
+Tightening it is cheap, but it is not free:
 
 | pf | threshold | SNR for Pd=0.5 | range cost |
 |---|---|---|---|
 | 0.05 (current) | 17.73 dB | 1.32 dB | — |
 | 0.01 | 17.86 dB | 1.66 dB | −2% |
 
+0.34 dB of sensitivity. On the 1/d⁴ two-ray slope `d ∝ P^(-1/4)`, so
+`10^(-0.34/40) = 0.981` — about **−1.9%**, ~95 m at 5 km. For scale, the
+3-element Yagi upgrade rejected under "What not to change" is +3 dB for +19%
+range; this gives away a tenth of that.
+
 The threshold barely moves because the max over 116 bins has a tight Gumbel
-distribution. Monte-Carlo could not resolve the tail past 1e-2 at 200k trials, so
-treat deeper settings as "flat", not as exact figures.
+distribution — which is also why the change buys so little. Monte-Carlo could
+not resolve the tail past 1e-2 at 200k trials, so treat deeper settings as
+"flat", not as exact figures.
+
+**Change 5 is strictly the better lever.** Tightening pf raises the bar;
+narrowing the search reduces how many chances noise gets. For a max-over-bins
+statistic the threshold scales roughly as `ln(M / pf)`, so cutting M from ~116
+bins to ~12 is a *larger* move than the pf change, in the direction that
+**lowers** the threshold:
+
+| lever | false-lock reduction | threshold | range |
+|---|---|---|---|
+| pf 0.05 → 0.01 | ~5× | +0.13 dB | −2% |
+| ±200 Hz prior (change 5) | ~10× | ≈ −0.2 dB (est.) | ≈ +1% (est.) |
+
+The prior's figures are an `ln(M/pf)` scaling, not measured — treat the
+magnitude as soft and the sign as solid. Combined with the change 4
+qualification tests, false locks are handled without touching sensitivity at
+all.
+
+**Why this matters more than it looks.** Changes 1–3 decouple *bearing* quality
+from the detection threshold: measurement has no threshold, so rear headings
+report regardless of pf. But **acquisition** range — "is there a tag out here at
+all?" — still lives entirely on that threshold, and that is the K=40 long-range
+play in change 7. Sensitivity spent on false-alarm control is spent exactly
+where nothing else can recover it.
 
 ---
 
