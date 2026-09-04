@@ -24,6 +24,7 @@
 #include "TunnelProtocol.h"
 #include "MonitoredProcess.h"
 #include "formatString.h"
+#include "platformHelpers.h"
 #include "log.h"
 #include "channelizerTuner.h"
 #include "MavlinkSystem.h"
@@ -44,7 +45,7 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetry
     , _simulatorPreset  (simulatorPreset)
     , _debugDetector    (debugDetector)
 {
-    if (strcmp(_homePath, "/home/pi") == 0) {
+    if (isRunningOnRPi()) {
         // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
         // Because of this, the process fails to find the airspy_rx executable. So we need to explicitly specify
         // where the airspy executables are located.
