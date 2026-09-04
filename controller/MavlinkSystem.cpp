@@ -219,14 +219,15 @@ void MavlinkSystem::startTunnelHeartbeatSender()
             TunnelProtocol::Heartbeat_t heartbeat;
 
             heartbeat.header.command    = COMMAND_ID_HEARTBEAT;
+            heartbeat.protocol_version  = TUNNEL_PROTOCOL_VERSION;
             heartbeat.system_id         = HEARTBEAT_SYSTEM_ID_MAVLINKCONTROLLER;
-			heartbeat.status			= _heartbeatStatus;
-			heartbeat.cpu_temp_c		= _cpuTemp();
+            heartbeat.status            = _heartbeatStatus;
+            heartbeat.cpu_temp_c         = _cpuTemp();
 
             sendTunnelMessage(&heartbeat, sizeof(heartbeat));
 
             if (++heartbeatCount >= 60) {
-        		logInfo() << "Sent" << heartbeatCount << "tunnel heartbeats, status:" << _heartbeatStatus << " cpu_temp:" << heartbeat.cpu_temp_c;
+                logInfo() << "Sent" << heartbeatCount << "tunnel heartbeats, status:" << _heartbeatStatus << " cpu_temp:" << heartbeat.cpu_temp_c;
                 heartbeatCount = 0;
             }
 

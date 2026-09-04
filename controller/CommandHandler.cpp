@@ -13,6 +13,8 @@
 #include <errno.h>
 #include <spawn.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 
 #include <mavlink.h>
@@ -20,6 +22,7 @@
 #include <stdio.h>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include "CommandHandler.h"
 #include "TunnelProtocol.h"
 #include "MonitoredProcess.h"
@@ -146,18 +149,18 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
     std::string logStem     = formatString("detector_%d", tagInfo.id + (secondaryChannel ? 1 : 0));
     std::string logPath     = logFileManager->filename(LogFileManager::DETECTORS, logStem.c_str(), "log");
 
-    MonitoredProcess* detectorProc = new MonitoredProcess(
+    auto detectorProc = std::make_shared<MonitoredProcess>(
                                                 _mavlink,
                                                 "uavrt_detection",
                                                 commandStr.c_str(),
                                                 logPath.c_str(),
                                                 MonitoredProcess::NoPipe,
-                                                NULL);
+                                                nullptr);
     detectorProc->start();
     _processes.push_back(detectorProc);
 }
 
-void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram)
+void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort)
 {
     int     secondaryChannelIncrement   = secondaryChannel ? 1 : 0;
     int     tagId                       = tagInfo.id + secondaryChannelIncrement;
@@ -197,6 +200,9 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     if (_debugDetector || debugDetector) {
         commandStr += " --debug";
     }
+    if (controlPort > 0) {
+        commandStr += formatString(" --control-port %d", controlPort);
+    }
 
     // Always pass the log directory so the detector can write to it
     std::string detectorLogDir = logFileManager->logDir(LogFileManager::DETECTORS);
@@ -216,27 +222,101 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
         commandStr += formatString(" --tip-secondary %f", tipSecondary);
     }
 
-    std::string logStem;
-    {
-        std::lock_guard<std::mutex> lock(_rotationMutex);
-        logStem = _inRotation
-            ? formatString("py_detector_%d_heading-%03.0f", tagId, _currentHeadingDeg)
-            : formatString("py_detector_%d", tagId);
-    }
+    std::string logStem = formatString("py_detector_%d", tagId);
     std::string logPath = logFileManager->filename(LogFileManager::DETECTORS, logStem.c_str(), "log");
 
     logInfo() << "Starting Python pulse detector:" << commandStr;
 
     std::string procName = formatString("pulse_detector_%d", tagId);
-    MonitoredProcess* detectorProc = new MonitoredProcess(
+    auto detectorProc = std::make_shared<MonitoredProcess>(
                                                 _mavlink,
                                                 procName.c_str(),
                                                 commandStr.c_str(),
                                                 logPath.c_str(),
                                                 MonitoredProcess::NoPipe,
-                                                NULL);
+                                                nullptr,
+                                                false,
+                                                [this, tagId](int exitCode) {
+                                                    _handleDetectorProcessFailure(tagId, exitCode);
+                                                });
     detectorProc->start();
     _processes.push_back(detectorProc);
+}
+
+// session.json: the GCS request as received plus the rates/thresholds the
+// detectors were actually launched with. Consumed by analyzer/flight_checks.py.
+bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetection, AirSpyDeviceType deviceType, bool isHFMode)
+{
+    auto logFileManager = LogFileManager::instance();
+    std::string path = logFileManager->filename(LogFileManager::DETECTORS, "session", "json");
+
+    FILE* fp = fopen(path.c_str(), "w");
+    if (fp == NULL) {
+        logError() << "_writeSessionInfo fopen failed" << path << "-" << strerror(errno);
+        return false;
+    }
+
+    auto jsonNumber = [](double value) {
+        return std::isfinite(value) ? formatString("%.15g", value) : std::string("null");
+    };
+    const char* sdr = deviceType == AirSpyDeviceType::HF ? "airspyhf"
+                    : deviceType == AirSpyDeviceType::MINI ? "airspy_mini"
+                    : deviceType == AirSpyDeviceType::SIMULATOR ? "simulator" : "none";
+    const int sampleRate = isHFMode ? 3840 : 3750;
+    const double detectionMargin = startDetection.detection_margin > 0 ? startDetection.detection_margin : 0.90;
+    const double confidenceRatio = startDetection.confidence_ratio > 0 ? startDetection.confidence_ratio : 1.3;
+
+    fprintf(fp, "{\n");
+    fprintf(fp, "  \"detection_mode\": \"python\",\n");
+    fprintf(fp, "  \"sdr\": \"%s\",\n", sdr);
+    fprintf(fp, "  \"radio_center_frequency_hz\": %u,\n", startDetection.radio_center_frequency_hz);
+    fprintf(fp, "  \"gain\": %u,\n", startDetection.gain);
+    fprintf(fp, "  \"detector_sample_rate_sps\": %d,\n", sampleRate);
+    fprintf(fp, "  \"detection_margin_requested\": %s,\n", jsonNumber(startDetection.detection_margin).c_str());
+    fprintf(fp, "  \"detection_margin\": %s,\n", jsonNumber(detectionMargin).c_str());
+    fprintf(fp, "  \"confidence_ratio_requested\": %s,\n", jsonNumber(startDetection.confidence_ratio).c_str());
+    fprintf(fp, "  \"confidence_ratio\": %s,\n", jsonNumber(confidenceRatio).c_str());
+    fprintf(fp, "  \"debug_detector\": %s,\n", startDetection.debug_detector ? "true" : "false");
+    fprintf(fp, "  \"dump_spectrogram\": %s,\n", startDetection.dump_spectrogram ? "true" : "false");
+    fprintf(fp, "  \"tags\": [\n");
+
+    bool first = true;
+    for (const TagInfo_t& tag : _tagDatabase) {
+        const uint32_t kEffective = tag.k >= 2 ? tag.k : 5; // mirrors _startPythonDetector
+        fprintf(fp, "%s    {\n", first ? "" : ",\n");
+        first = false;
+        fprintf(fp, "      \"id\": %u,\n", tag.id);
+        fprintf(fp, "      \"frequency_hz\": %u,\n", tag.frequency_hz);
+        fprintf(fp, "      \"pulse_width_msecs\": %u,\n", tag.pulse_width_msecs);
+        fprintf(fp, "      \"intra_pulse1_msecs\": %u,\n", tag.intra_pulse1_msecs);
+        fprintf(fp, "      \"intra_pulse2_msecs\": %u,\n", tag.intra_pulse2_msecs);
+        fprintf(fp, "      \"intra_pulse_uncertainty_msecs\": %u,\n", tag.intra_pulse_uncertainty_msecs);
+        fprintf(fp, "      \"intra_pulse_jitter_msecs\": %u,\n", tag.intra_pulse_jitter_msecs);
+        fprintf(fp, "      \"k_requested\": %u,\n", tag.k);
+        fprintf(fp, "      \"k\": %u,\n", kEffective);
+        fprintf(fp, "      \"false_alarm_probability\": %s,\n", jsonNumber(tag.false_alarm_probability).c_str());
+        fprintf(fp, "      \"channelizer_channel_number\": %u,\n", tag.channelizer_channel_number);
+        fprintf(fp, "      \"channelizer_channel_center_frequency_hz\": %u,\n", tag.channelizer_channel_center_frequency_hz);
+        fprintf(fp, "      \"ip1_mu\": %s,\n", jsonNumber(tag.ip1_mu).c_str());
+        fprintf(fp, "      \"ip1_sigma\": %s,\n", jsonNumber(tag.ip1_sigma).c_str());
+        fprintf(fp, "      \"ip2_mu\": %s,\n", jsonNumber(tag.ip2_mu).c_str());
+        fprintf(fp, "      \"ip2_sigma\": %s\n", jsonNumber(tag.ip2_sigma).c_str());
+        fprintf(fp, "    }");
+    }
+    fprintf(fp, "\n  ]\n}\n");
+    const bool writeError = ferror(fp) != 0;
+    const bool closeError = fclose(fp) != 0;
+    if (writeError || closeError) {
+        logError() << "_writeSessionInfo write failed" << path << "-" << strerror(errno);
+        return false;
+    }
+
+    std::ifstream in(path);
+    std::stringstream contents;
+    contents << in.rdbuf();
+    logInfo() << "SESSION INFO:" << path;
+    logInfo() << contents.str();
+    return true;
 }
 
 std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel)
@@ -270,16 +350,17 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
     // Freeze before the log dir is named and before DETECTING is published, so a
     // concurrent stop cannot unfreeze and then be re-frozen by this start.
     _mavlink->setVehicleTimeFrozen(true);
-    {
-        std::lock_guard<std::mutex> lock(_rotationMutex);
-        if (_inRotation) {
-            logFileManager->detectorsStarted(_currentHeadingDeg);
-        } else {
-            logFileManager->detectorsStarted();
-        }
-    }
+    logFileManager->detectorsStarted();
     bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
-    if (!_tagDatabase.writeDetectorConfigs(isHFMode)) {
+    StartDetectionInfo_t requestedStart {};
+    memcpy(&requestedStart, tunnel.payload, sizeof(requestedStart));
+    if (requestedStart.detection_mode == DETECTION_MODE_PYTHON) {
+        // The Python detector is configured entirely via CLI; the legacy .config
+        // files are only read by uavrt_detection. Record the request instead.
+        if (!_writeSessionInfo(requestedStart, deviceType, isHFMode)) {
+            _mavlink->sendStatusText("Write session info failed", MAV_SEVERITY_ALERT);
+        }
+    } else if (!_tagDatabase.writeDetectorConfigs(isHFMode)) {
         logError() << "CommandHandler::_handleEndTags: writeDetectorConfigs failed";
         _mavlink->sendStatusText("Write Detector Configs failed", MAV_SEVERITY_ALERT);
     }
@@ -315,13 +396,13 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
 
                 logPath = logFileManager->filename(LogFileManager::DETECTORS, "iq_simulator", "log");
-                MonitoredProcess* simProc = new MonitoredProcess(
+                auto simProc = std::make_shared<MonitoredProcess>(
                                                         _mavlink,
                                                         "iq_simulator",
                                                         commandStr.c_str(),
                                                         logPath.c_str(),
                                                         MonitoredProcess::NoPipe,
-                                                        NULL);
+                                                        nullptr);
                 simProc->start();
                 _processes.push_back(simProc);
 
@@ -330,13 +411,13 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 commandStr = formatString("%s/repos/MavlinkTagController2/build/decimator/airspyhf_decimator --input-rate 768000 --shift-khz 0 --ports 10000,10001",
                                     _homePath);
                 logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
-                MonitoredProcess* decimatorProc = new MonitoredProcess(
+                auto decimatorProc = std::make_shared<MonitoredProcess>(
                                                         _mavlink,
                                                         "airspyhf_decimator",
                                                         commandStr.c_str(),
                                                         logPath.c_str(),
                                                         MonitoredProcess::NoPipe,
-                                                        NULL);
+                                                        nullptr);
                 decimatorProc->start();
                 _processes.push_back(decimatorProc);
             } else if (deviceType == AirSpyDeviceType::HF) {
@@ -355,13 +436,13 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
 
                 logPath     = logFileManager->filename(LogFileManager::DETECTORS, airspyReceiverProcessName.c_str(), "log");
-                MonitoredProcess* airspyProc = new MonitoredProcess(
+                auto airspyProc = std::make_shared<MonitoredProcess>(
                                                         _mavlink,
                                                         airspyReceiverProcessName.c_str(),
                                                         commandStr.c_str(),
                                                         logPath.c_str(),
                                                         MonitoredProcess::NoPipe,
-                                                        NULL);
+                                                        nullptr);
                 airspyProc->start();
                 _processes.push_back(airspyProc);
 
@@ -372,13 +453,13 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                                     _homePath,
                                     hfFrequencyShiftKhz);
                 logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
-                MonitoredProcess* decimatorProc = new MonitoredProcess(
+                auto decimatorProc = std::make_shared<MonitoredProcess>(
                                                         _mavlink,
                                                         "airspyhf_decimator",
                                                         commandStr.c_str(),
                                                         logPath.c_str(),
                                                         MonitoredProcess::NoPipe,
-                                                        NULL);
+                                                        nullptr);
                 decimatorProc->start();
                 _processes.push_back(decimatorProc);
             } else {
@@ -399,7 +480,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
 
                 logPath     = logFileManager->filename(LogFileManager::DETECTORS, airspyReceiverProcessName.c_str(), "log");
-                MonitoredProcess* airspyProc = new MonitoredProcess(
+                auto airspyProc = std::make_shared<MonitoredProcess>(
                                                         _mavlink,
                                                         airspyReceiverProcessName.c_str(),
                                                         commandStr.c_str(),
@@ -410,7 +491,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 _processes.push_back(airspyProc);
 
                 logPath = logFileManager->filename(LogFileManager::DETECTORS, "csdr-uavrt", "log");
-                MonitoredProcess* csdrProc = new MonitoredProcess(
+                auto csdrProc = std::make_shared<MonitoredProcess>(
                                                         _mavlink,
                                                         "csdr-uavrt",
                                                         "csdr-uavrt fir_decimate_cc 8 0.05 HAMMING",
@@ -426,13 +507,13 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                                     airspyChannelizeExecutable.c_str(),
                                     _tagDatabase.channelizerCommandLine().c_str());
                 logPath = logFileManager->filename(LogFileManager::DETECTORS, airspyChannelizeProcessName.c_str(), "log");
-                MonitoredProcess* channelizeProc = new MonitoredProcess(
+                auto channelizeProc = std::make_shared<MonitoredProcess>(
                                                             _mavlink,
                                                             airspyChannelizeProcessName.c_str(),
                                                             commandStr.c_str(),
                                                             logPath.c_str(),
                                                             MonitoredProcess::NoPipe,
-                                                            NULL);
+                                                            nullptr);
                 channelizeProc->start();
                 _processes.push_back(channelizeProc);
             }
@@ -460,7 +541,15 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
                 // --tip-secondary, so only launch once per tag.
                 bool debugDet = (startDetection.debug_detector != 0);
                 bool dumpSpec = (startDetection.dump_spectrogram != 0);
-                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio, debugDet, dumpSpec);
+                int controlPort = 0;
+                {
+                    std::lock_guard<std::mutex> lock(_rotationMutex);
+                    const auto it = _detectorControlPorts.find(tagInfo.id);
+                    if (it != _detectorControlPorts.end()) {
+                        controlPort = it->second;
+                    }
+                }
+                _startPythonDetector(logFileManager, tagInfo, false /* secondaryChannel */, isHFMode, detectionMargin, confidenceRatio, debugDet, dumpSpec, controlPort);
             } else {
                 _startDetector(logFileManager, tagInfo, false /* secondaryChannel */);
                 if (tagInfo.intra_pulse2_msecs != 0) {
@@ -570,8 +659,16 @@ bool CommandHandler::_handleStopDetection(bool waitForCompletion)
     }
 
     std::thread stopThread([this, inRotation]() {
-        for (MonitoredProcess* process: _processes) {
-            process->stop();
+        // Signal all first so the exits overlap, then share one deadline so
+        // several hung children cost one timeout total, not one each.
+        for (const auto& process : _processes) {
+            process->terminate();
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        for (const auto& process : _processes) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            process->waitForExit(std::max(remaining, std::chrono::milliseconds(0)));
         }
         _processes.clear();
 
@@ -613,13 +710,15 @@ bool CommandHandler::_handleStopDetection(bool waitForCompletion)
     return true;
 }
 
-void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo)
+void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t collectionId, uint32_t sliceId)
 {
     PulseInfo_t pulseInfo;
 
     memset(&pulseInfo, 0, sizeof(pulseInfo));
 
     pulseInfo.header.command                = COMMAND_ID_PULSE;
+    pulseInfo.collection_id                 = collectionId;
+    pulseInfo.slice_id                      = sliceId;
     pulseInfo.tag_id                        = (uint32_t)udpPulseInfo.tag_id;
     pulseInfo.frequency_hz                  = (uint32_t)udpPulseInfo.frequency_hz;
 
@@ -717,11 +816,12 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo)
 
     _mavlink->sendTunnelMessage(&pulseInfo, sizeof(pulseInfo));
 
-    // Rotation mode: auto-stop detection after any non-heartbeat result for this heading
-    bool shouldAutoStop = false;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
-        if (_inRotation && !_rotationAutoStopping
+        if (_inRotation
+            && _collectionCoordinator.state() == CollectionCoordinator::State::CollectingSlice
+            && _collectionCoordinator.collectionId() == collectionId
+            && _collectionCoordinator.sliceId() == sliceId
             && pulseInfo.frequency_hz != 0) {
 
             // Store slice data for pulses (both confirmed and low-confidence)
@@ -744,146 +844,454 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo)
             } else {
                 logInfo() << "Rotation no-detection at heading:" << _currentHeadingDeg;
             }
-
-            _rotationAutoStopping = true;
-            shouldAutoStop = true;
         }
-    }
-    if (shouldAutoStop) {
-        _handleStopDetection();
     }
 }
 
-std::string CommandHandler::_handleStartRotationDetection(const mavlink_tunnel_t& tunnel)
+void CommandHandler::handlePythonDetectorMessage(
+    const TagTrackerDetectorProtocol::Header& header,
+    const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
+    uint32_t errorCode)
 {
-    if (tunnel.payload_length != sizeof(StartRotationDetection_t)) {
-        logError() << "COMMAND_ID_START_ROTATION_DETECTION - ERROR: Payload length incorrect expected:actual"
-                   << sizeof(StartRotationDetection_t) << tunnel.payload_length;
+    using TagTrackerDetectorProtocol::MessageType;
+
+    const auto messageType = static_cast<MessageType>(header.message_type);
+    if (messageType == MessageType::Heartbeat) {
+        UDPPulseInfo_T heartbeat {};
+        heartbeat.tag_id = header.tag_id;
+        handlePulse(heartbeat);
+        return;
+    }
+
+    if (messageType == MessageType::Ready) {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        if (_collectionCoordinator.state() == CollectionCoordinator::State::Starting) {
+            const auto result = _collectionCoordinator.detectorReady(
+                _collectionCoordinator.collectionId(), header.tag_id);
+            if (result == CollectionCoordinator::Result::Accepted
+                && _collectionCoordinator.state() == CollectionCoordinator::State::Ready) {
+                _collectionReady.notify_all();
+            }
+        }
+        return;
+    }
+
+    if (messageType == MessageType::Armed) {
+        bool allArmed = false;
+        {
+            std::lock_guard<std::mutex> lock(_rotationMutex);
+            const auto result = _collectionCoordinator.detectorArmed(
+                header.collection_id, header.slice_id, header.tag_id);
+            // Duplicate ARMEDs come from a re-ARM after the GCS missed our
+            // SLICE_ARMED; replay it so the retry can complete.
+            allArmed = (result == CollectionCoordinator::Result::Accepted
+                        || result == CollectionCoordinator::Result::Duplicate)
+                && _collectionCoordinator.sliceArmed();
+        }
+        if (allArmed) {
+            _sendCollectionStatus(header.collection_id, header.slice_id,
+                                  COLLECTION_STATUS_SLICE_ARMED);
+        }
+        return;
+    }
+
+    if (messageType == MessageType::CycleComplete) {
+        bool sliceComplete = false;
+        {
+            std::lock_guard<std::mutex> lock(_rotationMutex);
+            const auto result = _collectionCoordinator.completeDetector(
+                header.collection_id, header.slice_id, header.tag_id);
+            sliceComplete = result == CollectionCoordinator::Result::Accepted
+                && _collectionCoordinator.state() == CollectionCoordinator::State::Ready;
+        }
+        if (sliceComplete) {
+            _sendCollectionStatus(header.collection_id, header.slice_id,
+                                  COLLECTION_STATUS_SLICE_COMPLETE);
+        }
+        return;
+    }
+
+    if (messageType == MessageType::Failed) {
+        {
+            std::lock_guard<std::mutex> lock(_rotationMutex);
+            if (_collectionCoordinator.state() != CollectionCoordinator::State::CollectingSlice
+                || _collectionCoordinator.collectionId() != header.collection_id
+                || _collectionCoordinator.sliceId() != header.slice_id) {
+                logWarn() << "Ignoring stale Python detector failure, collection:"
+                          << header.collection_id << "slice:" << header.slice_id
+                          << "tag:" << header.tag_id;
+                return;
+            }
+        }
+        _sendCollectionStatus(header.collection_id, header.slice_id,
+                              COLLECTION_STATUS_FAILED, errorCode);
+        return;
+    }
+
+    if (messageType != MessageType::Pulse && messageType != MessageType::NoDetection) {
+        logDebug() << "Python detector lifecycle message type:" << header.message_type
+                   << "collection:" << header.collection_id << "slice:" << header.slice_id
+                   << "tag:" << header.tag_id;
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        // Standalone START_DETECTION (no collection) reports with ids (0, 0);
+        // only collection traffic is subject to the stale-slice check.
+        const bool standalone = !_inRotation
+            && header.collection_id == 0 && header.slice_id == 0;
+        if (!standalone
+            && (_collectionCoordinator.state() != CollectionCoordinator::State::CollectingSlice
+                || _collectionCoordinator.collectionId() != header.collection_id
+                || _collectionCoordinator.sliceId() != header.slice_id)) {
+            logWarn() << "Ignoring stale Python detector result, collection:"
+                      << header.collection_id << "slice:" << header.slice_id
+                      << "tag:" << header.tag_id;
+            return;
+        }
+    }
+
+    if (pulsePayload == nullptr) {
+        logError() << "Python detector pulse message missing payload";
+        return;
+    }
+
+    UDPPulseInfo_T pulse {};
+    pulse.tag_id = header.tag_id;
+    pulse.frequency_hz = pulsePayload->frequency_hz;
+    pulse.start_time_seconds = pulsePayload->start_time_seconds;
+    pulse.predict_next_start_seconds = pulsePayload->predict_next_start_seconds;
+    pulse.snr = pulsePayload->snr;
+    pulse.stft_score = pulsePayload->score_ratio;
+    pulse.group_seq_counter = pulsePayload->group_seq_counter;
+    pulse.group_ind = pulsePayload->group_ind;
+    pulse.group_snr = pulsePayload->group_snr;
+    pulse.detection_status = pulsePayload->detection_status;
+    pulse.confirmed_status = pulsePayload->confirmed_status;
+    pulse.noise_psd = pulsePayload->noise_psd;
+    handlePulse(pulse, header.collection_id, header.slice_id);
+}
+
+void CommandHandler::_handleDetectorProcessFailure(uint32_t tagId, int exitCode)
+{
+    uint32_t collectionId = 0;
+    uint32_t sliceId = 0;
+    uint32_t expectedDetectors = 0;
+    uint32_t completedDetectors = 0;
+    bool notifyStartup = false;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        const auto state = _collectionCoordinator.state();
+        if (state == CollectionCoordinator::State::Inactive) {
+            return;
+        }
+        collectionId = _collectionCoordinator.collectionId();
+        sliceId = _collectionCoordinator.sliceId();
+        // Snapshot before cancel(): it resets the counts the status reports.
+        expectedDetectors = static_cast<uint32_t>(_collectionCoordinator.expectedDetectorCount());
+        completedDetectors = static_cast<uint32_t>(_collectionCoordinator.completedDetectorCount());
+        if (state == CollectionCoordinator::State::Starting) {
+            _collectionCoordinator.cancel(collectionId);
+            notifyStartup = true;
+        }
+    }
+
+    if (notifyStartup) {
+        _collectionReady.notify_all();
+    }
+
+    logError() << "Python detector process failed, tag:" << tagId
+               << "exit code:" << exitCode << "collection:" << collectionId
+               << "slice:" << sliceId;
+    _sendCollectionStatus(
+        collectionId,
+        sliceId,
+        COLLECTION_STATUS_FAILED,
+        static_cast<uint32_t>(TagTrackerDetectorProtocol::ErrorCode::ProcessFailed),
+        expectedDetectors,
+        completedDetectors);
+}
+
+std::string CommandHandler::_handleStartCollection(const mavlink_tunnel_t& tunnel)
+{
+    if (tunnel.payload_length != sizeof(StartCollection_t)) {
         return "Payload length incorrect";
     }
 
-    if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
-        logError() << "COMMAND_ID_START_ROTATION_DETECTION - ERROR: Controller in incorrect state - heartbeatStatus:"
-                   << _mavlink->heartbeatStatus();
-        return "Controller in incorrect state";
+    StartCollection_t collectionInfo {};
+    memcpy(&collectionInfo, tunnel.payload, sizeof(collectionInfo));
+    // These reach the detector CLI verbatim; inf/nan would silently disable detection.
+    if (!std::isfinite(collectionInfo.detection_margin)
+        || !std::isfinite(collectionInfo.confidence_ratio)) {
+        return "Detection thresholds must be finite";
     }
 
-    StartRotationDetection_t rotationInfo;
-    memcpy(&rotationInfo, tunnel.payload, sizeof(rotationInfo));
+    std::vector<uint32_t> tagIds;
+    for (const TagInfo_t& tagInfo : _tagDatabase) {
+        tagIds.push_back(tagInfo.id);
+    }
 
-    // Store detection params for per-heading StartDetection calls
+    bool startPipeline = false;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
-        memset(&_rotationStartDetection, 0, sizeof(_rotationStartDetection));
-        _rotationStartDetection.header.command              = COMMAND_ID_START_DETECTION;
-        _rotationStartDetection.radio_center_frequency_hz   = rotationInfo.radio_center_frequency_hz;
-        _rotationStartDetection.gain                        = 0;
-        _rotationStartDetection.detection_mode              = DETECTION_MODE_PYTHON;
-        _rotationStartDetection.detection_margin            = rotationInfo.detection_margin;
-        _rotationStartDetection.confidence_ratio            = rotationInfo.confidence_ratio;
-        _rotationStartDetection.debug_detector              = rotationInfo.debug_detector;
-        _rotationStartDetection.dump_spectrogram             = rotationInfo.dump_spectrogram;
-
-        _inRotation             = true;
-        _currentHeadingDeg      = 0;
-        _rotationAutoStopping   = false;
-        _rotationSlices.clear();
+        const auto result = _collectionCoordinator.start(collectionInfo.collection_id, tagIds);
+        if (result == CollectionCoordinator::Result::Conflict) {
+            return "Another collection is active";
+        }
+        if (result != CollectionCoordinator::Result::Duplicate) {
+            if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
+                _collectionCoordinator.cancel(collectionInfo.collection_id);
+                return "Controller in incorrect state";
+            }
+            _detectorControlPorts.clear();
+            for (size_t index = 0; index < tagIds.size(); ++index) {
+                _detectorControlPorts[tagIds[index]] = kDetectorControlPortBase + static_cast<int>(index);
+            }
+            _inRotation = true;
+            _currentHeadingDeg = 0;
+            _rotationSlices.clear();
+            startPipeline = true;
+        }
     }
 
-    _mavlink->setVehicleTimeFrozen(true);
+    if (startPipeline) {
+        _mavlink->setVehicleTimeFrozen(true);
+        auto logFileManager = LogFileManager::instance();
+        logFileManager->rotationStarted();
 
-    auto logFileManager = LogFileManager::instance();
-    logFileManager->rotationStarted();
+        StartDetectionInfo_t startDetection {};
+        startDetection.header.command = COMMAND_ID_START_DETECTION;
+        startDetection.radio_center_frequency_hz = collectionInfo.radio_center_frequency_hz;
+        startDetection.detection_mode = DETECTION_MODE_PYTHON;
+        startDetection.detection_margin = collectionInfo.detection_margin;
+        startDetection.confidence_ratio = collectionInfo.confidence_ratio;
+        startDetection.debug_detector = collectionInfo.debug_detector;
+        startDetection.dump_spectrogram = collectionInfo.dump_spectrogram;
 
-    logInfo() << "COMMAND_ID_START_ROTATION_DETECTION:"
-              << " center_freq_hz:" << rotationInfo.radio_center_frequency_hz
-              << " n_slices:" << rotationInfo.n_slices
-              << " detection_margin:" << rotationInfo.detection_margin
-              << " confidence_ratio:" << rotationInfo.confidence_ratio
-              << " debug_detector:" << rotationInfo.debug_detector;
+        mavlink_tunnel_t syntheticTunnel {};
+        syntheticTunnel.payload_length = sizeof(startDetection);
+        memcpy(syntheticTunnel.payload, &startDetection, sizeof(startDetection));
+        const std::string startError = _handleStartDetection(syntheticTunnel);
+        if (!startError.empty()) {
+            std::lock_guard<std::mutex> lock(_rotationMutex);
+            _collectionCoordinator.cancel(collectionInfo.collection_id);
+            _detectorControlPorts.clear();
+            _inRotation = false;
+            logFileManager->rotationStopped();
+            _mavlink->setVehicleTimeFrozen(false);
+            return startError;
+        }
+    }
 
+    // A retried START_COLLECTION may arrive mid-slice; any established state
+    // (Ready or CollectingSlice) means the collection is up. Only Starting
+    // still needs the detectors' READY.
+    auto isEstablished = [this]() {
+        const auto state = _collectionCoordinator.state();
+        return state == CollectionCoordinator::State::Ready
+            || state == CollectionCoordinator::State::CollectingSlice;
+    };
+    std::unique_lock<std::mutex> lock(_rotationMutex);
+    const bool ready = _collectionReady.wait_for(
+        lock, std::chrono::seconds(30), [this, &isEstablished, collectionId = collectionInfo.collection_id]() {
+            return _collectionCoordinator.collectionId() != collectionId || isEstablished();
+        });
+    if (!ready || !isEstablished()) {
+        _collectionCoordinator.cancel(collectionInfo.collection_id);
+        _detectorControlPorts.clear();
+        lock.unlock();
+        logError() << "Collection startup timed out waiting for detector READY messages";
+        const auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (_detectionStarting.load() && std::chrono::steady_clock::now() < startDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (_mavlink->heartbeatStatus() == HEARTBEAT_STATUS_DETECTING) {
+            _handleStopDetection(true);
+        }
+        {
+            std::lock_guard<std::mutex> cleanupLock(_rotationMutex);
+            _inRotation = false;
+        }
+        LogFileManager::instance()->rotationStopped();
+        _mavlink->setVehicleTimeFrozen(false);
+        return "Detector startup timed out";
+    }
+
+    logInfo() << "Collection ready: id:" << collectionInfo.collection_id
+              << "detectors:" << tagIds.size() << "slices:" << collectionInfo.n_slices;
     return "";
 }
 
-std::string CommandHandler::_handleStartDetectionAtHeading(const mavlink_tunnel_t& tunnel)
+bool CommandHandler::_sendDetectorControl(
+    uint32_t tagId, const TagTrackerDetectorProtocol::ArmMessage& message)
 {
+    int controlPort = 0;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
-        if (!_inRotation) {
-            logError() << "COMMAND_ID_START_DETECTION_AT_HEADING - ERROR: Not in rotation mode";
-            return "Not in rotation mode";
+        const auto it = _detectorControlPorts.find(tagId);
+        if (it == _detectorControlPorts.end()) {
+            return false;
         }
+        controlPort = it->second;
     }
 
-    if (tunnel.payload_length != sizeof(StartDetectionAtHeading_t)) {
-        logError() << "COMMAND_ID_START_DETECTION_AT_HEADING - ERROR: Payload length incorrect expected:actual"
-                   << sizeof(StartDetectionAtHeading_t) << tunnel.payload_length;
+    const int socketFd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (socketFd < 0) {
+        logError() << "Failed to create detector control socket:" << strerror(errno);
+        return false;
+    }
+    sockaddr_in address {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(controlPort);
+    const auto sent = sendto(socketFd, &message, sizeof(message), 0,
+                             reinterpret_cast<sockaddr*>(&address), sizeof(address));
+    close(socketFd);
+    if (sent != sizeof(message)) {
+        logError() << "Failed to send detector ARM for tag:" << tagId
+                   << "port:" << controlPort << "error:" << strerror(errno);
+        return false;
+    }
+    return true;
+}
+
+void CommandHandler::_sendCollectionStatus(
+    uint32_t collectionId, uint32_t sliceId, uint32_t status, uint32_t errorCode,
+    std::optional<uint32_t> expectedDetectors, std::optional<uint32_t> completedDetectors)
+{
+    CollectionStatus_t message {};
+    message.header.command = COMMAND_ID_COLLECTION_STATUS;
+    message.collection_id = collectionId;
+    message.slice_id = sliceId;
+    message.status = status;
+    message.error_code = errorCode;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        message.expected_detectors = expectedDetectors.value_or(
+            static_cast<uint32_t>(_collectionCoordinator.expectedDetectorCount()));
+        message.completed_detectors = completedDetectors.value_or(
+            static_cast<uint32_t>(_collectionCoordinator.completedDetectorCount()));
+    }
+    _mavlink->sendTunnelMessage(&message, sizeof(message));
+}
+
+std::string CommandHandler::_handleStartCollectionSlice(const mavlink_tunnel_t& tunnel)
+{
+    if (tunnel.payload_length != sizeof(StartCollectionSlice_t)) {
         return "Payload length incorrect";
     }
 
-    StartDetectionAtHeading_t headingInfo;
-    memcpy(&headingInfo, tunnel.payload, sizeof(headingInfo));
-
-    mavlink_tunnel_t syntheticTunnel;
+    StartCollectionSlice_t sliceInfo {};
+    memcpy(&sliceInfo, tunnel.payload, sizeof(sliceInfo));
+    // Reject before touching state: NaN would never match as a duplicate and
+    // later indexes the antenna pattern table in BearingCalculator.
+    if (!std::isfinite(sliceInfo.heading_deg)) {
+        return "Heading is not a finite number";
+    }
+    bool replayComplete = false;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
-        _currentHeadingDeg      = headingInfo.heading_deg;
-        _rotationAutoStopping   = false;
-
-        logInfo() << "COMMAND_ID_START_DETECTION_AT_HEADING: heading:" << _currentHeadingDeg;
-
-        // Construct synthetic StartDetection tunnel for the existing handler
-        memset(&syntheticTunnel, 0, sizeof(syntheticTunnel));
-        syntheticTunnel.payload_length = sizeof(StartDetectionInfo_t);
-        memcpy(syntheticTunnel.payload, &_rotationStartDetection, sizeof(StartDetectionInfo_t));
+        const auto result = _collectionCoordinator.armSlice(
+            sliceInfo.collection_id, sliceInfo.slice_id, sliceInfo.heading_deg);
+        replayComplete = result == CollectionCoordinator::Result::AlreadyComplete;
+        // Duplicate falls through: ARM/ARMED are single UDP datagrams, so a GCS
+        // retry must resend ARM or a lost one leaves the slice stuck forever.
+        if (!replayComplete
+            && result != CollectionCoordinator::Result::Accepted
+            && result != CollectionCoordinator::Result::Duplicate) {
+            return result == CollectionCoordinator::Result::Busy
+                ? "Previous slice is still active" : "Invalid collection or slice id";
+        }
+        if (!replayComplete) {
+            _currentHeadingDeg = sliceInfo.heading_deg;
+        }
+    }
+    if (replayComplete) {
+        // The GCS missed our SLICE_COMPLETE; replay it without re-arming.
+        _sendCollectionStatus(sliceInfo.collection_id, sliceInfo.slice_id,
+                              COLLECTION_STATUS_SLICE_COMPLETE);
+        return "";
     }
 
-    return _handleStartDetection(syntheticTunnel);
-}
-
-std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t& /* tunnel */)
-{
-    {
-        std::lock_guard<std::mutex> lock(_rotationMutex);
-        if (!_inRotation) {
-            logError() << "COMMAND_ID_STOP_ROTATION_DETECTION - ERROR: Not in rotation mode";
-            return "Not in rotation mode";
+    for (const TagInfo_t& tagInfo : _tagDatabase) {
+        TagTrackerDetectorProtocol::ArmMessage arm {};
+        arm.header.magic = TagTrackerDetectorProtocol::kMagic;
+        arm.header.message_type = static_cast<uint16_t>(TagTrackerDetectorProtocol::MessageType::Arm);
+        arm.header.payload_length = sizeof(arm.payload);
+        arm.header.collection_id = sliceInfo.collection_id;
+        arm.header.slice_id = sliceInfo.slice_id;
+        arm.header.tag_id = tagInfo.id;
+        arm.payload.heading_deg = sliceInfo.heading_deg;
+        if (!_sendDetectorControl(tagInfo.id, arm)) {
+            _sendCollectionStatus(sliceInfo.collection_id, sliceInfo.slice_id,
+                                  COLLECTION_STATUS_FAILED);
+            return "Failed to arm detector";
         }
     }
 
-    // A heading start may still be launching processes; wait for it to publish
-    // DETECTING so the stop below actually tears those processes down.
+    logInfo() << "Collection slice armed: collection:" << sliceInfo.collection_id
+              << "slice:" << sliceInfo.slice_id << "heading:" << sliceInfo.heading_deg;
+    return "";
+}
+
+std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunnel)
+{
+    if (tunnel.payload_length != sizeof(FinishCollection_t)) {
+        return "Payload length incorrect";
+    }
+
+    FinishCollection_t finishInfo {};
+    memcpy(&finishInfo, tunnel.payload, sizeof(finishInfo));
+    const bool finalize = finishInfo.disposition == COLLECTION_FINISH_FINALIZE;
+    if (!finalize && finishInfo.disposition != COLLECTION_FINISH_CANCEL) {
+        return "Invalid finish disposition";
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        const auto result = finalize
+            ? _collectionCoordinator.finalize(finishInfo.collection_id)
+            : _collectionCoordinator.cancel(finishInfo.collection_id);
+        if (result == CollectionCoordinator::Result::Duplicate) {
+            return "";
+        }
+        if (result != CollectionCoordinator::Result::Accepted) {
+            return result == CollectionCoordinator::Result::Busy
+                ? "Collection slice is still active" : "Collection id is not active";
+        }
+    }
+
     const auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     while (_detectionStarting.load() && std::chrono::steady_clock::now() < startDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     if (_detectionStarting.load()) {
-        // Leave rotation active so the operator can retry once startup settles.
-        logError() << "COMMAND_ID_STOP_ROTATION_DETECTION - ERROR: detection start still in progress";
         return "Detection start still in progress; retry";
     }
-
-    // Stop any running detection while _inRotation is still true so the
-    // stop-detection thread skips unfreezing time and post-flight analysis
-    // (rotation handles both after bearing computation). Wait for teardown
-    // so the detectors' .jsonl files are complete before analysis reads them.
     if (_mavlink->heartbeatStatus() == HEARTBEAT_STATUS_DETECTING) {
-        _handleStopDetection(true /* waitForCompletion */);
+        _handleStopDetection(true);
     }
 
-    // Snapshot only after teardown so a final pulse delivered mid-stop is kept.
     std::vector<RotationSlice> slicesCopy;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
         slicesCopy = std::move(_rotationSlices);
         _rotationSlices.clear();
+        _detectorControlPorts.clear();
         _inRotation = false;
     }
-
     _mavlink->setVehicleTimeFrozen(false);
 
-    logInfo() << "COMMAND_ID_STOP_ROTATION_DETECTION: computing bearing from"
-              << slicesCopy.size() << "slices";
+    auto logFileManager = LogFileManager::instance();
+    if (!finalize) {
+        logFileManager->rotationStopped();
+        _sendCollectionStatus(finishInfo.collection_id, 0, COLLECTION_STATUS_STOPPED);
+        return "";
+    }
+
+    logInfo() << "Finishing collection" << finishInfo.collection_id << "with"
+              << slicesCopy.size() << "detection results";
 
     // Compute bearing per tag
     BearingCalculator calculator;
@@ -894,7 +1302,6 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
     auto results = calculator.solve();
 
     // Send bearing results to GCS and log
-    auto logFileManager = LogFileManager::instance();
     std::ofstream bearingLog;
     if (logFileManager->rotationActive()) {
         std::string logPath = logFileManager->filename(LogFileManager::ROTATION, "bearing_result", "log");
@@ -924,6 +1331,7 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
         BearingResult_t bearingResult;
         memset(&bearingResult, 0, sizeof(bearingResult));
         bearingResult.header.command    = COMMAND_ID_BEARING_RESULT;
+        bearingResult.collection_id     = finishInfo.collection_id;
         bearingResult.tag_id            = result.tag_id;
         bearingResult.bearing_deg       = result.bearing_deg;
         bearingResult.r_squared         = result.r_squared;
@@ -965,6 +1373,8 @@ std::string CommandHandler::_handleStopRotationDetection(const mavlink_tunnel_t&
     if (!rotLogDir.empty()) {
         _runPostFlightAnalysis(rotLogDir);
     }
+
+    _sendCollectionStatus(finishInfo.collection_id, 0, COLLECTION_STATUS_STOPPED);
 
     return "";
 }
@@ -1100,13 +1510,13 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
 
         _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
 
-        MonitoredProcess* airspyProcess = new MonitoredProcess(
+        auto airspyProcess = std::make_shared<MonitoredProcess>(
                                                     _mavlink,
                                                     processName.c_str(),
                                                     commandStr.c_str(),
                                                     captureLogPath.c_str(),
                                                     MonitoredProcess::NoPipe,
-                                                    NULL,
+                                                    nullptr,
                                                     true /* rawCaptureProcess */);
         airspyProcess->start();
 
@@ -1231,18 +1641,9 @@ void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
             }
         }
         break;
-    case COMMAND_ID_START_ROTATION_DETECTION:
+    case COMMAND_ID_START_COLLECTION:
         {
-            std::string errorMessage = _handleStartRotationDetection(tunnel);
-            success = errorMessage.empty();
-            if (!success) {
-                ackMessage = errorMessage;
-            }
-        }
-        break;
-    case COMMAND_ID_START_DETECTION_AT_HEADING:
-        {
-            std::string errorMessage = _handleStartDetectionAtHeading(tunnel);
+            std::string errorMessage = _handleStartCollection(tunnel);
             success = errorMessage.empty();
             if (success) {
                 ackMessage = LogFileManager::instance()->logDir(LogFileManager::DETECTORS);
@@ -1251,9 +1652,18 @@ void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
             }
         }
         break;
-    case COMMAND_ID_STOP_ROTATION_DETECTION:
+    case COMMAND_ID_START_COLLECTION_SLICE:
         {
-            std::string errorMessage = _handleStopRotationDetection(tunnel);
+            std::string errorMessage = _handleStartCollectionSlice(tunnel);
+            success = errorMessage.empty();
+            if (!success) {
+                ackMessage = errorMessage;
+            }
+        }
+        break;
+    case COMMAND_ID_FINISH_COLLECTION:
+        {
+            std::string errorMessage = _handleFinishCollection(tunnel);
             success = errorMessage.empty();
             if (!success) {
                 ackMessage = errorMessage;
@@ -1529,17 +1939,20 @@ std::string CommandHandler::_tunnelCommandIdToString(uint32_t command)
     case COMMAND_ID_AIRSPY_STATUS:
         commandStr = "AIRSPY_STATUS";
         break;
-    case COMMAND_ID_START_ROTATION_DETECTION:
-        commandStr = "START_ROTATION_DETECTION";
+    case COMMAND_ID_START_COLLECTION:
+        commandStr = "START_COLLECTION";
         break;
-    case COMMAND_ID_START_DETECTION_AT_HEADING:
-        commandStr = "START_DETECTION_AT_HEADING";
+    case COMMAND_ID_START_COLLECTION_SLICE:
+        commandStr = "START_COLLECTION_SLICE";
         break;
-    case COMMAND_ID_STOP_ROTATION_DETECTION:
-        commandStr = "STOP_ROTATION_DETECTION";
+    case COMMAND_ID_FINISH_COLLECTION:
+        commandStr = "FINISH_COLLECTION";
         break;
     case COMMAND_ID_BEARING_RESULT:
         commandStr = "BEARING_RESULT";
+        break;
+    case COMMAND_ID_COLLECTION_STATUS:
+        commandStr = "COLLECTION_STATUS";
         break;
     }
 

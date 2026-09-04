@@ -1,9 +1,13 @@
 #include "log.h"
 #include "LogFileManager.h"
+#include "MavlinkSystem.h"
 #include "formatString.h"
 
-#include <fstream>
+#include <cerrno>
+#include <cstring>
 #include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define ANSI_COLOR_RED "\x1b[31m"
 #define ANSI_COLOR_GREEN "\x1b[32m"
@@ -14,7 +18,7 @@
 
 std::mutex LogDetailed::_logMutex;
 
-LogDetailed::LogDetailed(const char* filename, int filenumber) 
+LogDetailed::LogDetailed(const char* filename, int filenumber)
     : _s                ()
     , _caller_filename  (filename)
     , _caller_filenumber(filenumber)
@@ -44,13 +48,13 @@ LogDetailed::~LogDetailed()
     }
 
 
-    // Time output taken from:
-    // https://stackoverflow.com/questions/16357999#answer-16358264
+    // UTC, 24-hour: logs come from rPi flights and SITL desktops in different
+    // timezones and are analyzed elsewhere; the detector and jsonl are UTC too.
     time_t rawtime;
     time(&rawtime);
-    struct tm* timeinfo = localtime(&rawtime);
+    struct tm* timeinfo = gmtime(&rawtime);
     char time_buffer[10]{}; // We need 8 characters + \0
-    strftime(time_buffer, sizeof(time_buffer), "%I:%M:%S", timeinfo);
+    strftime(time_buffer, sizeof(time_buffer), "%H:%M:%S", timeinfo);
     sStream << "[" << time_buffer;
 
     switch (_log_level) {
@@ -74,13 +78,56 @@ LogDetailed::~LogDetailed()
 
     std::cout << sStream.str() << std::endl;
 
-    auto logFileManager = LogFileManager::instance();
-    if (logFileManager->detectorsLogging()) {
-        std::ofstream logFile(logFileManager->filename(LogFileManager::DETECTORS, "MavlinkTagController", "log"), std::ios_base::app);
-        logFile << sStream.str() << std::endl;
+    // Latched so a dead log directory produces one report, not one per line.
+    static std::string sFailedLogDir; // guarded by _logMutex
+    std::string operatorError;
+
+    const std::string controllerLogDir = LogFileManager::instance()->controllerLogDir();
+    if (!controllerLogDir.empty()) {
+        const std::string logPath = controllerLogDir + "/MavlinkTagController.log";
+        // POSIX I/O rather than ofstream: errno is guaranteed here, and a short
+        // write (ENOSPC) is detectable instead of being swallowed by operator<<.
+        const char* failure = nullptr;
+        const int fd = ::open(logPath.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            failure = strerror(errno);
+        } else {
+            const std::string line = sStream.str() + '\n';
+            size_t written = 0;
+            while (written < line.size()) {
+                const ssize_t n = ::write(fd, line.data() + written, line.size() - written);
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    failure = strerror(errno);
+                    break;
+                }
+                if (n == 0) {
+                    // No progress and no error: only errno from a -1 is meaningful.
+                    failure = "short write";
+                    break;
+                }
+                written += static_cast<size_t>(n);
+            }
+            // Some filesystems report deferred write errors only from close().
+            if (::close(fd) != 0 && failure == nullptr) {
+                failure = strerror(errno);
+            }
+        }
+        if (failure == nullptr) {
+            sFailedLogDir.clear();
+        } else if (sFailedLogDir != controllerLogDir) {
+            sFailedLogDir = controllerLogDir;
+            operatorError = formatString("Controller log not being saved: %s: %s",
+                                         logPath.c_str(), failure);
+        }
     }
 
     _logMutex.unlock();
+
+    // sendStatusText logs, which re-enters this destructor: must run unlocked.
+    if (!operatorError.empty()) {
+        MavlinkSystem::instance()->sendStatusText(operatorError, MAV_SEVERITY_ERROR);
+    }
 }
 
 void set_color(LogColor LogColor, std::stringstream& s)

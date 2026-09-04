@@ -2,7 +2,8 @@
 """Run the FLIGHT_DATA_ANALYSIS.md checks against recorded flight logs.
 
 Walks a directory tree of controller/detector logs (MavlinkTagController.log,
-py_detector_*.log, detector_*.config) and produces the evidence for:
+py_detector_*.log or per-heading heading-NNN/detector_*.jsonl, session.json or
+legacy detector_*.config) and produces the evidence for:
 
   Check 0 - detections per heading per rotation (Apr-11 heading_XXX dwells)
   Check 1 - reported SNR distribution vs the predicted noise floor, split by K
@@ -15,6 +16,8 @@ py_detector_*.log, detector_*.config) and produces the evidence for:
 Usage:  python3 flight_checks.py "/Users/don/Documents/PDC Testing"
 """
 
+import datetime
+import json
 import math
 import re
 import sys
@@ -45,6 +48,12 @@ CTRL_NODET_RE = re.compile(
 )
 DET_NODET_RE = re.compile(r"no detection\s.*?\bnoise ([\deE.+-]+)")
 
+# Persistent-detector rotations log every heading into one controller log;
+# each stored pulse is followed by this line naming the commanded heading.
+SLICE_STORED_RE = re.compile(
+    r"Rotation slice stored: tag_id:\s*(\d+)\s+heading:\s*([-\d.]+)"
+)
+
 CONFIG_KEYS = ("K", "tip", "tp", "tagFreqMHz", "falseAlarmProb", "opMode", "Fs")
 
 
@@ -57,17 +66,107 @@ def parse_config(path):
     return cfg
 
 
+def _finite(value):
+    """True for a real, finite JSON number (bool excluded)."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _session_number(tag, key, issues, tag_label):
+    """Return tag[key] as a float, or None (recording why) if unusable."""
+    value = tag.get(key)
+    if value is None:
+        issues.append(f"{tag_label}: '{key}' missing or null")
+        return None
+    if not _finite(value):
+        issues.append(f"{tag_label}: '{key}' is not a finite number ({value!r})")
+        return None
+    return float(value)
+
+
+def parse_session_json(path, issues=None):
+    """Map session.json (Python-detector sessions) onto the per-tag dict shape
+    that parse_config produces, so the checks are source-agnostic.
+
+    Bad or missing values never abort: the affected key is left out (so the
+    checks skip it the same way they skip an absent .config) and a
+    human-readable reason is appended to *issues*."""
+    if issues is None:
+        issues = []
+    try:
+        session = json.loads(path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError) as exc:
+        issues.append(f"{path.name}: unreadable ({exc}); tag parameters unavailable")
+        return {}
+    if not isinstance(session, dict):
+        issues.append(f"{path.name}: top level is not a JSON object")
+        return {}
+
+    fs = session.get("detector_sample_rate_sps")
+    if fs is not None and not _finite(fs):
+        issues.append(f"{path.name}: 'detector_sample_rate_sps' is not a finite number ({fs!r})")
+        fs = None
+    tags = session.get("tags")
+    if not isinstance(tags, list):
+        issues.append(f"{path.name}: 'tags' missing or not a list")
+        tags = []
+
+    cfgs = {}
+    for index, tag in enumerate(tags):
+        if not isinstance(tag, dict) or not isinstance(tag.get("id"), int):
+            issues.append(f"{path.name}: tags[{index}] has no integer 'id'; skipped")
+            continue
+        label = f"{path.name} tag {tag['id']}"
+        cfg = {"opMode": "python"}
+        k = _session_number(tag, "k", issues, label)
+        if k is not None:
+            cfg["K"] = str(int(k))
+        tip = _session_number(tag, "intra_pulse1_msecs", issues, label)
+        if tip is not None:
+            cfg["tip"] = f"{tip / 1000.0:f}"
+        tp = _session_number(tag, "pulse_width_msecs", issues, label)
+        if tp is not None:
+            cfg["tp"] = f"{tp / 1000.0:f}"
+        freq = _session_number(tag, "frequency_hz", issues, label)
+        if freq is not None:
+            cfg["tagFreqMHz"] = f"{freq / 1e6:f}"
+        pf = _session_number(tag, "false_alarm_probability", issues, label)
+        if pf is not None:
+            cfg["falseAlarmProb"] = f"{pf:f}"
+        # intra_pulse2_msecs == 0 legitimately means single-rate; only
+        # complain if it is present but unusable
+        tip2 = tag.get("intra_pulse2_msecs")
+        if tip2 is not None:
+            if not _finite(tip2):
+                issues.append(f"{label}: 'intra_pulse2_msecs' is not a finite number ({tip2!r})")
+            elif tip2:
+                cfg["tip2"] = f"{tip2 / 1000.0:f}"
+        if fs is not None:
+            cfg["Fs"] = str(fs)
+        cfgs[tag["id"]] = cfg
+    return cfgs
+
+
 def parse_controller_log(path):
     pulses = []
     text = ANSI_RE.sub("", path.read_text(errors="replace"))
+    matches = list(CONF_RE.finditer(text))
+    # Older controller logs used %I (12-hour, no AM/PM, local time); newer ones
+    # are %H UTC. %I only yields 01..12, so an hour of 00 or 13..23 proves
+    # 24-hour and the fold below must be skipped (00:10 -> 13:00 would
+    # otherwise read as +50 min). A 24-hour log confined to 01..12 takes the
+    # legacy path, where the fold+unwrap still yields correct deltas.
+    is_24h = any(int(m.group(1)) == 0 or int(m.group(1)) > 12 for m in matches)
+    period = 24 * 3600 if is_24h else 12 * 3600
     wrap = 0
     prev_t = None
-    for m in CONF_RE.finditer(text):
+    for m in matches:
         h, mn, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        # controller logs use %I (12-hour, no AM/PM): unwrap noon/midnight
-        t = h % 12 * 3600 + mn * 60 + s
+        t = (h if is_24h else h % 12) * 3600 + mn * 60 + s
+        # A decrease means the clock rolled over (noon/midnight for %I,
+        # midnight for %H); keep within-session deltas monotonic.
         if prev_t is not None and t < prev_t:
-            wrap += 12 * 3600
+            wrap += period
         prev_t = t
         pulses.append({
             "t": t + wrap,
@@ -84,7 +183,21 @@ def parse_controller_log(path):
             "lon": float(m.group(15)),
             "yaw": float(m.group(16)),
             "alt": float(m.group(17)),
+            "heading_cmd": None,
+            "_pos": m.start(),
         })
+    # Attribute each pulse to the commanded heading named by the next
+    # "Rotation slice stored" line for the same tag (before the next pulse).
+    stored = [(m.start(), int(m.group(1)), int(round(float(m.group(2)))))
+              for m in SLICE_STORED_RE.finditer(text)]
+    for i, p in enumerate(pulses):
+        end = pulses[i + 1]["_pos"] if i + 1 < len(pulses) else len(text)
+        for pos, tid, hdg in stored:
+            if p["_pos"] < pos < end and tid == p["id"]:
+                p["heading_cmd"] = hdg
+                break
+    for p in pulses:
+        del p["_pos"]
     nodet_noise = [float(v) for v in CTRL_NODET_RE.findall(text)]
     return pulses, nodet_noise
 
@@ -107,12 +220,84 @@ def parse_detector_log(path):
     return dets, nodet_noise
 
 
+def parse_detector_jsonl(path, issues=None):
+    """Per-heading detector_<tag>.jsonl -> same (dets, nodet_noise) shape as
+    parse_detector_log so the checks don't care which source they got."""
+    if issues is None:
+        issues = []
+    dets = []
+    nodet_noise = []
+    center_mhz = None
+    bad = 0
+    with path.open(encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                bad += 1
+                continue
+            if not isinstance(e, dict):
+                bad += 1  # a bare scalar/list parses but is not a record
+                continue
+            kind = e.get("type")
+            if kind == "startup":
+                center_mhz = e.get("center_freq")
+            elif kind == "detection":
+                offset_hz = e.get("freq_hz")
+                if not (_finite(center_mhz) and _finite(offset_hz)):
+                    issues.append(f"{path.name}: detection cycle {e.get('cycle')} "
+                                  "lacks finite center_freq/freq_hz; skipped")
+                    continue
+                ts_ns = e.get("timestamp_ns")
+                t = float("nan")
+                if _finite(ts_ns):
+                    # Epoch -> UTC seconds-of-day, matching the detector text
+                    # log and independent of the analysis host's timezone.
+                    try:
+                        lt = datetime.datetime.fromtimestamp(
+                            ts_ns / 1e9, tz=datetime.timezone.utc)
+                        t = lt.hour * 3600 + lt.minute * 60 + lt.second
+                    except (ValueError, OverflowError, OSError):
+                        issues.append(f"{path.name}: detection cycle {e.get('cycle')} "
+                                      f"has out-of-range timestamp_ns {ts_ns!r}")
+                snr = e.get("snr_db")
+                score = e.get("score_ratio")
+                noise = e.get("noise_psd")
+                if not (_finite(snr) and _finite(score) and _finite(noise)):
+                    issues.append(f"{path.name}: detection cycle {e.get('cycle')} "
+                                  "has non-numeric snr_db/score_ratio/noise_psd; skipped")
+                    continue
+                dets.append({
+                    "cycle": e.get("cycle", 0),
+                    "t": t,
+                    "freq_mhz": center_mhz + offset_hz / 1e6,
+                    "offset_hz": offset_hz,
+                    "snr": float(snr),
+                    "score_ratio": float(score),
+                    "noise": float(noise),
+                })
+            elif kind == "no_detection":
+                cand = e.get("best_candidate") or {}
+                if isinstance(cand, dict) and _finite(cand.get("noise_psd")):
+                    nodet_noise.append(float(cand["noise_psd"]))
+    if bad:
+        issues.append(f"{path.name}: {bad} malformed JSON line(s) skipped")
+    return dets, nodet_noise
+
+
 def collect(root):
     """Return list of session dicts: one per directory containing a controller log."""
     sessions = []
     for log in sorted(root.rglob("MavlinkTagController.log")):
         d = log.parent
         cfgs = {}
+        issues = []
+        session_json = d / "session.json"
+        if session_json.exists():
+            cfgs = parse_session_json(session_json, issues)
         for c in d.glob("detector_*.config"):
             m = re.search(r"detector_(\d+)", c.name)
             if not m:
@@ -129,7 +314,7 @@ def collect(root):
         pulses, ctrl_nodet = parse_controller_log(log)
         rel = d.relative_to(root)
         m = re.search(r"heading[-_](\d+)", str(rel))
-        sessions.append({
+        session = {
             "dir": str(rel),
             "heading_cmd": int(m.group(1)) if m else None,
             "flight": str(rel.parent) if m else None,
@@ -138,7 +323,53 @@ def collect(root):
             "nodet_noise": ctrl_nodet,
             "detections": dets,
             "det_nodet_noise": det_nodet,
-        })
+            "issues": issues,
+        }
+
+        # Persistent-detector rotation: one controller log at the root, per-
+        # heading detector jsonl in heading-NNN/ (no controller log of their
+        # own). Split into per-heading sessions so Check 0/3 can see them.
+        heading_dirs = sorted(
+            hd for hd in d.glob("heading-*")
+            if hd.is_dir() and not (hd / "MavlinkTagController.log").exists()
+            and any(hd.glob("detector_*.jsonl")))
+        if heading_dirs:
+            for hd in heading_dirs:
+                hm = re.search(r"heading-(\d+)", hd.name)
+                if not hm:
+                    continue
+                hdg = int(hm.group(1))
+                h_issues = []
+                h_dets = {}
+                h_nodet = []
+                for jp in sorted(hd.glob("detector_*.jsonl")):
+                    jm = re.search(r"detector_(\d+)", jp.name)
+                    if not jm:
+                        continue
+                    h_dets[int(jm.group(1))], nn = parse_detector_jsonl(jp, h_issues)
+                    h_nodet.extend(nn)
+                sessions.append({
+                    "dir": str(hd.relative_to(root)),
+                    "heading_cmd": hdg,
+                    "flight": str(rel),
+                    "configs": cfgs,
+                    "pulses": [p for p in pulses if p["heading_cmd"] == hdg],
+                    "nodet_noise": [],
+                    "detections": h_dets,
+                    "det_nodet_noise": h_nodet,
+                    "issues": h_issues,
+                })
+            # The root's py_detector_*.log spans every heading and would
+            # double count against the per-heading jsonl; keep only what the
+            # heading sessions could not claim.
+            session["detections"] = {}
+            session["det_nodet_noise"] = []
+            session["pulses"] = [p for p in pulses if p["heading_cmd"] is None]
+            if session["pulses"]:
+                issues.append(f"{len(session['pulses'])} controller pulse(s) not "
+                              "attributable to a heading (no 'Rotation slice stored' line)")
+
+        sessions.append(session)
     return sessions
 
 
@@ -373,6 +604,24 @@ def check5(sessions):
             print(f"{s['dir'][:52]:52s} {len(vals):4d} {pctile(vals, 0.5):18.3g}")
 
 
+def report_data_issues(sessions):
+    """Last section so it is the final thing the operator reads: every
+    input problem the parsers worked around, and which session it affects."""
+    print("\n" + "=" * 78)
+    print("DATA ISSUES — inputs that were skipped or partially used above")
+    print("=" * 78)
+    n = 0
+    for s in sessions:
+        for issue in s["issues"]:
+            print(f"  {s['dir']}: {issue}")
+            n += 1
+    if n == 0:
+        print("  none")
+    else:
+        print(f"\n  {n} issue(s) in {sum(1 for s in sessions if s['issues'])} session(s); "
+              "checks that depended on the missing values reported them as skipped.")
+
+
 def main():
     root = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
     if not root.is_dir():
@@ -389,6 +638,7 @@ def main():
     check2(sessions)
     check4(sessions)
     check5(sessions)
+    report_data_issues(sessions)
 
 
 if __name__ == "__main__":

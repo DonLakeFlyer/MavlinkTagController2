@@ -15,9 +15,10 @@
 #include <algorithm>
 #include <utility>
 #include <iostream>
-#include <string.h>
+#include <cstring>
 #include <cstddef>
 #include <chrono>
+#include <array>
 
 using namespace TunnelProtocol;
 
@@ -82,9 +83,9 @@ void UDPPulseReceiver::stop()
 void UDPPulseReceiver::_receive()
 {
     while (true) {
-        CommandHandler::UDPPulseInfo_T buffer[10];
+        std::array<uint8_t, 1500> buffer {};
 
-        auto cBytesReceived = recvfrom(_fdSocket, buffer, sizeof(buffer), 0, NULL, NULL);
+        auto cBytesReceived = recvfrom(_fdSocket, buffer.data(), buffer.size(), 0, NULL, NULL);
 
         if (cBytesReceived < 0) {
             // This happens on destruction when close(_fdSocket) is called,
@@ -93,11 +94,52 @@ void UDPPulseReceiver::_receive()
             return;
         }
 
-        int pulseCount = cBytesReceived / sizeof(CommandHandler::UDPPulseInfo_T);
-        int pulseIndex = 0;
+        if (static_cast<size_t>(cBytesReceived) >= sizeof(TagTrackerDetectorProtocol::Header)) {
+            TagTrackerDetectorProtocol::Header header {};
+            std::memcpy(&header, buffer.data(), sizeof(header));
+            if (header.magic == TagTrackerDetectorProtocol::kMagic) {
+                const auto validation = TagTrackerDetectorProtocol::validateHeader(
+                    header, static_cast<size_t>(cBytesReceived));
+                if (validation != TagTrackerDetectorProtocol::ValidationResult::Valid) {
+                    logWarn() << "Rejected malformed Python detector packet, validation:"
+                              << static_cast<int>(validation) << "bytes:" << cBytesReceived;
+                    continue;
+                }
 
-        while (pulseCount--) {
-            _commandHandler->handlePulse(buffer[pulseIndex++]);
+                TagTrackerDetectorProtocol::PulsePayload pulsePayload {};
+                TagTrackerDetectorProtocol::FailedPayload failedPayload {};
+                const auto messageType = static_cast<TagTrackerDetectorProtocol::MessageType>(header.message_type);
+                const bool hasPulsePayload =
+                    messageType == TagTrackerDetectorProtocol::MessageType::Pulse
+                    || messageType == TagTrackerDetectorProtocol::MessageType::NoDetection;
+                if (hasPulsePayload) {
+                    std::memcpy(&pulsePayload,
+                                buffer.data() + sizeof(header),
+                                sizeof(pulsePayload));
+                } else if (messageType == TagTrackerDetectorProtocol::MessageType::Failed) {
+                    std::memcpy(&failedPayload,
+                                buffer.data() + sizeof(header),
+                                sizeof(failedPayload));
+                }
+                _commandHandler->handlePythonDetectorMessage(
+                    header, hasPulsePayload ? &pulsePayload : nullptr,
+                    failedPayload.error_code);
+                continue;
+            }
+        }
+
+        if (cBytesReceived % sizeof(CommandHandler::UDPPulseInfo_T) != 0) {
+            logWarn() << "Rejected malformed legacy detector packet, bytes:" << cBytesReceived;
+            continue;
+        }
+
+        int pulseCount = static_cast<int>(cBytesReceived / sizeof(CommandHandler::UDPPulseInfo_T));
+        for (int pulseIndex = 0; pulseIndex < pulseCount; ++pulseIndex) {
+            CommandHandler::UDPPulseInfo_T pulse {};
+            std::memcpy(&pulse,
+                        buffer.data() + pulseIndex * sizeof(pulse),
+                        sizeof(pulse));
+            _commandHandler->handlePulse(pulse);
         }
     }
 }

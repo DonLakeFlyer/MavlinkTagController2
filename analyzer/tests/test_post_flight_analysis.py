@@ -194,3 +194,45 @@ class TestRotationSession:
         assert '| Mode | rotation/bearing |' in md
         if (rotation_dir / 'spectrogram_h000_tag3_cycle_0001.png').exists():
             assert '![heading 000° tag 3 cycle 0001]' in md
+
+
+class TestPersistentRotationSession:
+    """One detector process across all headings: decimator log at the root,
+    per-heading heading-NNN/ dirs, and a single process-wide SESSION_END that
+    lands in whichever file was open at exit."""
+
+    def test_session_end_totals_not_double_counted(self, tmp_path):
+        n_headings = 4
+        for i, h in enumerate(range(0, 360, 360 // n_headings), start=1):
+            hd = tmp_path / f'heading-{h:03d}'
+            hd.mkdir()
+            entries = _detector_entries(3, 1, 12.0)
+            entries = [e for e in entries if e['type'] != 'session_end']
+            if i == 2:  # one real per-slice gap event on heading 090
+                entries.insert(1, {'type': 'gap_event', 'kind': 'zerofill',
+                                   'gap_ms': 5.0})
+            if i == n_headings:  # last file gets the rotation-wide totals
+                entries.append({'type': 'session_end', 'cycles': n_headings,
+                                'detections': n_headings, 'elapsed_s': 60.0,
+                                'gap_zerofill_count': 2, 'gap_reset_count': 1})
+            _jsonl(hd / 'detector_3.jsonl', entries)
+        # session.json marks the persistent layout for every SDR; no decimator
+        # log here mirrors an AirSpy Mini collection
+        (tmp_path / 'session.json').write_text('{"detection_mode": "python"}')
+        (tmp_path / 'bearing_result.log').write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,'
+            'latitude,longitude\n3,45.0,0.9,4,12.0,38.1,-122.2\n')
+        md = generate_report(str(tmp_path))
+        assert f'| Headings | {n_headings} |' in md
+        # (N-1) + N would be 7; per-slice counting from records gives N
+        assert f'| Detection cycles | {n_headings} |' in md
+        assert f'| Detections | {n_headings} |' in md
+        # rotation-wide fields from SESSION_END shown once at rotation level
+        assert '| Session duration | 60 s |' in md
+        assert '| Gaps (rotation) | 2 zero-filled, 1 resets |' in md
+        # ...and NOT attributed to the heading whose file happened to hold them:
+        # per-heading gap column comes from that heading's own GAP_EVENTs
+        rows = {line.split('|')[1].strip(): line for line in md.splitlines()
+                if line.startswith('| ') and '° |' in line}
+        assert rows['090°'].rstrip().endswith('| 1 |')
+        assert rows['270°'].rstrip().endswith('| 0 |')
