@@ -3,10 +3,15 @@
 #include "TunnelProtocol.h"
 #include "TagDatabase.h"
 #include "BearingCalculator.h"
+#include "CollectionCoordinator.h"
 #include "boost_process_compat.h"
+#include "detector_protocol.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,7 +44,10 @@ public:
         double noise_psd;
     } UDPPulseInfo_T;
 
-    void handlePulse(const UDPPulseInfo_T& udpPulseInfo);
+    void handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t collectionId = 0, uint32_t sliceId = 0);
+    void handlePythonDetectorMessage(const TagTrackerDetectorProtocol::Header& header,
+                                     const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
+                                     uint32_t errorCode = 0);
 
 private:
     struct RotationSlice {
@@ -71,10 +79,16 @@ private:
     bool _handleCleanLogs       (void);
     void _handleTunnelMessage   (const mavlink_message_t& message);
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
-    void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram);
-    std::string _handleStartRotationDetection  (const mavlink_tunnel_t& tunnel);
-    std::string _handleStartDetectionAtHeading (const mavlink_tunnel_t& tunnel);
-    std::string _handleStopRotationDetection   (const mavlink_tunnel_t& tunnel);
+    void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort = 0);
+    bool _writeSessionInfo      (const TunnelProtocol::StartDetectionInfo_t& startDetection, AirSpyDeviceType deviceType, bool isHFMode);
+    std::string _handleStartCollection      (const mavlink_tunnel_t& tunnel);
+    std::string _handleStartCollectionSlice (const mavlink_tunnel_t& tunnel);
+    std::string _handleFinishCollection     (const mavlink_tunnel_t& tunnel);
+    void _sendCollectionStatus(uint32_t collectionId, uint32_t sliceId, uint32_t status, uint32_t errorCode = 0,
+                               std::optional<uint32_t> expectedDetectors = std::nullopt,
+                               std::optional<uint32_t> completedDetectors = std::nullopt);
+    bool _sendDetectorControl(uint32_t tagId, const TagTrackerDetectorProtocol::ArmMessage& message);
+        void _handleDetectorProcessFailure(uint32_t tagId, int exitCode);
     void _runPostFlightAnalysis (const std::string& logDir);
     AirSpyDeviceType _connectedAirSpyType(std::string* errorMessage = nullptr);
     std::string _sdrPathStatusText(AirSpyDeviceType deviceType, double frequencyMhz) const;
@@ -90,7 +104,7 @@ private:
     TagDatabase                     _tagDatabase;
     bool                            _receivingTags          = false;
     char*                           _homePath               = nullptr;
-    std::vector<MonitoredProcess*>  _processes;
+    std::vector<std::shared_ptr<MonitoredProcess>> _processes;
     bp::pipe*                       _airspyPipe             = nullptr;
     std::string                     _airspyPath;
     int                            _rawCaptureCount         = 0;
@@ -104,11 +118,14 @@ private:
 
     // Rotation detection state — accessed from both MAVLink and UDP threads
     std::mutex                                  _rotationMutex;
+    std::condition_variable                     _collectionReady;
+    CollectionCoordinator                       _collectionCoordinator;
+    std::map<uint32_t, int>                     _detectorControlPorts;
     bool                                        _inRotation             = false;
     float                                       _currentHeadingDeg      = 0;
-    bool                                        _rotationAutoStopping   = false;
-    TunnelProtocol::StartDetectionInfo_t        _rotationStartDetection {};
     std::vector<RotationSlice>                  _rotationSlices;
+
+    static constexpr int kDetectorControlPortBase = 51000;
 
     static constexpr float kBackSectorMinDeg = 165.0f;   // simulator back-sector hack threshold
 

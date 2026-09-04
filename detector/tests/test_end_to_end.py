@@ -45,6 +45,16 @@ N_MOVE = int(np.floor(N_EXACT_MOVE))      # integer PRI (moving rate)
 W, Wf = build_weighting_matrix(N_W, FS)
 NFFT = W.shape[1]
 
+
+@pytest.mark.parametrize('f0', [0.0, 300.0, -800.0, 1500.0])
+def test_weighting_matrix_labels_pure_tone(f0):
+    """W applied to an fftshift'ed window DFT must peak at the Wf entry
+    nearest the tone frequency."""
+    x = np.exp(2j * np.pi * f0 * np.arange(N_W) / FS)
+    S = np.fft.fftshift(np.fft.fft(x))
+    scores = np.abs(W.conj().T @ S) ** 2
+    assert abs(Wf[np.argmax(scores)] - f0) <= FS / NFFT
+
 # ---------------------------------------------------------------------------
 # Shared EVT cache pool — keyed by (K, N_B) so single-rate and dual-rate
 # configurations get independent EVT thresholds.
@@ -138,6 +148,18 @@ class TestSingleRateK5:
         assert abs(freq_diff - 200.0) < 2 * bin_width, (
             f"Frequency difference {freq_diff:.1f} Hz, expected ~200 Hz "
             f"(tolerance {2*bin_width:.1f} Hz)")
+
+    @pytest.mark.parametrize('offset_hz', [0.0, 200.0, -500.0, 1200.0])
+    def test_absolute_frequency_label(self, offset_hz):
+        """Reported freq_hz must be the true baseband offset, not merely
+        correct relative to another detection (regression: a double fftshift
+        in build_weighting_matrix relabelled every bin by Fs/2)."""
+        dets, _, _ = _run_detect(self.K, snr_db=25.0, freq_offset_hz=offset_hz, seed=71)
+        assert len(dets) >= 1
+        f = max(dets, key=lambda d: d[1])[0]
+        bin_width = FS / NFFT
+        assert abs(f - offset_hz) < 2 * bin_width, (
+            f"Reported {f:+.1f} Hz for a tone at {offset_hz:+.1f} Hz")
 
     def test_noise_only_no_detection(self):
         detections, noise_psd, _ = _run_detect(self.K, snr_db=-np.inf, seed=99)

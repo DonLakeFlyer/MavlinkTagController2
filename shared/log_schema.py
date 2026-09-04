@@ -13,7 +13,7 @@ Adding a field to an emit() call automatically appears in the .jsonl record.
 
 import json
 import sys
-from typing import Optional, TextIO
+from typing import List, Optional, Sequence, TextIO
 
 # ---------------------------------------------------------------------------
 # Entry type constants — shared between detector (writer) and analyzer (reader)
@@ -66,13 +66,36 @@ class StructuredLogger:
         log.close()
 
     If *jsonl_path* is None, only stdout output is produced (backward compat).
+
+    Entry types listed in *preamble_types* are remembered and replayed at the
+    top of every file opened via :meth:`reopen`, so each file is self-contained.
     """
 
-    def __init__(self, jsonl_path: Optional[str] = None):
+    def __init__(self, jsonl_path: Optional[str] = None,
+                 preamble_types: Sequence[str] = ()):
         self._jsonl: Optional[TextIO] = None
+        self._preamble_types = frozenset(preamble_types)
+        self._preamble: List[str] = []
         if jsonl_path:
             self._jsonl = open(jsonl_path, 'w',
                                encoding='utf-8', newline='\n')
+
+    def reopen(self, jsonl_path: str):
+        """Switch output to a new .jsonl at *jsonl_path*, replaying the preamble.
+
+        The current file stays open until the new one is ready, so a failed
+        reopen raises OSError and leaves logging untouched.
+        """
+        new_file = open(jsonl_path, 'w', encoding='utf-8', newline='\n')
+        try:
+            for line in self._preamble:
+                new_file.write(line)
+            new_file.flush()
+        except OSError:
+            new_file.close()
+            raise
+        self.close()
+        self._jsonl = new_file
 
     @property
     def active(self) -> bool:
@@ -87,12 +110,17 @@ class StructuredLogger:
         """
         if human is not None:
             print(human, flush=flush)
+        keep_for_preamble = entry_type in self._preamble_types
+        if self._jsonl is None and not keep_for_preamble:
+            return
+        record = {'type': entry_type}
+        record.update(data)
+        line = json.dumps(record, default=_json_default, ensure_ascii=False) + '\n'
+        if keep_for_preamble:
+            self._preamble.append(line)
         if self._jsonl is not None:
-            record = {'type': entry_type}
-            record.update(data)
             try:
-                self._jsonl.write(json.dumps(record, default=_json_default,
-                                             ensure_ascii=False) + '\n')
+                self._jsonl.write(line)
                 if flush:
                     self._jsonl.flush()
             except OSError as exc:
@@ -135,9 +163,14 @@ def read_jsonl(path: str):
             if not line:
                 continue
             try:
-                entries.append(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
                 bad_lines.append(lineno)
+                continue
+            if not isinstance(record, dict):
+                bad_lines.append(lineno)  # a bare scalar/list is not a record
+                continue
+            entries.append(record)
     if bad_lines:
         print(f'WARNING: {path}: skipped {len(bad_lines)} malformed line(s) '
               f'at {bad_lines[:10]}', file=sys.stderr)

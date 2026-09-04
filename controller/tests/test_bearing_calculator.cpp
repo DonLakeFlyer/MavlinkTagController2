@@ -1,17 +1,10 @@
 #include "BearingCalculator.h"
+#include "test_check.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-
-// NDEBUG-safe assertion — never compiled out
-#define CHECK(expr) do { \
-    if (!(expr)) { \
-        std::fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, #expr); \
-        std::exit(1); \
-    } \
-} while (0)
 
 static constexpr float kBearingToleranceDeg = 5.0f;
 

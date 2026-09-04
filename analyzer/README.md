@@ -143,7 +143,7 @@ PDC testing data are recorded in that document).
 ## flight_checks.py
 
 Walks a directory tree of recorded controller/detector logs
-(`MavlinkTagController.log`, `py_detector_*.log`, `detector_*.config`) and
+(`MavlinkTagController.log`, `py_detector_*.log`, `session.json` or legacy `detector_*.config`) and
 produces the evidence for Checks 0–5:
 
 - **Check 0/3** — detections and SNR per commanded heading (heading_XXX dwell

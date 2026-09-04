@@ -27,12 +27,18 @@ Examples:
 import argparse
 import datetime
 import json
+import math
 import os
 import signal
 import socket
 import struct
 import sys
 import threading
+
+from collection_control import ArmResult, CollectionControl, handle_control_packet
+from detector_protocol import (ErrorCode, MessageType, ProtocolError, PulseReport,
+                               encode_failed_report, encode_header,
+                               encode_pulse_report)
 import time
 from typing import NamedTuple
 
@@ -123,53 +129,71 @@ def send_pulse_udp(pulse_sock, dest_addr, tag_id, frequency_hz,
                    start_time_seconds, predict_next_start_seconds,
                    snr, stft_score, group_seq_counter, group_ind,
                    group_snr, detection_status, confirmed_status,
-                   noise_psd):
-    """Send a detected pulse to the controller as a UDPPulseInfo_T packet.
-
-    The controller's UDPPulseReceiver expects 12 consecutive IEEE-754
-    double-precision floats (96 bytes) in little-endian byte order.
-    """
-    packet = struct.pack('<12d',
-                         float(tag_id),
-                         float(frequency_hz),
-                         start_time_seconds,
-                         predict_next_start_seconds,
-                         snr,
-                         stft_score,
-                         float(group_seq_counter),
-                         float(group_ind),
-                         group_snr,
-                         float(detection_status),
-                         float(confirmed_status),
-                         noise_psd)
+                   noise_psd, collection_id=0, slice_id=0):
+    """Send a typed pulse or no-detection report to the controller."""
+    report = PulseReport(
+        collection_id=collection_id,
+        slice_id=slice_id,
+        tag_id=tag_id,
+        frequency_hz=frequency_hz,
+        group_seq_counter=group_seq_counter,
+        group_ind=group_ind,
+        detection_status=detection_status,
+        confirmed_status=confirmed_status,
+        start_time_seconds=start_time_seconds,
+        predict_next_start_seconds=predict_next_start_seconds,
+        snr=snr,
+        score_ratio=stft_score,
+        group_snr=group_snr,
+        noise_psd=noise_psd,
+    )
+    message_type = (MessageType.NO_DETECTION
+                    if detection_status == DETECTION_STATUS_NO_DETECTION
+                    else MessageType.PULSE)
+    packet = encode_pulse_report(report, message_type)
     try:
         pulse_sock.sendto(packet, dest_addr)
+        return True
     except OSError as e:
         print(f'Warning: pulse send failed: {e}', file=sys.stderr, flush=True)
+        return False
 
 
 def send_heartbeat_udp(pulse_sock, dest_addr, tag_id):
     """Send a detector heartbeat to the controller.
 
-    A heartbeat is a UDPPulseInfo_T packet with frequency_hz = 0.
-    The controller recognises frequency_hz == 0 as a heartbeat rather
-    than a real pulse (see PulseHandler::handlePulse).
+    A header-only TTDP packet (MessageType.HEARTBEAT, payload_length 0,
+    collection/slice ids 0). The controller keys on the message type.
     """
-    send_pulse_udp(
-        pulse_sock, dest_addr,
-        tag_id=tag_id,
-        frequency_hz=0,
-        start_time_seconds=0.0,
-        predict_next_start_seconds=0.0,
-        snr=0.0,
-        stft_score=0.0,
-        group_seq_counter=0,
-        group_ind=0,
-        group_snr=0.0,
-        detection_status=0,
-        confirmed_status=0,
-        noise_psd=0.0,
-    )
+    packet = encode_header(MessageType.HEARTBEAT, 0, 0, 0, tag_id)
+    try:
+        pulse_sock.sendto(packet, dest_addr)
+    except OSError as e:
+        print(f'Warning: heartbeat send failed: {e}', file=sys.stderr, flush=True)
+
+
+def send_lifecycle_udp(pulse_sock, dest_addr, message_type, tag_id,
+                       collection_id=0, slice_id=0):
+    packet = encode_header(
+        message_type, 0, collection_id, slice_id, tag_id)
+    try:
+        pulse_sock.sendto(packet, dest_addr)
+        return True
+    except OSError as e:
+        print(f'Warning: lifecycle send failed: {e}', file=sys.stderr, flush=True)
+        return False
+
+
+def send_failed_udp(pulse_sock, dest_addr, tag_id, collection_id, slice_id,
+                    error_code):
+    packet = encode_failed_report(
+        error_code, collection_id, slice_id, tag_id)
+    try:
+        pulse_sock.sendto(packet, dest_addr)
+        return True
+    except OSError as e:
+        print(f'Warning: failure report send failed: {e}', file=sys.stderr, flush=True)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +251,10 @@ def build_weighting_matrix(n_w, Fs, zetas=None):
         # Frequency-shifted pulse template
         template = np.exp(2j * np.pi * zeta * n / n_w) * window
 
-        # Normalised, DC-centred DFT
-        Xs = np.fft.fftshift(np.fft.fft(template))
+        # Normalised DFT, left in natural (DC-first) order: the circulant built
+        # below is applied to an fftshift'ed STFT, so shifting here too would
+        # relabel every bin by Fs/2.
+        Xs = np.fft.fft(template)
         Xs = Xs / np.linalg.norm(Xs)
 
         # Circulant Toeplitz matrix from the DFT vector
@@ -1174,6 +1200,8 @@ def main():
                     help='Absolute tag frequency in Hz for pulse reports (default: 0)')
     ap.add_argument('--pulse-port', type=int, default=0,
                     help='UDP port to send detected pulses to (0 = disabled)')
+    ap.add_argument('--control-port', type=int, default=0,
+                    help='Local UDP port for collection ARM commands (0 = free-running)')
     ap.add_argument('--threshold-cache-dir', type=str, default=None,
                     help='Directory for EVT threshold cache files (default: no disk cache)')
     ap.add_argument('--detection-margin', type=float, default=0.90,
@@ -1220,6 +1248,8 @@ def main():
         sys.exit('Error: --dump-spectrogram requires --log-dir')
     if args.warmup_seconds < 0:
         sys.exit(f'Error: --warmup-seconds must be >= 0, got {args.warmup_seconds}')
+    if args.control_port > 0 and args.pulse_port <= 0:
+        sys.exit('Error: --control-port requires --pulse-port')
     if args.tip_secondary is not None:
         if args.tip_secondary <= 0:
             sys.exit(f'Error: --tip-secondary must be positive, got {args.tip_secondary}')
@@ -1228,13 +1258,16 @@ def main():
 
     # --- Structured logger ---
     _jsonl_path = None
+    _tag_suffix = f'_{args.tag_id}' if args.tag_id else ''
+    # Directory receiving this slice's jsonl/dumps; re-pointed per ARM heading.
+    cycle_out_dir = args.log_dir
     if args.log_dir:
         os.makedirs(args.log_dir, exist_ok=True)
-        _tag_suffix = f'_{args.tag_id}' if args.tag_id else ''
         _jsonl_path = os.path.join(args.log_dir, f'detector{_tag_suffix}.jsonl')
         if args.dump_spectrogram:
             print(f'Spectrogram dump → {args.log_dir}/', flush=True)
-    slog = StructuredLogger(jsonl_path=_jsonl_path)
+    slog = StructuredLogger(jsonl_path=_jsonl_path,
+                            preamble_types=(STARTUP, EVT_THRESHOLD))
 
     # --- STFT geometry ---
     n_w  = int(np.ceil(args.tp * args.fs))
@@ -1394,6 +1427,15 @@ def main():
                   'will not be sent to the controller', file=sys.stderr,
                   flush=True)
 
+    control_sock = None
+    collection_control = None
+    if args.control_port > 0:
+        control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        control_sock.bind(('127.0.0.1', args.control_port))
+        control_sock.setblocking(False)
+        collection_control = CollectionControl()
+        print(f'  Collection control → 127.0.0.1:{args.control_port}')
+
     # Install signal handler for graceful shutdown
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -1420,6 +1462,8 @@ def main():
 
     # Startup warmup: discard initial IQ before detection starts.
     warmup_remaining_samples = int(round(args.warmup_seconds * args.fs))
+    collection_ready_sent = False
+    last_ready_sent = float('-inf')
 
     # EVT threshold cache (regenerated if geometry changes)
     evt_threshold_cache = {}
@@ -1445,6 +1489,66 @@ def main():
 
     try:
         while not _should_stop:
+            if control_sock is not None:
+                while True:
+                    try:
+                        control_packet = control_sock.recv(256)
+                    except BlockingIOError:
+                        break
+                    try:
+                        control_header, arm_result, arm_heading_deg = handle_control_packet(
+                            collection_control, control_packet, expected_tag_id=args.tag_id)
+                    except ProtocolError as error:
+                        print(f'Warning: rejected detector control packet: {error}',
+                              file=sys.stderr, flush=True)
+                        continue
+                    if arm_result == ArmResult.ALREADY_COMPLETE:
+                        # Controller is retrying on behalf of another detector;
+                        # our completion may have been lost, so resend it.
+                        send_lifecycle_udp(
+                            pulse_sock, pulse_dest, MessageType.CYCLE_COMPLETE,
+                            args.tag_id, control_header.collection_id,
+                            control_header.slice_id)
+                        continue
+                    if arm_result == ArmResult.ARMED:
+                        buf_parts.clear()
+                        buf_len = 0
+                        seg_ts = None
+                        segment_has_gap = False
+                        segment_gap_fills.clear()
+                        if args.log_dir:
+                            # Heading comes off the wire: keep it a sane path component.
+                            # One dir per heading: the GCS never revisits a heading
+                            # within a collection, and a retried slice is replayed by
+                            # the coordinator without re-arming.
+                            heading_norm = (arm_heading_deg % 360.0
+                                            if math.isfinite(arm_heading_deg) else 0.0)
+                            heading_dir = os.path.join(
+                                args.log_dir, f'heading-{heading_norm:03.0f}')
+                            try:
+                                os.makedirs(heading_dir, exist_ok=True)
+                                slog.reopen(os.path.join(
+                                    heading_dir, f'detector{_tag_suffix}.jsonl'))
+                                cycle_out_dir = heading_dir
+                            except OSError as exc:
+                                # Acknowledging would silently file this slice's
+                                # records under the previous heading.
+                                print(f'ERROR: cannot open heading log dir '
+                                      f'{heading_dir}: {exc}; slice not armed',
+                                      file=sys.stderr, flush=True)
+                                collection_control.cancel()
+                                send_failed_udp(
+                                    pulse_sock, pulse_dest, args.tag_id,
+                                    control_header.collection_id,
+                                    control_header.slice_id,
+                                    ErrorCode.LOG_OPEN_FAILED)
+                                continue
+                    if arm_result != ArmResult.BUSY:
+                        collection_ready_sent = True  # ARM proves READY was received
+                        send_lifecycle_udp(
+                            pulse_sock, pulse_dest, MessageType.ARMED, args.tag_id,
+                            control_header.collection_id, control_header.slice_id)
+
             # ---- receive one UDP packet from the decimator ----
             try:
                 data = sock.recv(65536)
@@ -1481,7 +1585,25 @@ def main():
                     buf_parts.clear()
                     buf_len = 0
                     print('Warmup complete: starting detection', flush=True)
+                    if collection_control is not None:
+                        send_lifecycle_udp(
+                            pulse_sock, pulse_dest, MessageType.READY, args.tag_id)
+                        last_ready_sent = time.monotonic()
                 # Keep continuity bookkeeping current during warmup.
+                last_packet_ts = ts
+                last_packet_samples = n_samp
+                continue
+
+            # READY is a single UDP datagram with no controller ack of its own;
+            # keep re-sending at heartbeat cadence until the first ARM arrives.
+            if collection_control is not None and not collection_ready_sent:
+                now = time.monotonic()
+                if now - last_ready_sent >= 1.0:
+                    send_lifecycle_udp(
+                        pulse_sock, pulse_dest, MessageType.READY, args.tag_id)
+                    last_ready_sent = now
+
+            if collection_control is not None and not collection_control.armed:
                 last_packet_ts = ts
                 last_packet_samples = n_samp
                 continue
@@ -1579,6 +1701,11 @@ def main():
 
             cycle += 1
             t0 = time.monotonic()
+
+            if collection_control is not None:
+                cycle_collection_id, cycle_slice_id = collection_control.active_ids
+            else:
+                cycle_collection_id, cycle_slice_id = 0, 0
 
             segment = np.concatenate(buf_parts)[:samples_needed]
             buf_parts.clear()
@@ -1682,7 +1809,7 @@ def main():
                         ] if detections else [],
                         'best_candidate': best_candidate,
                     }
-                    write_cycle_dump(args.log_dir, args.tag_id, cycle, power, segment, meta)
+                    write_cycle_dump(cycle_out_dir, args.tag_id, cycle, power, segment, meta)
                 except OSError as exc:
                     print(f'WARNING: disabling spectrogram dump after I/O '
                           f'error on cycle {cycle}: {exc}',
@@ -1711,6 +1838,8 @@ def main():
 
             confidence_ratio = args.confidence_ratio
 
+            report_attempted = False
+            report_sent = True
             if detections:
                 det_total += len(detections)
 
@@ -1765,7 +1894,8 @@ def main():
                         predict_next_s = start_time_s + predict_tip
                         report_freq_hz = args.freq if args.freq else int(det.freq_hz)
 
-                        send_pulse_udp(
+                        report_attempted = True
+                        report_sent = send_pulse_udp(
                             pulse_sock, pulse_dest,
                             tag_id=args.tag_id,
                             frequency_hz=report_freq_hz,
@@ -1779,7 +1909,9 @@ def main():
                             detection_status=det_status,
                             confirmed_status=1 if not is_marginal else 0,
                             noise_psd=det.noise_psd,
-                        )
+                            collection_id=cycle_collection_id,
+                            slice_id=cycle_slice_id,
+                        ) and report_sent
 
                     if args.center_freq > 0:
                         abs_mhz = args.center_freq + det.freq_hz / 1e6
@@ -1829,7 +1961,8 @@ def main():
                 if pulse_sock is not None and args.freq:
                     start_time_s = current_ts / 1e9 if current_ts else time.time()
                     nodet_score_ratio = best_candidate['score_ratio'] if best_candidate is not None else 0.0
-                    send_pulse_udp(
+                    report_attempted = True
+                    report_sent = send_pulse_udp(
                         pulse_sock, pulse_dest,
                         tag_id=args.tag_id,
                         frequency_hz=args.freq,
@@ -1843,7 +1976,9 @@ def main():
                         detection_status=DETECTION_STATUS_NO_DETECTION,
                         confirmed_status=0,
                         noise_psd=nodet_noise_psd,
-                    )
+                        collection_id=cycle_collection_id,
+                        slice_id=cycle_slice_id,
+                    ) and report_sent
                 cand_str = ''
                 if best_candidate is not None:
                     cand_freq = best_candidate['freq_hz']
@@ -1870,8 +2005,34 @@ def main():
                       cycle=cycle, stft_ms=stft_ms, fold_ms=fold_ms,
                       dump_ms=dump_ms, total_ms=total_ms)
 
+            if collection_control is not None:
+                if report_attempted and report_sent:
+                    completion_sent = send_lifecycle_udp(
+                        pulse_sock, pulse_dest, MessageType.CYCLE_COMPLETE,
+                        args.tag_id, cycle_collection_id, cycle_slice_id)
+                    if completion_sent:
+                        collection_control.complete(cycle_collection_id, cycle_slice_id)
+                    else:
+                        send_failed_udp(
+                            pulse_sock, pulse_dest, args.tag_id,
+                            cycle_collection_id, cycle_slice_id,
+                            ErrorCode.REPORT_SEND_FAILED)
+                else:
+                    send_failed_udp(
+                        pulse_sock, pulse_dest, args.tag_id,
+                        cycle_collection_id, cycle_slice_id,
+                        ErrorCode.REPORT_SEND_FAILED)
+
     except KeyboardInterrupt:
         pass  # Handled by signal handler
+    except Exception:
+        if (pulse_sock is not None and collection_control is not None
+                and collection_control.active_ids is not None):
+            collection_id, slice_id = collection_control.active_ids
+            send_failed_udp(
+                pulse_sock, pulse_dest, args.tag_id, collection_id, slice_id,
+                ErrorCode.UNEXPECTED_EXCEPTION)
+        raise
     finally:
         elapsed = time.monotonic() - run_start
         slog.emit(SESSION_END,

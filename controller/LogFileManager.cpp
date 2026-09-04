@@ -89,23 +89,12 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
 
 }
 
-void LogFileManager::detectorsStarted(float headingDeg)
+void LogFileManager::detectorsStarted()
 {
-    if (headingDeg >= 0 && !_logDirRotation.empty()) {
-        // During rotation: create heading subdirectory under rotation parent
-        if (!_logDirDetectors.empty()) {
-            _logDirDetectors.clear();
-        }
-        std::string headingDir = formatString("%s/heading-%03.0f", _logDirRotation.c_str(), headingDeg);
-        std::error_code errorCode;
-        fs::create_directory(headingDir.c_str(), errorCode);
-        if (errorCode) {
-            logDebug() << "Failed to create heading directory " << headingDir << ": " << errorCode.message();
-            _createLogDir(DETECTORS);
-        } else {
-            logDebug() << "Created heading log directory:" << headingDir;
-            _logDirDetectors = headingDir;
-        }
+    if (!_logDirRotation.empty()) {
+        // Rotation: detectors persist across headings, so their logs live at the
+        // rotation root; each detector creates heading-XXX/ for per-slice output.
+        _logDirDetectors = _logDirRotation;
     } else {
         _createLogDir(DETECTORS);
     }

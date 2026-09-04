@@ -14,7 +14,7 @@ public:
 		ROTATION
 	} LogType_t;
 
-	void detectorsStarted(float headingDeg = -1);
+ void detectorsStarted();
 	void detectorsStopped();
     bool detectorsLogging() const { return !_logDirDetectors.empty(); }
 
@@ -36,6 +36,9 @@ public:
 
 	std::string filename	(LogType_t logType, const char* root, const char* extension);
 	std::string logDir		(LogType_t logType) const;
+	/// Directory the controller log is mirrored into: detectors dir while detecting,
+	/// else the rotation dir so the whole rotation (start through bearing) is captured.
+	std::string controllerLogDir() const { return !_logDirDetectors.empty() ? _logDirDetectors : _logDirRotation; }
 
 private:
 	LogFileManager();

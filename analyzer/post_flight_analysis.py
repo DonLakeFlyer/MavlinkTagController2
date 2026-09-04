@@ -206,6 +206,12 @@ class DetectorSummary:
     elapsed_s: float = 0.0
     gap_zerofill: int = 0
     gap_reset: int = 0
+    # Persistent layout: the process-wide SESSION_END lands in one heading's
+    # file. Kept here (not in the per-heading fields above) so the rotation
+    # summary can show it once without attributing it to that heading.
+    rotation_elapsed_s: float = 0.0
+    rotation_gap_zerofill: int = 0
+    rotation_gap_reset: int = 0
     # Collected per-cycle data
     cycles: List[DetectionCycle] = field(default_factory=list)
     # Timing (from TIMING entries)
@@ -343,8 +349,16 @@ def _ts_str_from_ns(ts_ns):
     return ''
 
 
-def parse_detector_jsonl(path: str) -> DetectorSummary:
-    """Parse a detector .jsonl file into a DetectorSummary."""
+def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
+    """Parse a detector .jsonl file into a DetectorSummary.
+
+    *per_slice* marks a heading-NNN/ file from a persistent detector. Its
+    SESSION_END (present only in the last heading's file) carries process-wide
+    values, so none of them are attributed to this heading: cycle/detection
+    counts come from the slice's own records, gap counts from its own
+    GAP_EVENTs, and the process-wide elapsed/gap totals are parked in the
+    rotation_* fields for the caller to surface once.
+    """
     entries = read_jsonl(path)
     det = DetectorSummary()
 
@@ -441,11 +455,19 @@ def parse_detector_jsonl(path: str) -> DetectorSummary:
 
     # --- SESSION_END ---
     for e in entries_by_type(entries, SESSION_END):
+        if per_slice:
+            det.rotation_elapsed_s = e.get('elapsed_s', 0.0)
+            det.rotation_gap_zerofill = e.get('gap_zerofill_count', 0)
+            det.rotation_gap_reset = e.get('gap_reset_count', 0)
+            continue
         det.total_cycles = e.get('cycles', 0)
         det.total_detections = e.get('detections', 0)
         det.elapsed_s = e.get('elapsed_s', 0.0)
         det.gap_zerofill = e.get('gap_zerofill_count', 0)
         det.gap_reset = e.get('gap_reset_count', 0)
+    if per_slice:
+        det.gap_zerofill = sum(1 for ev in det.gap_events if ev.get('kind') == 'zerofill')
+        det.gap_reset = sum(1 for ev in det.gap_events if ev.get('kind') == 'reset')
 
     return det
 
@@ -509,11 +531,24 @@ def generate_report(log_dir: str) -> str:
 
     heading_dirs = sorted(glob.glob(os.path.join(log_dir, 'heading-*')))
     heading_dirs = [d for d in heading_dirs if os.path.isdir(d)]
+    # Persistent layout: one detector process spans every heading and writes
+    # its SESSION_END to the last heading's file; those totals are rotation-
+    # wide, not per-slice. Legacy layout ran a fresh detector per heading.
+    # session.json is written for every Python-mode session regardless of SDR
+    # (the HF decimator log is absent on AirSpy Mini), so key on that.
+    persistent_layout = bool(heading_dirs) and os.path.exists(
+        os.path.join(log_dir, 'session.json'))
 
     if heading_dirs:
-        # Rotation: aggregate across all heading subdirectories
-        dec_paths = [os.path.join(d, 'airspyhf_decimator.log')
-                     for d in heading_dirs]
+        # Rotation: aggregate across all heading subdirectories. The pipeline
+        # (decimator + detectors) now persists across headings and logs at the
+        # rotation root; fall back to per-heading logs for older sessions.
+        root_dec = os.path.join(log_dir, 'airspyhf_decimator.log')
+        if os.path.exists(root_dec):
+            dec_paths = [root_dec]
+        else:
+            dec_paths = [os.path.join(d, 'airspyhf_decimator.log')
+                         for d in heading_dirs]
         jsonl_files = []
         for d in heading_dirs:
             jsonl_files.extend(sorted(
@@ -531,9 +566,10 @@ def generate_report(log_dir: str) -> str:
             os.path.join(log_dir, 'tag*_cycle_*_power.npy')))
 
     # --- Parse ---
-    # Merge decimator perf from all heading directories. Each heading runs a
-    # fresh decimator, so the cumulative counters restart per log: sum each
-    # log's final counters rather than reading the last log only.
+    # Merge decimator perf across dec_paths. Current sessions have one log at
+    # the root; legacy rotations ran a fresh decimator per heading, so their
+    # cumulative counters restart per log: sum each log's final counters
+    # rather than reading the last log only.
     dec: dict = {'perfs': [], 'rate_warnings': [], 'drop_events': [],
                  'queue_drop_events': [], 'input_rate': 0.0,
                  'output_rate': 0.0,
@@ -562,10 +598,10 @@ def generate_report(log_dir: str) -> str:
 
     detectors = []
     for jp in jsonl_files:
-        det = parse_detector_jsonl(jp)
         # Tag with heading if inside a heading subdirectory
         parent = os.path.basename(os.path.dirname(jp))
         m = re.match(r'heading-(\d+)', parent)
+        det = parse_detector_jsonl(jp, per_slice=persistent_layout and m is not None)
         if m:
             det.heading = m.group(1)
         detectors.append(det)
@@ -651,13 +687,22 @@ def generate_report(log_dir: str) -> str:
           f'({100 * total_dets / total_cycles:.0f}%) |')
     # Detectors for different tags run concurrently, so take the max per
     # heading and sum headings (plain sessions are a single None heading).
-    elapsed_by_heading: Dict[Optional[str], float] = {}
-    for det in detectors:
-        elapsed_by_heading[det.heading] = max(
-            elapsed_by_heading.get(det.heading, 0.0), det.elapsed_s)
-    total_elapsed = sum(elapsed_by_heading.values())
+    # Persistent rotations report one process-wide duration instead.
+    rotation_elapsed = max((det.rotation_elapsed_s for det in detectors), default=0.0)
+    if rotation_elapsed > 0:
+        total_elapsed = rotation_elapsed
+    else:
+        elapsed_by_heading: Dict[Optional[str], float] = {}
+        for det in detectors:
+            elapsed_by_heading[det.heading] = max(
+                elapsed_by_heading.get(det.heading, 0.0), det.elapsed_s)
+        total_elapsed = sum(elapsed_by_heading.values())
     if total_elapsed > 0:
         w(f'| Session duration | {total_elapsed:.0f} s |')
+    rotation_gaps = (sum(det.rotation_gap_zerofill for det in detectors),
+                     sum(det.rotation_gap_reset for det in detectors))
+    if any(rotation_gaps):
+        w(f'| Gaps (rotation) | {rotation_gaps[0]} zero-filled, {rotation_gaps[1]} resets |')
     w()
 
     # ========== Pipeline Health (Decimator) ==========

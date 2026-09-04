@@ -133,7 +133,7 @@ This matches uavrt_detection's convention: the fold score naturally scales with 
 
 ## Controller Reporting Protocol
 
-Every detection cycle the detector sends a UDP packet to the controller (UDPPulseInfo_T format, 12 little-endian doubles). The `detection_status` and `confirmed_status` fields tell the controller and GCS what happened:
+The persistent detector uses the packed little-endian TTDP protocol defined in `detector_protocol.py` and `shared/detector_protocol.h`. After startup warmup it sends `READY`; each `ARM` command carries collection and slice IDs that are echoed in `ARMED`, pulse/no-detection reports, `CYCLE_COMPLETE`, and `FAILED`. The `detection_status` and `confirmed_status` fields tell the controller and GCS what happened:
 
 ### Detection Status Values
 
@@ -151,7 +151,7 @@ Defined in `TunnelProtocol.h` and mirrored in the detector:
 Binary (0 or 1). Since the Python detector is stateless (no cross-cycle confirmation), it uses the confidence ratio as a proxy:
 
 - `confirmed_status=1` — confident detection (score ≥ confidence_ratio × threshold; default ratio 1.3)
-- `confirmed_status=0` — everything else (marginal, no detection, heartbeat)
+- `confirmed_status=0` — everything else (marginal, no detection)
 
 The controller logs `confirmed_status=1` pulses at Info level and `confirmed_status=0` at Debug level. Both are forwarded to the GCS.
 
@@ -162,7 +162,8 @@ The controller logs `confirmed_status=1` pulses at Info level and `confirmed_sta
 | **Strong detection** (score ≥ confidence_ratio × threshold) | `1` (SUPERTHRESHOLD) | `1` | frequency, SNR, noise_psd, stft_score |
 | **Marginal detection** (score < confidence_ratio × threshold) | `0` (SUBTHRESHOLD) | `0` | frequency, SNR, noise_psd, stft_score |
 | **No detection** | `3` (NO_DETECTION) | `0` | noise_psd, start_time (no frequency/SNR) |
-| **Heartbeat** (periodic keepalive) | `0` | `0` | frequency_hz=0 (controller recognises as heartbeat) |
+
+Heartbeats are not pulse reports: the detector sends a header-only TTDP `HEARTBEAT` message (see `shared/detector_protocol.h`) once per second, with no `PulsePayload`.
 
 ### No-Detection Reports
 

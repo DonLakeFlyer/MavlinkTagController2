@@ -1,4 +1,9 @@
 {
+    "[c][cpp]": {
+        "editor.detectIndentation": false,
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4
+    },
     "files.associations": {
         "chrono": "cpp",
         "iostream": "cpp",
