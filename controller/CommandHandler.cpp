@@ -1224,8 +1224,7 @@ std::string CommandHandler::_handleStartCollectionSlice(const mavlink_tunnel_t& 
         arm.header.tag_id = tagInfo.id;
         arm.payload.heading_deg = sliceInfo.heading_deg;
         if (!_sendDetectorControl(tagInfo.id, arm)) {
-            _sendCollectionStatus(sliceInfo.collection_id, sliceInfo.slice_id,
-                                  COLLECTION_STATUS_FAILED);
+            // The NACK carries the reason; a FAILED status here would pre-empt it with error 0
             return "Failed to arm detector";
         }
     }
