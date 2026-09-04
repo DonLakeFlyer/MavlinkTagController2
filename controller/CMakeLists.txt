@@ -15,6 +15,7 @@ add_executable(MavlinkTagController2
     MonitoredProcess.cpp MonitoredProcess.h
     log.cpp log.h
     formatString.h
+    platformHelpers.h
     TagDatabase.cpp TagDatabase.h
     TelemetryCache.cpp TelemetryCache.h
     MavlinkOutgoingMessageQueue.cpp MavlinkOutgoingMessageQueue.h

@@ -2,6 +2,7 @@
 #include "formatString.h"
 #include "log.h"
 #include "MavlinkSystem.h"
+#include "platformHelpers.h"
 
 #include <chrono>
 #include <iomanip>
@@ -182,6 +183,20 @@ std::list<std::string> LogFileManager::_listLogFileDirs()
 
 std::string LogFileManager::_getSDCardPath()
 {
+    if (!isRunningOnRPi()) {
+        fs::path fakeSDCardDir = fs::path(_homeDir) / "fake-sdcard";
+        std::error_code ec;
+        fs::create_directories(fakeSDCardDir, ec);
+        if (ec) {
+            std::string errorMsg = "Unable to create fake SD card directory: " + fakeSDCardDir.string() + ": " + ec.message();
+            logError() << errorMsg;
+            MavlinkSystem::instance()->sendStatusText(errorMsg, MAV_SEVERITY_ALERT);
+            return std::string();
+        }
+        logInfo() << "Not running on rPi, saving logs to" << fakeSDCardDir.string();
+        return fakeSDCardDir.string();
+    }
+
     fs::path rpiMediaDir("/media/pi");
     if (!fs::exists(rpiMediaDir)) {
         std::string errorMsg = "Unable to locate media directory: " + rpiMediaDir.string();
@@ -244,6 +259,11 @@ void LogFileManager::saveLogsToSDCard()
             logError() << "Failed to copy directory " << srcDir << " to " << dstDir << ": " << errorCode.message();
             MavlinkSystem::instance()->sendStatusText("#Error during log save", MAV_SEVERITY_ERROR);
         }
+    }
+
+    if (!isRunningOnRPi()) {
+        MavlinkSystem::instance()->sendStatusText("#Log save complete", MAV_SEVERITY_INFO);
+        return;
     }
 
     auto unmountCommand = formatString("sudo umount %s", sdCardPath.c_str());
