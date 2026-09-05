@@ -320,7 +320,7 @@ retrospectively.
 
 Measurement has no threshold to clear, so only the lock heading needs the full
 40 s dwell. The other seven need ~10 s. Rotation time drops from ~5.3 minutes to
-~1.5, and bearings improve at the same time.
+~2 (40 + 7 × 10 = 110 s), and bearings improve at the same time.
 
 First rotation: dwell K=20 per heading only until a candidate passes tests 1–3,
 then drop to K=5. From the second rotation on, lock on the previous bearing.
@@ -391,6 +391,64 @@ report regardless of pf. But **acquisition** range — "is there a tag out here 
 all?" — still lives entirely on that threshold, and that is the K=40 long-range
 play in change 7. Sensitivity spent on false-alarm control is spent exactly
 where nothing else can recover it.
+
+### 9. Start the rotation on the prior bearing
+
+**Depends on change 2. Do not change the rotation order before it lands** —
+with a fresh detector per heading every stop is a cold K=20 dwell regardless of
+order, so reordering buys nothing.
+
+Once change 7 is in effect (K=20 to lock, K=5 to measure), the rotation's
+duration is set by how many headings are visited *before* the lock. Two facts
+bound what ordering can do:
+
+- A non-detection carries no information: a heading 90° off and one 180° off
+  both return the pedestal. There is nothing to adapt on until the first lock,
+  so the order must be fixed in advance.
+- Under change 2 no dwell is wasted — every heading is re-measured
+  retrospectively at the lock. Ordering only shortens time-to-lock.
+
+Only the front lobe locks. At max range that is ~1 heading (the per-heading
+P(detect) table above); inside max range it is ~3 adjacent headings (boresight
+±45°). In the April flight data the real detections were 45°/90° at every range
+because the collar bearing (~61–71°) fell between two grid headings.
+
+**With a prior — almost always — start on it.** Rotation 2 onward has the
+previous bearing (the vehicle moved a few hundred metres, the tag is kilometres
+away, so the bearing changed by a few degrees). Rotation 1 has the search-plan
+heading. Inside max range the lobe is ±45° wide so a rough prior still lands on
+it; at the edge (±45° Pd is 8% in the table above) the prior needs to be within
+~±22.5°, which the previous rotation's bearing satisfies but a search-plan guess
+may not. Order: prior, prior ±45°, then the rest.
+
+Times below assume a 3-heading lobe, i.e. inside max range:
+
+| start heading | locks at dwell | rotation time (40 s lock, 10 s measure) |
+|---|---|---|
+| fixed 0°, clockwise | ~2.9 average, 6 worst | ~167 s average, 260 s worst |
+| prior bearing first | 1 | 110 s |
+
+With a persistent detector, rotation 2 can skip the lock dwell entirely if the
+rotation-1 lock (bin, phase, PRI) is still inside its PRI-accuracy lifetime
+(change 4): all 8 headings at K=5, ~80 s. Starting on the prior bearing is then
+a sanity check — the first heading should return the highest amplitude.
+
+**No prior — first rotation of a blind search only — cardinals then
+diagonals:** `0, 90, 180, 270, 45, 135, 225, 315`. Any 3 consecutive 45°
+headings contain a cardinal, so inside max range this locks in ≤4 dwells:
+
+| pattern | expected dwells to lock (3-heading lobe) | worst case |
+|---|---|---|
+| clockwise | ~2.9 | 6 |
+| cardinals then diagonals | ~2.1 | 4 |
+
+At true max range the lobe is a single heading and both patterns are
+equivalent. This is a ~1-dwell improvement in the no-prior case; the prior is
+the real lever.
+
+**Do not shorten the rotation after locking.** The rear and side headings —
+near-zero amplitudes — are what the pattern fit (change 6) uses to reject the
+180° solution. All 8 are still needed; they are just cheaper once locked.
 
 ---
 
