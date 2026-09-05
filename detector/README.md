@@ -175,6 +175,21 @@ This is a Python detector addition; the uavrt_detection MATLAB/C++ detector does
 
 The detector monitors timestamp continuity between UDP packets to detect data loss.
 
+### Continuous timeline
+
+IQ is kept in a single stream (`iq_stream.py`) indexed by absolute sample
+position. Nothing on the control plane clears it: an `ARM` only records the
+stream index where that heading begins, so a segment for slice *N* starts at the
+first sample received after its `ARM` while earlier samples remain available as
+history. Segments are cut back-to-back with no discarded overshoot, so
+consecutive segments are sample-contiguous. History further than one segment
+behind the read cursor is retired and counted (`retired_samples` in
+`SESSION_END`).
+
+Datagrams are received on a dedicated thread into a bounded ring
+(`udp_receiver.py`) so STFT/fold/dump stalls cannot back up the kernel socket.
+Ring overflow is counted (`rx_ring_dropped`) and surfaces as a timestamp gap.
+
 ### Two-Tier Gap Classification
 
 A single threshold at **2×t_p** (30 ms for default 15 ms pulse width) determines handling:
@@ -182,9 +197,9 @@ A single threshold at **2×t_p** (30 ms for default 15 ms pulse width) determine
 | Gap Size | Action | Rationale |
 |----------|--------|-----------|
 | **< 2×t_p** (< 30 ms) | **Zero-fill** | Maintains STFT continuity, prevents phase jumps |
-| **≥ 2×t_p** (≥ 30 ms) | **Discard & reset** | Likely missed pulse(s), better to start fresh |
+| **≥ 2×t_p** (≥ 30 ms) | **Barrier** | Likely missed pulse(s); no segment may span the hole |
 
-**No "accept as-is" category:** All gaps are handled actively—either compensated via zero-fill or rejected via buffer reset.
+**No "accept as-is" category:** All gaps are handled actively—either compensated via zero-fill or fenced off with a barrier.
 
 ### Zero-Fill Implementation
 
@@ -199,10 +214,10 @@ When any gap below the threshold is detected:
 ### Large Gap Handling
 
 When a gap ≥30 ms is detected:
-1. Discard all buffered samples (`buf_parts.clear()`)
-2. Reset segment timestamp
+1. The hole is **not** zero-filled; a barrier is placed at the first post-gap sample
+2. The current segment's cursor moves to the barrier (pre-gap samples stay in history)
 3. Log event with detailed diagnostics
-4. Start accumulating fresh data
+4. Accumulation continues from the barrier
 
 **Rationale:** Missing >2% of segment data corrupts fold timing. Processing would yield false negatives or spurious detections.
 

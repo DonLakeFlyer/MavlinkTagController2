@@ -375,6 +375,14 @@ int rx_callback(airspyhf_transfer_t* transfer)
 				packet_hdr.magic = TTWF_ZMQ_IQ_MAGIC;
 				packet_hdr.version = TTWF_ZMQ_IQ_VERSION;
 				packet_hdr.header_size = TTWF_ZMQ_IQ_HEADER_SIZE;
+				if (transfer->dropped_samples > 0) {
+					uint64_t skipped = ttwf_sequence_skip_for_dropped_samples(
+							transfer->dropped_samples, transfer->sample_count);
+					fprintf(stderr, "airspyhf_rx: USB dropped_samples=%llu, skipping %llu sequence number(s)\n",
+							(unsigned long long)transfer->dropped_samples,
+							(unsigned long long)skipped);
+					zmq_sequence += skipped;
+				}
 				packet_hdr.sequence = zmq_sequence++;
 				packet_hdr.timestamp_us = get_time_us();
 				packet_hdr.sample_rate = current_sample_rate;

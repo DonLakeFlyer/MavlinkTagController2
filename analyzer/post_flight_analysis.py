@@ -206,12 +206,15 @@ class DetectorSummary:
     elapsed_s: float = 0.0
     gap_zerofill: int = 0
     gap_reset: int = 0
+    rx_ring_dropped: int = 0
+    retired_samples: int = 0
     # Persistent layout: the process-wide SESSION_END lands in one heading's
     # file. Kept here (not in the per-heading fields above) so the rotation
     # summary can show it once without attributing it to that heading.
     rotation_elapsed_s: float = 0.0
     rotation_gap_zerofill: int = 0
     rotation_gap_reset: int = 0
+    rotation_rx_ring_dropped: int = 0
     # Collected per-cycle data
     cycles: List[DetectionCycle] = field(default_factory=list)
     # Timing (from TIMING entries)
@@ -270,8 +273,11 @@ def parse_decimator_log(path: str) -> dict:
         r'locked input rate=([\d.e+-]+)\s+outputRate=([\d.e+-]+)')
     drop_pat = re.compile(
         r'dropped\s+(\d+)\s+packet.*?total_dropped=(\d+)')
+    hole_pat = re.compile(
+        r'missing_input_samples=(\d+)\s+skipped_output_samples=(\d+)')
     queue_drop_pat = re.compile(
         r'queue full.*?total_queue_drops=(\d+)')
+    holes: List[dict] = []
 
     try:
         with open(path) as f:
@@ -314,6 +320,13 @@ def parse_decimator_log(path: str) -> dict:
                         f'dropped {dm.group(1)} packet(s), '
                         f'total={dm.group(2)}')
                     event_dropped = max(event_dropped, int(dm.group(2)))
+                    hm = hole_pat.search(line)
+                    if hm:
+                        holes.append({
+                            'packets': int(dm.group(1)),
+                            'missing_input_samples': int(hm.group(1)),
+                            'skipped_output_samples': int(hm.group(2)),
+                        })
 
                 qm = queue_drop_pat.search(line)
                 if qm:
@@ -335,9 +348,55 @@ def parse_decimator_log(path: str) -> dict:
         'out_of_order': last.out_of_order,
         'drop_events': drop_events,
         'queue_drop_events': queue_drop_events,
+        'holes': holes,
+        'lost_input_samples': sum(h['missing_input_samples'] for h in holes),
         'input_rate': input_rate,
         'output_rate': output_rate,
     }
+
+
+def parse_rx_log(path: str) -> dict:
+    """Parse airspyhf_zeromq_rx.log for USB-level sample loss."""
+    pat = re.compile(r'USB dropped_samples=(\d+)')
+    total = 0
+    events = 0
+    try:
+        with open(path) as f:
+            for line in f:
+                m = pat.search(line)
+                if m:
+                    total += int(m.group(1))
+                    events += 1
+    except FileNotFoundError:
+        pass
+    return {'usb_dropped_samples': total, 'usb_drop_events': events}
+
+
+def correlate_holes_with_gaps(holes: List[dict], gap_events: List[dict],
+                              fs: float, tol_ms: float = 1.5) -> List[dict]:
+    """Return decimator holes with no detector GAP_EVENT of matching duration.
+
+    Neither log carries a shared clock, so holes and gaps are matched by
+    duration (skipped_output_samples/fs vs gap_ms), each gap used at most once.
+    An unmatched hole means IQ went missing upstream and the detector's
+    timeline did not register it — the failure mode continuity accounting
+    exists to catch.
+    """
+    remaining = [g.get('gap_ms', 0.0) for g in gap_events
+                 if g.get('kind') in ('zerofill', 'reset')]
+    unmatched = []
+    for hole in holes:
+        want_ms = hole['skipped_output_samples'] / fs * 1000.0
+        best = None
+        for i, got_ms in enumerate(remaining):
+            if abs(got_ms - want_ms) <= tol_ms and (
+                    best is None or abs(got_ms - want_ms) < abs(remaining[best] - want_ms)):
+                best = i
+        if best is None:
+            unmatched.append(hole)
+        else:
+            remaining.pop(best)
+    return unmatched
 
 
 def _ts_str_from_ns(ts_ns):
@@ -459,12 +518,15 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
             det.rotation_elapsed_s = e.get('elapsed_s', 0.0)
             det.rotation_gap_zerofill = e.get('gap_zerofill_count', 0)
             det.rotation_gap_reset = e.get('gap_reset_count', 0)
+            det.rotation_rx_ring_dropped = e.get('rx_ring_dropped', 0)
             continue
         det.total_cycles = e.get('cycles', 0)
         det.total_detections = e.get('detections', 0)
         det.elapsed_s = e.get('elapsed_s', 0.0)
         det.gap_zerofill = e.get('gap_zerofill_count', 0)
         det.gap_reset = e.get('gap_reset_count', 0)
+        det.rx_ring_dropped = e.get('rx_ring_dropped', 0)
+        det.retired_samples = e.get('retired_samples', 0)
     if per_slice:
         det.gap_zerofill = sum(1 for ev in det.gap_events if ev.get('kind') == 'zerofill')
         det.gap_reset = sum(1 for ev in det.gap_events if ev.get('kind') == 'reset')
@@ -571,11 +633,11 @@ def generate_report(log_dir: str) -> str:
     # cumulative counters restart per log: sum each log's final counters
     # rather than reading the last log only.
     dec: dict = {'perfs': [], 'rate_warnings': [], 'drop_events': [],
-                 'queue_drop_events': [], 'input_rate': 0.0,
+                 'queue_drop_events': [], 'holes': [], 'input_rate': 0.0,
                  'output_rate': 0.0,
                  'dropped': 0, 'malformed': 0, 'queue_drops': 0,
                  'out_of_order': 0, 'rate_warning_count': 0,
-                 'rate_warning_max': 0}
+                 'rate_warning_max': 0, 'lost_input_samples': 0}
     for dp in dec_paths:
         d = parse_decimator_log(dp)
         dec['perfs'].extend(d['perfs'])
@@ -587,6 +649,8 @@ def generate_report(log_dir: str) -> str:
                                       d['rate_warning_count'])
         dec['drop_events'].extend(d['drop_events'])
         dec['queue_drop_events'].extend(d['queue_drop_events'])
+        dec['holes'].extend(d['holes'])
+        dec['lost_input_samples'] += d['lost_input_samples']
         dec['dropped'] += d['dropped']
         dec['malformed'] += d['malformed']
         dec['queue_drops'] += d['queue_drops']
@@ -606,6 +670,22 @@ def generate_report(log_dir: str) -> str:
             det.heading = m.group(1)
         detectors.append(det)
     bearings = parse_bearing_log(bearing_path)
+
+    # Same discovery rule as the decimator log: root first, else per heading.
+    rx_paths = [os.path.join(os.path.dirname(dp), 'airspyhf_zeromq_rx.log')
+                for dp in dec_paths]
+    rx = {'usb_dropped_samples': 0, 'usb_drop_events': 0}
+    for rp in rx_paths:
+        r = parse_rx_log(rp)
+        rx['usb_dropped_samples'] += r['usb_dropped_samples']
+        rx['usb_drop_events'] += r['usb_drop_events']
+
+    # Continuity cross-check: every upstream hole must show up downstream.
+    all_gap_events = [ev for det in detectors for ev in det.gap_events]
+    det_fs = next((det.fs for det in detectors if det.fs > 0), 3840.0)
+    unmatched_holes = correlate_holes_with_gaps(dec['holes'], all_gap_events, det_fs)
+    rx_ring_dropped = sum(det.rx_ring_dropped + det.rotation_rx_ring_dropped
+                          for det in detectors)
 
     is_rotation = (os.path.exists(bearing_path)
                    or 'Rotation' in os.path.basename(log_dir))
@@ -763,6 +843,23 @@ def generate_report(log_dir: str) -> str:
         if dec['rate_warning_count']:
             label = ('sustained' if rate_sustained else 'startup transient')
             w(f'- **Rate warnings:** {dec["rate_warning_count"]} ({label})')
+
+        in_rate = dec['input_rate'] or 768000.0
+        usb_ms = rx['usb_dropped_samples'] / in_rate * 1000.0
+        zmq_ms = dec['lost_input_samples'] / in_rate * 1000.0
+        w(f'- **Lost IQ by stage:** '
+          f'USB: {rx["usb_dropped_samples"]} samples ({usb_ms:.1f} ms); '
+          f'ZMQ/queue: {dec["lost_input_samples"]} input samples '
+          f'({zmq_ms:.1f} ms) in {len(dec["holes"])} hole(s); '
+          f'detector rx ring: {rx_ring_dropped} packet(s)')
+        if dec['holes']:
+            if unmatched_holes:
+                w(f'- **Continuity check:** {len(unmatched_holes)} upstream '
+                  f'hole(s) NOT observed by detector — continuity accounting '
+                  f'is broken between decimator and detector')
+            else:
+                w(f'- **Continuity check:** all {len(dec["holes"])} upstream '
+                  f'hole(s) observed by detector as timestamp gaps')
         w()
 
     # ========== Rotation Overview ==========
@@ -1123,6 +1220,17 @@ def generate_report(log_dir: str) -> str:
                 f'Decimator: sustained sample-rate mismatch '
                 f'({dec["rate_warning_count"]} warnings) — check SDR '
                 f'clock / --input-rate')
+        if unmatched_holes:
+            anomalies.append(
+                f'Continuity: {len(unmatched_holes)} decimator hole(s) with no '
+                f'matching detector gap — IQ loss was not propagated')
+    if rx['usb_dropped_samples'] > 0:
+        anomalies.append(
+            f'Airspy: {rx["usb_dropped_samples"]} samples dropped at USB '
+            f'({rx["usb_drop_events"]} event(s))')
+    if rx_ring_dropped > 0:
+        anomalies.append(
+            f'Detector: {rx_ring_dropped} datagram(s) dropped in receive ring')
 
     for b in bearings:
         if b.r_squared < 0.5:

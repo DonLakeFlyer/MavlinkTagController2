@@ -15,7 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from post_flight_analysis import (  # noqa: E402
-    RATE_WARNING_TRANSIENT_MAX, generate_report, parse_decimator_log,
+    RATE_WARNING_TRANSIENT_MAX, correlate_holes_with_gaps, generate_report,
+    parse_decimator_log, parse_rx_log,
 )
 
 
@@ -97,6 +98,64 @@ class TestDecimatorParsing:
         d = parse_decimator_log(str(log))
         assert d['dropped'] == 1
 
+    def test_holes_carry_sample_counts(self, tmp_path):
+        log = tmp_path / 'airspyhf_decimator.log'
+        log.write_text(
+            'airspyhf_decimator: dropped 5 packet(s) before sequence=25 '
+            'missing_input_samples=20480 skipped_output_samples=102 '
+            'total_dropped=5\n'
+            'airspyhf_decimator: dropped 2 packet(s) before sequence=90 '
+            'missing_input_samples=8192 skipped_output_samples=41 '
+            'total_dropped=7\n')
+        d = parse_decimator_log(str(log))
+        assert d['holes'] == [
+            {'packets': 5, 'missing_input_samples': 20480,
+             'skipped_output_samples': 102},
+            {'packets': 2, 'missing_input_samples': 8192,
+             'skipped_output_samples': 41},
+        ]
+        assert d['lost_input_samples'] == 28672
+
+
+class TestRxLogParsing:
+    def test_usb_drops_are_summed(self, tmp_path):
+        log = tmp_path / 'airspyhf_zeromq_rx.log'
+        log.write_text(
+            'airspyhf_rx: USB dropped_samples=4096, skipping 1 sequence number(s)\n'
+            'some unrelated line\n'
+            'airspyhf_rx: USB dropped_samples=12288, skipping 3 sequence number(s)\n')
+        d = parse_rx_log(str(log))
+        assert d['usb_dropped_samples'] == 16384
+        assert d['usb_drop_events'] == 2
+
+    def test_missing_log_is_zero(self, tmp_path):
+        d = parse_rx_log(str(tmp_path / 'nope.log'))
+        assert d == {'usb_dropped_samples': 0, 'usb_drop_events': 0}
+
+
+class TestHoleGapCorrelation:
+    FS = 3840.0
+
+    def test_every_hole_matched_by_a_detector_gap(self):
+        holes = [{'skipped_output_samples': 102},   # 26.6 ms
+                 {'skipped_output_samples': 41}]    # 10.7 ms
+        gaps = [{'kind': 'zerofill', 'gap_ms': 10.9},
+                {'kind': 'reset', 'gap_ms': 26.4}]
+        unmatched = correlate_holes_with_gaps(holes, gaps, self.FS)
+        assert unmatched == []
+
+    def test_unmatched_hole_is_reported(self):
+        holes = [{'skipped_output_samples': 102},
+                 {'skipped_output_samples': 3840}]  # 1 s hole, nothing downstream
+        gaps = [{'kind': 'reset', 'gap_ms': 26.6}]
+        unmatched = correlate_holes_with_gaps(holes, gaps, self.FS)
+        assert unmatched == [{'skipped_output_samples': 3840}]
+
+    def test_each_gap_matches_at_most_one_hole(self):
+        holes = [{'skipped_output_samples': 102}, {'skipped_output_samples': 102}]
+        gaps = [{'kind': 'reset', 'gap_ms': 26.6}]
+        assert len(correlate_holes_with_gaps(holes, gaps, self.FS)) == 1
+
 
 class TestPlainSession:
     def test_transient_rate_warnings_are_healthy(self, tmp_path):
@@ -150,6 +209,42 @@ class TestPlainSession:
         md = generate_report(str(tmp_path))
         assert 'Decimator: 1 dropped ZMQ packets' in md
         assert 'No anomalies detected' not in md
+
+    def test_lost_iq_summary_by_stage(self, tmp_path):
+        entries = _detector_entries(3, 1, 12.0)
+        entries[-1]['rx_ring_dropped'] = 2
+        entries[-1]['retired_samples'] = 5000
+        entries.insert(-1, {'type': 'gap_event', 'kind': 'reset', 'gap_ms': 26.6})
+        _jsonl(tmp_path / 'detector_3.jsonl', entries)
+        (tmp_path / 'airspyhf_zeromq_rx.log').write_text(
+            'airspyhf_rx: USB dropped_samples=4096, skipping 1 sequence number(s)\n')
+        (tmp_path / 'airspyhf_decimator.log').write_text(
+            'airspyhf_decimator: perf zmq_Bps=1 zmq_complex_sps=768000 '
+            'malformed=0 dropped=5 out_of_order=0 out_sps=3840 '
+            'cpu_duty_pct=20 queue_depth=1 queue_drops=0\n'
+            'airspyhf_decimator: dropped 5 packet(s) before sequence=25 '
+            'missing_input_samples=20480 skipped_output_samples=102 '
+            'total_dropped=5\n')
+        md = generate_report(str(tmp_path))
+        assert '**Lost IQ by stage:**' in md
+        assert 'USB: 4096 samples (5.3 ms)' in md
+        assert 'ZMQ/queue: 20480 input samples (26.7 ms) in 1 hole(s)' in md
+        assert 'detector rx ring: 2 packet(s)' in md
+        assert 'all 1 upstream hole(s) observed by detector' in md
+        assert '**Status:** WARNING' in md
+
+    def test_hole_not_seen_by_detector_is_flagged(self, tmp_path):
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 1, 12.0))
+        (tmp_path / 'airspyhf_decimator.log').write_text(
+            'airspyhf_decimator: perf zmq_Bps=1 zmq_complex_sps=768000 '
+            'malformed=0 dropped=5 out_of_order=0 out_sps=3840 '
+            'cpu_duty_pct=20 queue_depth=1 queue_drops=0\n'
+            'airspyhf_decimator: dropped 5 packet(s) before sequence=25 '
+            'missing_input_samples=20480 skipped_output_samples=102 '
+            'total_dropped=5\n')
+        md = generate_report(str(tmp_path))
+        assert '1 upstream hole(s) NOT observed by detector' in md
+        assert 'continuity accounting' in md
 
 
 class TestRotationSession:

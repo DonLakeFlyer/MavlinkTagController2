@@ -97,6 +97,17 @@ static inline void ttwf_write_u64_le(uint8_t *p, uint64_t value) {
     p[7] = (uint8_t)((value >> 56) & 0xFFull);
 }
 
+/* Sequence numbers to skip so that samples the SDR driver dropped before this
+ * packet appear downstream as a gap of whole packets (rounded up). */
+static inline uint64_t ttwf_sequence_skip_for_dropped_samples(uint64_t dropped_samples,
+                                                             uint32_t samples_per_packet) {
+    if (dropped_samples == 0u || samples_per_packet == 0u) {
+        return 0u;
+    }
+    /* ceil-div without the additive overflow of (a + b - 1) / b */
+    return (dropped_samples - 1u) / samples_per_packet + 1u;
+}
+
 static inline int ttwf_decode_zmq_iq_header(const uint8_t *data,
                                             size_t data_size,
                                             ttwf_zmq_iq_packet_header_t *out) {

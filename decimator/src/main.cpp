@@ -18,6 +18,7 @@
 #include <deque>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -31,6 +32,7 @@
 namespace {
 
 constexpr double kTotalDecimation = 8.0 * 5.0 * 5.0;
+constexpr uint64_t kTotalDecimationInt = 8U * 5U * 5U;
 constexpr std::size_t kBytesPerIQ = TTWF_ZMQ_IQ_BYTES_PER_COMPLEX_SAMPLE;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 6.28318530717958647692;
@@ -225,6 +227,12 @@ class FirDecimator {
         return output;
     }
 
+    void reset() {
+        std::fill(state_.begin(), state_.end(), std::complex<float>{0.0f, 0.0f});
+        writeIndex_ = 0;
+        phase_ = 0;
+    }
+
   private:
     int factor_;
     std::vector<float> taps_;
@@ -257,6 +265,14 @@ class FrequencyShifter {
                 phase_ += kTwoPi;
             }
         }
+    }
+
+    // Keep the LO coherent with real time across a hole of n missing samples.
+    void advance(uint64_t n) {
+        if (step_ == 0.0 || n == 0) {
+            return;
+        }
+        phase_ = std::remainder(phase_ + step_ * static_cast<double>(n), kTwoPi);
     }
 
   private:
@@ -333,6 +349,66 @@ class TimestampEncoder {
     uint32_t baseNsec_ = 0;
     double baseSeconds_ = 0.0;
     bool anchored_ = false;
+};
+
+uint64_t holeOutputSamples(uint64_t missingPackets, uint32_t samplesPerPacket) {
+    const uint64_t in = missingPackets * samplesPerPacket;
+    return (in + kTotalDecimationInt / 2) / kTotalDecimationInt;
+}
+
+// Turns decimated samples into UDP frames whose header timestamps are derived
+// from stream position, including time skipped over upstream holes.
+class FrameAssembler {
+  public:
+    using Frame = std::vector<std::complex<float>>;
+
+    FrameAssembler(double outputRateHz, std::size_t payloadSamples)
+        : encoder_(outputRateHz), payloadSamples_(payloadSamples) {
+        buffer_.reserve(payloadSamples_ * 2);
+    }
+
+    std::vector<Frame> push(const Frame &samples) {
+        buffer_.insert(buffer_.end(), samples.begin(), samples.end());
+        std::vector<Frame> frames;
+        std::size_t consumed = 0;
+        while (buffer_.size() - consumed >= payloadSamples_) {
+            frames.push_back(makeFrame(buffer_.begin() + consumed,
+                                       buffer_.begin() + consumed + payloadSamples_));
+            consumed += payloadSamples_;
+        }
+        buffer_.erase(buffer_.begin(), buffer_.begin() + consumed);
+        return frames;
+    }
+
+    // Emit whatever is pending as a short frame so it precedes a hole.
+    std::optional<Frame> flush() {
+        if (buffer_.empty()) {
+            return std::nullopt;
+        }
+        Frame frame = makeFrame(buffer_.begin(), buffer_.end());
+        buffer_.clear();
+        return frame;
+    }
+
+    void skip(uint64_t outputSamples) { position_ += outputSamples; }
+
+    std::size_t pending() const { return buffer_.size(); }
+    uint64_t position() const { return position_; }
+
+  private:
+    template <typename It> Frame makeFrame(It first, It last) {
+        Frame frame;
+        frame.reserve(static_cast<std::size_t>(last - first) + 1);
+        frame.push_back(encoder_.headerForSample(position_));
+        frame.insert(frame.end(), first, last);
+        position_ += static_cast<uint64_t>(last - first);
+        return frame;
+    }
+
+    TimestampEncoder encoder_;
+    std::size_t payloadSamples_;
+    Frame buffer_;
+    uint64_t position_ = 0;
 };
 
 class UdpStreamer {
@@ -729,16 +805,12 @@ int main(int argc, char **argv) {
 
         ZmqIqReceiver receiver(opts.zmqEndpoint);
         PacketQueue queue(kMaxQueuePackets);
-        std::unique_ptr<TimestampEncoder> timestampEncoder;
+        std::unique_ptr<FrameAssembler> assembler;
         UdpStreamer streamer(opts.ip, opts.ports);
         std::unique_ptr<FrequencyShifter> frequencyShifter;
 
         const std::size_t payloadSamples = opts.packetSamples - 1;
 
-        std::vector<std::complex<float>> buffer;
-        buffer.reserve(payloadSamples * 2);
-
-        uint64_t samplesSent = 0;
         uint64_t inputSamplesProcessed = 0;
         uint64_t outputSamplesProduced = 0;
         uint64_t framesSent = 0;
@@ -832,9 +904,31 @@ int main(int argc, char **argv) {
                 const uint64_t newlyDropped =
                     packet.sequence - (prevSequence + 1);
                 droppedPackets += newlyDropped;
+                const uint64_t missingInput =
+                    newlyDropped * static_cast<uint64_t>(packet.sampleCount);
+                const uint64_t missingOutput =
+                    holeOutputSamples(newlyDropped, packet.sampleCount);
                 std::cerr << "airspyhf_decimator: dropped " << newlyDropped
                           << " packet(s) before sequence=" << packet.sequence
+                          << " missing_input_samples=" << missingInput
+                          << " skipped_output_samples=" << missingOutput
                           << " total_dropped=" << droppedPackets << "\n";
+                // Preserve the sample↔time contract: emit what precedes the
+                // hole, then move the output clock past it so the detector
+                // sees a real timestamp gap instead of a compressed stream.
+                if (assembler) {
+                    if (auto tail = assembler->flush()) {
+                        streamer.send(*tail);
+                        ++framesSent;
+                    }
+                    assembler->skip(missingOutput);
+                }
+                if (frequencyShifter) {
+                    frequencyShifter->advance(missingInput);
+                }
+                stage1.reset();
+                stage2.reset();
+                stage3.reset();
             } else if (packet.sequence <= prevSequence) {
                 ++outOfOrderPackets;
                 std::cerr << "airspyhf_decimator: out-of-order/duplicate "
@@ -871,8 +965,8 @@ int main(int argc, char **argv) {
                 }
 
                 effectiveOutputRate = effectiveInputRate / kTotalDecimation;
-                timestampEncoder =
-                    std::make_unique<TimestampEncoder>(effectiveOutputRate);
+                assembler = std::make_unique<FrameAssembler>(effectiveOutputRate,
+                                                             payloadSamples);
                 frequencyShifter = std::make_unique<FrequencyShifter>(
                     effectiveInputRate, opts.shiftKhz * 1000.0);
 
@@ -909,7 +1003,7 @@ int main(int argc, char **argv) {
             auto stageInput = std::move(packet.samples);
             inputSamplesProcessed += stageInput.size();
 
-            if (!frequencyShifter || !timestampEncoder) {
+            if (!frequencyShifter || !assembler) {
                 std::cerr << "airspyhf_decimator: internal initialization "
                              "incomplete, skipping packet sequence="
                           << packet.sequence << "\n";
@@ -931,20 +1025,9 @@ int main(int argc, char **argv) {
             processingTime += (std::chrono::steady_clock::now() - processStart);
             outputSamplesProduced += decimated.size();
 
-            if (!decimated.empty()) {
-                buffer.insert(buffer.end(), decimated.begin(), decimated.end());
-            }
-
-            while (buffer.size() >= payloadSamples) {
-                std::vector<std::complex<float>> frame;
-                frame.reserve(opts.packetSamples);
-                frame.push_back(timestampEncoder->headerForSample(samplesSent));
-                frame.insert(frame.end(), buffer.begin(),
-                             buffer.begin() + payloadSamples);
+            for (const auto &frame : assembler->push(decimated)) {
                 streamer.send(frame);
                 ++framesSent;
-                buffer.erase(buffer.begin(), buffer.begin() + payloadSamples);
-                samplesSent += payloadSamples;
             }
 
             auto now = std::chrono::steady_clock::now();
@@ -1012,7 +1095,7 @@ int main(int argc, char **argv) {
                           << " out_sps=" << outputRateMeasured
                           << " frames_per_s=" << frameRate
                           << " cpu_duty_pct=" << processingDuty
-                          << " buffer_samples=" << buffer.size()
+                          << " buffer_samples=" << (assembler ? assembler->pending() : 0U)
                           << " zmq_packets=" << zmqPacketsReceived
                           << " malformed=" << receiver.malformedPackets()
                           << " dropped=" << droppedPackets

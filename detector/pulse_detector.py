@@ -4,7 +4,9 @@ VHF Pulse Detector for Crystal-Oscillator Radio Collars
 
 Reads decimated IQ data from the airspyhf_zeromq + decimator pipeline via UDP.
 Assumes crystal-oscillator timing (ti_pu=0, ti_pj=0) — no uncertainty or jitter.
-Performs K-fold pulse integration (configurable via --k) and resets completely after each cycle.
+Performs K-fold pulse integration (configurable via --k) over a continuous
+sample timeline; segments are cut back-to-back and the stream is never cleared
+by control-plane events (see iq_stream.py).
 
 Pipeline:
   airspyhf_zeromq_rx ---> [ZMQ PUB] ---> decimator ---> [UDP] ---> this script
@@ -12,11 +14,11 @@ Pipeline:
 The decimator must include this script's --port in its --ports list.
 
 Algorithm (per cycle):
-  1. Accumulate decimated IQ (enough for K pulse intervals)
+  1. Take the next samples_needed samples from the continuous stream
   2. Compute STFT with window matched to pulse width (50% overlap)
   3. Fold the power spectrogram at the exact PRI (no M/J expansion)
   4. Threshold using Extreme Value Theory (Monte Carlo noise trials)
-  5. Report detections, discard all state, repeat
+  5. Report detections, advance the cursor, repeat
 
 Examples:
   python pulse_detector.py --tp 0.02 --tip 2.0
@@ -39,6 +41,8 @@ from collection_control import ArmResult, CollectionControl, handle_control_pack
 from detector_protocol import (ErrorCode, MessageType, ProtocolError, PulseReport,
                                encode_failed_report, encode_header,
                                encode_pulse_report)
+from iq_stream import IqStream
+from udp_receiver import PacketRing, UdpReceiver
 import time
 from typing import NamedTuple
 
@@ -1440,25 +1444,37 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    buf_parts  = []
-    buf_len    = 0
-    seg_ts     = None
     cycle      = 0
     det_total  = 0
     run_start  = time.monotonic()
     last_detection_ts = None  # Track last detection time for inter-pulse delta
 
-    # Packet continuity tracking
-    last_packet_ts = None
-    last_packet_samples = 0
-    gap_zerofill_count = 0
-    gap_reset_count = 0
-    segment_has_gap = False
-    segment_gap_fills = []  # list of (sample_offset, n_zeros) for current segment
-
     # Single gap threshold (conservative), in nanoseconds
     gap_threshold_reset = args.tp * 2.0  # ≥ 2×tp: reset, < 2×tp: zero-fill
-    gap_threshold_reset_ns = int(gap_threshold_reset * 1e9)
+
+    def _on_gap(kind, **kw):
+        if kind == 'zerofill':
+            human = (f'GAP < THRESHOLD: {kw["gap_ms"]:.1f} ms '
+                     f'(< {kw["threshold_ms"]:.1f} ms) - '
+                     f'zero-filling {kw["missing_samples"]} samples')
+        elif kind == 'negative':
+            human = (f'\n*** NEGATIVE GAP (timestamp regression): {kw["gap_ms"]:.1f} ms ***\n'
+                     f'    Last packet ts={kw["last_ts_ns"]} ns, current ts={kw["current_ts_ns"]} ns\n'
+                     f'    Expected delta={kw["expected_delta_ms"]:.1f} ms, '
+                     f'got {kw["actual_delta_ms"]:.1f} ms\n')
+        else:
+            human = (f'\n*** GAP ≥ RESET THRESHOLD: {kw["gap_ms"]:.1f} ms '
+                     f'(≥{kw["threshold_ms"]:.1f} ms) ***\n'
+                     f'    Segment restarts at stream index {kw["barrier"]}\n'
+                     f'    Expected packet after {kw["expected_delta_ms"]:.1f} ms, '
+                     f'got {kw["actual_delta_ms"]:.1f} ms\n')
+        slog.emit(GAP_EVENT, human, kind=kind, **kw)
+
+    # Continuous timeline: never cleared by ARM; history beyond one full
+    # segment behind the cursor is retired (and counted) so memory is bounded.
+    stream = IqStream(fs=args.fs, gap_reset_threshold_s=gap_threshold_reset,
+                      retain_samples=samples_needed, on_gap=_on_gap)
+    cursor = 0   # stream index where the next segment starts
 
     # Startup warmup: discard initial IQ before detection starts.
     warmup_remaining_samples = int(round(args.warmup_seconds * args.fs))
@@ -1484,8 +1500,17 @@ def main():
 
     print('Gap handling:')
     print(f'  < {gap_threshold_reset*1000:.1f} ms: zero-fill missing samples')
-    print(f'  ≥ {gap_threshold_reset*1000:.1f} ms: discard segment and reset buffer')
+    print(f'  ≥ {gap_threshold_reset*1000:.1f} ms: segment restarts after the hole')
     print('Waiting for data ...\n')
+
+    # Receive on its own thread so STFT/fold/dump stalls never back up the
+    # kernel socket buffer. 512 x 1023-sample frames ~= 2.3 min at 3840 S/s,
+    # ~4 MB; deep enough for any single-cycle stall, small enough that a
+    # sustained backlog surfaces as ring overflow rather than hiding.
+    rx_ring = PacketRing(max_packets=512)
+    rx_thread = UdpReceiver(sock, rx_ring)
+    rx_thread.start()
+    rx_ring_dropped_logged = 0
 
     try:
         while not _should_stop:
@@ -1511,11 +1536,8 @@ def main():
                             control_header.slice_id)
                         continue
                     if arm_result == ArmResult.ARMED:
-                        buf_parts.clear()
-                        buf_len = 0
-                        seg_ts = None
-                        segment_has_gap = False
-                        segment_gap_fills.clear()
+                        # Heading starts here; the timeline itself is untouched.
+                        cursor = stream.head
                         if args.log_dir:
                             # Heading comes off the wire: keep it a sane path component.
                             # One dir per heading: the GCS never revisits a heading
@@ -1550,10 +1572,13 @@ def main():
                             control_header.collection_id, control_header.slice_id)
 
             # ---- receive one UDP packet from the decimator ----
-            try:
-                data = sock.recv(65536)
-            except socket.timeout:
+            data = rx_ring.pop(timeout=2.0)
+            if data is None:
                 continue
+            if rx_ring.dropped != rx_ring_dropped_logged:
+                rx_ring_dropped_logged = rx_ring.dropped
+                print(f'WARNING: receive ring overflow, packets dropped total={rx_ring.dropped}',
+                      file=sys.stderr, flush=True)
             if len(data) < 16:
                 continue
 
@@ -1570,28 +1595,27 @@ def main():
                 n_samp = len(payload) // 8
                 if n_samp == 0:
                     continue
-                # Verify we can actually unpack this as IQ data
-                iq_test = np.frombuffer(payload[:min(16, len(payload))], dtype=np.complex64)
             except (ValueError, struct.error) as e:
                 print(f'Warning: malformed IQ data in packet: {e}', file=sys.stderr, flush=True)
                 continue
 
+            # Ingest first so continuity is tracked even across the warmup
+            # boundary; warmup only decides whether anything consumes it.
+            iq = np.frombuffer(payload[:n_samp * 8], dtype=np.complex64)
+            stream.append(iq, ts)
+
             # Discard initial IQ while front-end/stream settle.
             if warmup_remaining_samples > 0:
                 warmup_remaining_samples -= n_samp
+                cursor = stream.head
+                stream.retire(cursor)
                 if warmup_remaining_samples <= 0:
                     warmup_remaining_samples = 0
-                    seg_ts = None
-                    buf_parts.clear()
-                    buf_len = 0
                     print('Warmup complete: starting detection', flush=True)
                     if collection_control is not None:
                         send_lifecycle_udp(
                             pulse_sock, pulse_dest, MessageType.READY, args.tag_id)
                         last_ready_sent = time.monotonic()
-                # Keep continuity bookkeeping current during warmup.
-                last_packet_ts = ts
-                last_packet_samples = n_samp
                 continue
 
             # READY is a single UDP datagram with no controller ack of its own;
@@ -1604,99 +1628,18 @@ def main():
                     last_ready_sent = now
 
             if collection_control is not None and not collection_control.armed:
-                last_packet_ts = ts
-                last_packet_samples = n_samp
+                # Unarmed: keep buffering (the timeline persists), but there is
+                # no consumer, so the cursor tracks head and old history retires.
+                cursor = stream.head
+                stream.retire(cursor)
                 continue
 
-            if seg_ts is None:
-                seg_ts = ts
-
-            # Check for dropped packets via timestamp discontinuity
-            if last_packet_ts is not None and last_packet_samples > 0:
-                # All calculations in nanoseconds (exact integer arithmetic)
-                expected_delta_ns = int(round(last_packet_samples / args.fs * 1e9))
-                actual_delta_ns = ts - last_packet_ts
-                gap_size_ns = actual_delta_ns - expected_delta_ns
-
-                # Handle timestamp regression (negative gap) explicitly
-                if gap_size_ns < 0:
-                    gap_reset_count += 1
-                    gap_ms = gap_size_ns / 1_000_000.0
-                    slog.emit(GAP_EVENT,
-                              f'\n*** NEGATIVE GAP (timestamp regression): {gap_ms:.1f} ms ***\n'
-                              f'    Last packet ts={last_packet_ts} ns, current ts={ts} ns\n'
-                              f'    Expected delta={expected_delta_ns / 1_000_000.0:.1f} ms, '
-                              f'got {actual_delta_ns / 1_000_000.0:.1f} ms\n',
-                              kind='negative', gap_ms=gap_ms,
-                              last_ts_ns=last_packet_ts, current_ts_ns=ts,
-                              expected_delta_ms=expected_delta_ns / 1e6,
-                              actual_delta_ms=actual_delta_ns / 1e6)
-
-                    # Reset buffer and start a new segment from this packet
-                    buf_parts.clear()
-                    buf_len = 0
-                    seg_ts = ts
-                    segment_has_gap = False
-                    segment_gap_fills.clear()
-                else:
-                    # Calculate missing samples (only act if ≥1 sample missing)
-                    missing_samples = int(round(gap_size_ns / (1e9 / args.fs)))
-
-                    if missing_samples > 0:
-                        gap_ms = gap_size_ns / 1_000_000.0
-
-                        if gap_size_ns >= gap_threshold_reset_ns:
-                            # LARGE GAP: Discard segment and reset
-                            gap_reset_count += 1
-                            slog.emit(GAP_EVENT,
-                                      f'\n*** GAP ≥ RESET THRESHOLD: {gap_ms:.1f} ms '
-                                      f'(≥{gap_threshold_reset*1000:.1f} ms) ***\n'
-                                      f'    Discarding {buf_len} buffered samples and resetting segment\n'
-                                      f'    Expected packet after {expected_delta_ns / 1_000_000.0:.1f} ms, '
-                                      f'got {actual_delta_ns / 1_000_000.0:.1f} ms\n',
-                                      kind='reset', gap_ms=gap_ms,
-                                      threshold_ms=gap_threshold_reset * 1000,
-                                      discarded_samples=buf_len,
-                                      expected_delta_ms=expected_delta_ns / 1e6,
-                                      actual_delta_ms=actual_delta_ns / 1e6)
-
-                            # Reset buffer
-                            buf_parts.clear()
-                            buf_len = 0
-                            seg_ts = ts
-                            segment_has_gap = False
-                            segment_gap_fills.clear()
-
-                        else:
-                            # GAP BELOW THRESHOLD: Zero-fill
-                            gap_zerofill_count += 1
-                            segment_has_gap = True
-
-                            slog.emit(GAP_EVENT,
-                                      f'GAP < THRESHOLD: {gap_ms:.1f} ms '
-                                      f'(< {gap_threshold_reset*1000:.1f} ms) - '
-                                      f'zero-filling {missing_samples} samples',
-                                      kind='zerofill', gap_ms=gap_ms,
-                                      threshold_ms=gap_threshold_reset * 1000,
-                                      missing_samples=missing_samples)
-
-                            # Insert zeros to maintain continuity
-                            segment_gap_fills.append((buf_len, missing_samples))
-                            zeros = np.zeros(missing_samples, dtype=np.complex64)
-                            buf_parts.append(zeros)
-                            buf_len += missing_samples
-
-            # Store for next packet's continuity check
-            last_packet_ts = ts
-            last_packet_samples = n_samp
-
-            iq = np.frombuffer(payload[:n_samp * 8],
-                               dtype=np.complex64).copy()
-            buf_parts.append(iq)
-            buf_len += n_samp
+            # A hole >= threshold forbids spanning it: restart after the barrier.
+            if stream.barrier > cursor:
+                cursor = stream.barrier
 
             # ---- process when we have a full segment ----
-            if buf_len < samples_needed:
+            if stream.head - cursor < samples_needed:
                 continue
 
             cycle += 1
@@ -1707,15 +1650,10 @@ def main():
             else:
                 cycle_collection_id, cycle_slice_id = 0, 0
 
-            segment = np.concatenate(buf_parts)[:samples_needed]
-            buf_parts.clear()
-            buf_len = 0
-
-            # Check if this segment had gaps
-            had_gap = segment_has_gap
-            had_gap_fills = list(segment_gap_fills)
-            segment_has_gap = False
-            segment_gap_fills.clear()
+            segment, current_ts, had_gap_fills = stream.take(cursor, samples_needed)
+            cursor += samples_needed
+            stream.retire(cursor)
+            had_gap = bool(had_gap_fills)
 
             t_stft_start = time.monotonic()
             power, n_win = compute_stft_power(segment, n_w, n_ol, nfft, W=W,
@@ -1790,7 +1728,7 @@ def main():
                 try:
                     meta = {
                         'cycle': cycle,
-                        'timestamp_ns': seg_ts,
+                        'timestamp_ns': current_ts,
                         'fs': args.fs,
                         'nfft': nfft,
                         'n_w': n_w,
@@ -1823,15 +1761,13 @@ def main():
             proc_ms = (time.monotonic() - t0) * 1000.0
 
             # Timestamp string (UTC) for the start of this segment
-            # seg_ts is in nanoseconds; convert to seconds for datetime
+            # current_ts is in nanoseconds; convert to seconds for datetime
             ts_str = ''
-            current_ts = seg_ts  # Save before clearing
-            if seg_ts and seg_ts > 1e9:
+            if current_ts and current_ts > 1e9:
                 dt = datetime.datetime.fromtimestamp(
-                    seg_ts / 1e9, tz=datetime.timezone.utc
+                    current_ts / 1e9, tz=datetime.timezone.utc
                 )
                 ts_str = dt.strftime('%H:%M:%S') + f'.{dt.microsecond // 1000:03d}'
-            seg_ts = None
 
             # Append gap warning to output if segment had discontinuities
             gap_flag = ' [ZEROFILLED]' if had_gap else ''
@@ -2038,14 +1974,19 @@ def main():
         slog.emit(SESSION_END,
                   f'\n--- Detection stopped after {cycle} cycles ({elapsed:.0f} s) ---\n'
                   f'  Detections:        {det_total}\n'
-                  f'  Zero-filled gaps:  {gap_zerofill_count} (< {gap_threshold_reset*1000:.1f} ms)\n'
-                  f'  Reset gaps:        {gap_reset_count} (≥ {gap_threshold_reset*1000:.1f} ms, segments discarded)\n'
-                  f'  Total gap events:  {gap_zerofill_count + gap_reset_count}',
+                  f'  Zero-filled gaps:  {stream.zerofill_count} (< {gap_threshold_reset*1000:.1f} ms)\n'
+                  f'  Reset gaps:        {stream.reset_count} (≥ {gap_threshold_reset*1000:.1f} ms, segment restarted)\n'
+                  f'  Total gap events:  {stream.zerofill_count + stream.reset_count}\n'
+                  f'  Retired history:   {stream.retired_samples} samples\n'
+                  f'  RX ring overflow:  {rx_ring.dropped} packets',
                   cycles=cycle, elapsed_s=elapsed,
                   detections=det_total,
-                  gap_zerofill_count=gap_zerofill_count,
-                  gap_reset_count=gap_reset_count)
+                  gap_zerofill_count=stream.zerofill_count,
+                  gap_reset_count=stream.reset_count,
+                  retired_samples=stream.retired_samples,
+                  rx_ring_dropped=rx_ring.dropped)
         slog.close()
+        rx_thread.stop()
         heartbeat_stop.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=2.0)
