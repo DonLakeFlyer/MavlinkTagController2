@@ -59,6 +59,34 @@ static int test_bad_magic(void) {
     return ttwf_validate_zmq_iq_frame(frame, sizeof(frame), NULL) == TTWF_ZMQ_ERR_BAD_MAGIC ? 0 : 1;
 }
 
+/* USB-level drops must surface downstream as a sequence gap of whole packets. */
+static int test_sequence_skip_for_dropped_samples(void) {
+    if (ttwf_sequence_skip_for_dropped_samples(0, 4096) != 0) {
+        return 1;
+    }
+    if (ttwf_sequence_skip_for_dropped_samples(4096, 4096) != 1) {
+        return 1;
+    }
+    if (ttwf_sequence_skip_for_dropped_samples(3 * 4096, 4096) != 3) {
+        return 1;
+    }
+    /* Partial buffers still represent lost time: round up, never down to 0. */
+    if (ttwf_sequence_skip_for_dropped_samples(100, 4096) != 1) {
+        return 1;
+    }
+    if (ttwf_sequence_skip_for_dropped_samples(4096, 0) != 0) {
+        return 1;
+    }
+    /* Near UINT64_MAX the naive (a + b - 1) / b wraps; must not. */
+    if (ttwf_sequence_skip_for_dropped_samples(UINT64_MAX, 4096) != UINT64_MAX / 4096 + 1) {
+        return 1;
+    }
+    if (ttwf_sequence_skip_for_dropped_samples(UINT64_MAX, 1) != UINT64_MAX) {
+        return 1;
+    }
+    return 0;
+}
+
 int main(void) {
     if (test_valid_roundtrip() != 0) {
         fprintf(stderr, "test_valid_roundtrip failed\n");
@@ -66,6 +94,10 @@ int main(void) {
     }
     if (test_bad_magic() != 0) {
         fprintf(stderr, "test_bad_magic failed\n");
+        return 1;
+    }
+    if (test_sequence_skip_for_dropped_samples() != 0) {
+        fprintf(stderr, "test_sequence_skip_for_dropped_samples failed\n");
         return 1;
     }
 

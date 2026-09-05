@@ -198,7 +198,7 @@ Streams Airspy HF+ SDR IQ data over ZeroMQ PUB. Each message contains a fixed 40
 | `--input-rate <Hz>` | `0` | Expected incoming sample rate; `0` auto-learns from first packet |
 | `--strict-input-rate` | off | Exit on sample-rate mismatch beyond `--rate-tol-ppm` |
 | `--shift-khz <kHz>` | `10` | Frequency shift before decimation |
-| `--frame <samples>` | `1024` | Total complex samples per UDP packet (timestamp + payload) |
+| `--frame <samples>` | `1024` | Total complex samples per UDP packet (timestamp + payload). Frames are this size except immediately before an upstream hole, when the pending samples are flushed as a shorter frame so the next timestamp can jump past the hole. Consumers must size the payload from the datagram length. |
 | `--zmq-endpoint <uri>` | `tcp://127.0.0.1:5555` | ZeroMQ SUB endpoint |
 | `--rate-tol-ppm <ppm>` | `5000` | Allowed sample-rate error before warning |
 | `--ip <addr>` | `127.0.0.1` | Destination IPv4 address |
@@ -213,7 +213,7 @@ Each PUB message is a fixed header + IQ payload:
 | `magic` | `uint32` | `0x5a514941` |
 | `version` | `uint16` | `1` |
 | `header_size` | `uint16` | `40` |
-| `sequence` | `uint64` | Monotonically increasing per packet |
+| `sequence` | `uint64` | Increments per packet; skips ahead by one per packet's worth of samples the SDR driver dropped, so a gap always means lost IQ |
 | `timestamp_us` | `uint64` | Monotonic clock microseconds |
 | `sample_rate` | `uint32` | Sample rate in Hz |
 | `sample_count` | `uint32` | Number of complex samples |

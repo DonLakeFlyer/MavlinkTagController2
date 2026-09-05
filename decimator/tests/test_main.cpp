@@ -479,6 +479,253 @@ void testFirDecimatorOutputCount() {
     }
 }
 
+void testFirDecimatorResetMatchesFreshInstance() {
+    std::vector<std::complex<float>> warm(64, {0.9f, -0.3f});
+    std::vector<std::complex<float>> probe(16, {0.0f, 0.0f});
+    probe[0] = {1.0f, 0.0f};
+
+    FirDecimator used(4, 17, 0.1f);
+    (void)used.process(warm);
+    used.reset();
+    const auto afterReset = used.process(probe);
+
+    FirDecimator fresh(4, 17, 0.1f);
+    const auto fromFresh = fresh.process(probe);
+
+    if (afterReset.size() != fromFresh.size()) {
+        throw std::runtime_error("reset() output count differs from fresh");
+    }
+    for (std::size_t i = 0; i < afterReset.size(); ++i) {
+        if (!approxEqual(afterReset[i].real(), fromFresh[i].real()) ||
+            !approxEqual(afterReset[i].imag(), fromFresh[i].imag())) {
+            throw std::runtime_error("reset() must clear filter history");
+        }
+    }
+}
+
+void testFrequencyShifterAdvanceMatchesMixing() {
+    constexpr double sampleRateHz = 96000.0;
+    constexpr double shiftHz = 2000.0;
+    constexpr uint64_t hole = 4096 * 5;
+
+    FrequencyShifter advanced(sampleRateHz, shiftHz);
+    advanced.advance(hole);
+
+    FrequencyShifter mixed(sampleRateHz, shiftHz);
+    std::vector<std::complex<float>> dummy(hole, {1.0f, 0.0f});
+    mixed.mix(dummy);
+
+    std::vector<std::complex<float>> a(1, {1.0f, 0.0f});
+    std::vector<std::complex<float>> b(1, {1.0f, 0.0f});
+    advanced.mix(a);
+    mixed.mix(b);
+    if (!approxEqual(a[0].real(), b[0].real(), 1e-4f) ||
+        !approxEqual(a[0].imag(), b[0].imag(), 1e-4f)) {
+        throw std::runtime_error(
+            "advance(n) must leave the mixer phase where mix(n samples) would");
+    }
+}
+
+void testFrameAssemblerEmitsFullFramesWithContiguousTimestamps() {
+    constexpr double outputRateHz = 3840.0;
+    constexpr std::size_t payload = 20;
+    FrameAssembler assembler(outputRateHz, payload);
+
+    std::vector<std::complex<float>> samples(2 * payload + 5, {1.0f, 0.0f});
+    const auto frames = assembler.push(samples);
+    if (frames.size() != 2) {
+        throw std::runtime_error("expected two full frames");
+    }
+    if (frames[0].size() != payload + 1 || frames[1].size() != payload + 1) {
+        throw std::runtime_error("full frame must be header + payload");
+    }
+    const uint64_t t0 = extractTimeNs(frames[0][0]);
+    const uint64_t t1 = extractTimeNs(frames[1][0]);
+    const uint64_t expected = static_cast<uint64_t>(
+        std::llround(payload * 1e9 / outputRateHz));
+    if (t1 - t0 + 1000 < expected || t1 - t0 > expected + 1000) {
+        throw std::runtime_error("consecutive frame timestamps must be one payload apart");
+    }
+    if (assembler.pending() != 5) {
+        throw std::runtime_error("5 samples should remain pending");
+    }
+}
+
+void testFrameAssemblerFlushEmitsShortFrameAndSkipAdvancesTime() {
+    constexpr double outputRateHz = 3840.0;
+    constexpr std::size_t payload = 20;
+    FrameAssembler assembler(outputRateHz, payload);
+
+    std::vector<std::complex<float>> samples(payload + 7, {1.0f, 0.0f});
+    const auto full = assembler.push(samples);
+    if (full.size() != 1) {
+        throw std::runtime_error("expected one full frame");
+    }
+    const uint64_t t0 = extractTimeNs(full[0][0]);
+
+    const auto flushed = assembler.flush();
+    if (!flushed.has_value() || flushed->size() != 7 + 1) {
+        throw std::runtime_error("flush must emit the 7 pending samples as a short frame");
+    }
+    const uint64_t tShort = extractTimeNs((*flushed)[0]);
+    const uint64_t oneSample = static_cast<uint64_t>(std::llround(1e9 / outputRateHz));
+    if (tShort - t0 + 1000 < payload * oneSample || tShort - t0 > payload * oneSample + 1000) {
+        throw std::runtime_error("short frame timestamp must follow the full frame");
+    }
+    if (assembler.flush().has_value()) {
+        throw std::runtime_error("flush with nothing pending must emit nothing");
+    }
+
+    constexpr uint64_t skipped = 100;
+    assembler.skip(skipped);
+    const auto next = assembler.push(std::vector<std::complex<float>>(payload, {1.0f, 0.0f}));
+    if (next.size() != 1) {
+        throw std::runtime_error("expected one frame after skip");
+    }
+    const uint64_t tNext = extractTimeNs(next[0][0]);
+    const uint64_t expected = (payload + 7 + skipped) * oneSample;
+    if (tNext - t0 + 2000 < expected || tNext - t0 > expected + 2000) {
+        throw std::runtime_error("skip() must advance the next frame timestamp by the hole");
+    }
+}
+
+void testHoleOutputSamplesRounds() {
+    if (holeOutputSamples(5, 4096) != 102) {   // 20480 / 200 = 102.4
+        throw std::runtime_error("5 packets of 4096 should map to 102 output samples");
+    }
+    if (holeOutputSamples(1, 4096) != 20) {    // 20.48
+        throw std::runtime_error("1 packet of 4096 should map to 20 output samples");
+    }
+    if (holeOutputSamples(0, 4096) != 0) {
+        throw std::runtime_error("no hole should map to zero");
+    }
+}
+
+class TestUdpSink {
+  public:
+    TestUdpSink() {
+        fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd_ < 0) {
+            throw std::runtime_error("udp sink socket");
+        }
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        for (uint16_t p = 39000; p < 39100; ++p) {
+            addr.sin_port = htons(p);
+            if (::bind(fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
+                port_ = p;
+                break;
+            }
+        }
+        if (port_ == 0) {
+            throw std::runtime_error("udp sink bind");
+        }
+        timeval tv{1, 0};
+        (void)::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    ~TestUdpSink() { ::close(fd_); }
+    uint16_t port() const { return port_; }
+
+    bool recv(std::vector<std::complex<float>> &frame) {
+        std::vector<char> buf(65536);
+        const ssize_t n = ::recv(fd_, buf.data(), buf.size(), 0);
+        if (n <= 0) {
+            return false;
+        }
+        frame.resize(static_cast<std::size_t>(n) / sizeof(std::complex<float>));
+        std::memcpy(frame.data(), buf.data(), frame.size() * sizeof(std::complex<float>));
+        return true;
+    }
+
+  private:
+    int fd_ = -1;
+    uint16_t port_ = 0;
+};
+
+void testSequenceGapBecomesUdpTimestampGap() {
+    constexpr uint32_t inputRate = 768000;
+    constexpr uint32_t perPacket = 4096;
+    constexpr std::size_t frameSamples = 21; // header + 20 payload
+    constexpr uint64_t missingPackets = 5;
+
+    TestZmqPublisher publisher;
+    TestUdpSink sink;
+
+    gShouldStop = 0;
+    std::string endpoint = publisher.endpoint();
+    std::string ports = std::to_string(sink.port());
+    std::string frameArg = std::to_string(frameSamples);
+    char a0[] = "airspyhf_decimator";
+    char a1[] = "--input-rate";
+    char a2[] = "768000";
+    char a3[] = "--shift-khz";
+    char a4[] = "0";
+    char a5[] = "--frame";
+    char a6[] = "--ports";
+    char a7[] = "--zmq-endpoint";
+    std::vector<char *> argv = {a0, a1, a2, a3, a4, a5, frameArg.data(),
+                                a6, ports.data(), a7, endpoint.data()};
+    std::thread program([&]() {
+        (void)airspyhf_decimator_program_main(static_cast<int>(argv.size()), argv.data());
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    const std::vector<std::complex<float>> ones(perPacket, {0.5f, 0.0f});
+    const auto payload = makeIqPayload(ones);
+    auto send = [&](uint64_t seq) {
+        publisher.sendFrame(makeZmqFrame(kZmqMagic, kZmqVersion, kZmqHeaderSizeBytes,
+                                         seq, seq * 5333, inputRate, perPacket,
+                                         static_cast<uint32_t>(payload.size()), 0U,
+                                         payload));
+    };
+    // 20 contiguous packets, then a hole of 5, then 20 more.
+    for (uint64_t s = 0; s < 20; ++s) send(s);
+    for (uint64_t s = 20 + missingPackets; s < 40 + missingPackets; ++s) send(s);
+
+    std::vector<uint64_t> stamps;
+    std::vector<std::size_t> sizes;
+    std::vector<std::complex<float>> frame;
+    while (sink.recv(frame)) {
+        stamps.push_back(extractTimeNs(frame[0]));
+        sizes.push_back(frame.size() - 1);
+    }
+    gShouldStop = 1;
+    program.join();
+
+    if (stamps.size() < 10) {
+        throw std::runtime_error("too few UDP frames received");
+    }
+
+    // Every frame's timestamp must equal previous + previous payload duration,
+    // except exactly once where the hole adds ~missingPackets*perPacket/inputRate.
+    const double nsPerOut = 1e9 * kTotalDecimation / inputRate;
+    const double holeNs = 1e9 * static_cast<double>(missingPackets * perPacket) / inputRate;
+    int holes = 0;
+    bool sawShortFrame = false;
+    for (std::size_t i = 1; i < stamps.size(); ++i) {
+        const double expected = sizes[i - 1] * nsPerOut;
+        const double delta = static_cast<double>(stamps[i] - stamps[i - 1]);
+        if (std::abs(delta - expected) < 2.0 * nsPerOut) {
+            continue;
+        }
+        if (std::abs(delta - (expected + holeNs)) < 2.0 * nsPerOut) {
+            ++holes;
+            if (sizes[i - 1] < frameSamples - 1) {
+                sawShortFrame = true;
+            }
+            continue;
+        }
+        throw std::runtime_error("unexpected timestamp step between UDP frames");
+    }
+    if (holes != 1) {
+        throw std::runtime_error("expected exactly one timestamp hole matching the sequence gap");
+    }
+    if (!sawShortFrame) {
+        throw std::runtime_error("pending samples before the hole must be flushed as a short frame");
+    }
+}
+
 void testTimestampEncoderMonotonicStep() {
     TimestampEncoder encoder(1000.0);
 
@@ -824,6 +1071,12 @@ int main() {
         {"Zmq receiver malformed accounting",
          testZmqReceiverMalformedFrameAccounting},
         {"FirDecimator output count", testFirDecimatorOutputCount},
+        {"FirDecimator reset matches fresh", testFirDecimatorResetMatchesFreshInstance},
+        {"FrequencyShifter advance matches mixing", testFrequencyShifterAdvanceMatchesMixing},
+        {"FrameAssembler full frames", testFrameAssemblerEmitsFullFramesWithContiguousTimestamps},
+        {"FrameAssembler flush and skip", testFrameAssemblerFlushEmitsShortFrameAndSkipAdvancesTime},
+        {"holeOutputSamples rounding", testHoleOutputSamplesRounds},
+        {"Sequence gap becomes UDP timestamp gap", testSequenceGapBecomesUdpTimestampGap},
         {"TimestampEncoder monotonic step", testTimestampEncoderMonotonicStep},
         {"Timestamp matches uavrt_detection format",
          testTimestampMatchesUavrtDetectionFormat},
