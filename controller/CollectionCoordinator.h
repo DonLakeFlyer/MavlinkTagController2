@@ -33,6 +33,10 @@ public:
     Result finalize(uint32_t collectionId);
     Result cancel(uint32_t collectionId);
 
+    /// Python collections send only locked measurements (detection_status 2)
+    /// to the GCS; acquisition/marginal/no-detection reports stay in vehicle logs.
+    static bool forwardPulseToGcs(uint8_t detectionStatus) { return detectionStatus == 2; }
+
     /// How the last collection ended; distinguishes a FINALIZE retry from a
     /// FINALIZE that follows a CANCEL of the same id (which must not be Duplicate).
     enum class Disposition { None, Finalized, Cancelled };

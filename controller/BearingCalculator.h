@@ -7,19 +7,27 @@ class BearingCalculator {
 public:
     struct SliceData {
         float       heading_deg;
-        double      snr_db;
+        double      signal_power;
         uint32_t    tag_id;
+        double      snr_db;
+        bool        detected;
     };
 
     struct Result {
         uint32_t    tag_id;
-        float       bearing_deg;
-        float       r_squared;
-        uint32_t    n_valid_slices;
+        float       bearing_deg;    // NaN only when the tag had no detections
+        float       r_squared;      // confidence 0..1 (wire field name kept)
+        uint32_t    n_valid_slices; // detected slices
         float       best_snr;
     };
 
-    void addSlice(float heading_deg, double snr_db, uint32_t tag_id);
+    void addSlice(float heading_deg, double signal_power, uint32_t tag_id);
+    void addSlice(float heading_deg, double signal_power, uint32_t tag_id,
+                  double snr_db);
+    // Armed heading where the detector reported no pulse. Enters the fit as a
+    // censored observation: predicted power must not exceed a fraction of the
+    // weakest detected power in the rotation.
+    void addNoDetection(float heading_deg, uint32_t tag_id);
     std::vector<Result> solve() const;
     void reset();
 
@@ -29,6 +37,8 @@ public:
 
 private:
     Result _solveForTag(uint32_t tag_id, const std::vector<SliceData>& slices) const;
+    static void _fitAmplitude(const std::vector<double>& g, const std::vector<double>& p,
+                              bool fitFloor, double& A, double& B);
 
     // RA-2AK measured antenna pattern in dB, normalized to 0 dB at boresight.
     // Eyeballed from the Telonics RA-2A reception radiation pattern polar plot.
@@ -36,11 +46,11 @@ private:
     static constexpr int kPatternSize = 19;
     static const double kPatternDb[kPatternSize];
 
-    static constexpr int    kMaxIterations  = 100;
-    static constexpr double kConvergenceEps = 1e-6;
-    static constexpr double kNumDiffStep    = 0.5;   // degrees for numerical derivative
-    static constexpr double kMaxPhiStep     = 15.0;  // max bearing change per iteration
-    static constexpr int    kMinSlicesForFit = 3;
+    static constexpr double kScanStepDeg          = 0.5;
+    static constexpr int    kMinDetectedForFloor  = 3;     // fewer → noise floor pinned at 0
+    static constexpr double kCensorFraction       = 0.5;   // no-detection ⇒ power < this × weakest detection
+    static constexpr double kSpanFloorFraction    = 0.005; // of Σpower², cost tolerance for the plausible φ set
+    static constexpr double kFullDof              = 5.0;   // surplus observations for full confidence weight
 
     std::vector<SliceData> _slices;
 };

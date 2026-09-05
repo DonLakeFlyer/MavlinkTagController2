@@ -15,11 +15,19 @@ import pytest
 
 import pulse_detector
 from pulse_detector import (
+    amplitude_at_known_pulse,
     build_hypothesis_indices,
     build_weighting_matrix,
+    combine_agreeing_locks,
     compute_segment_samples,
     compute_stft_power,
     fold_detect,
+    lock_immediately,
+    locks_agree,
+    measure_at_lock,
+    measure_at_lock_psd,
+    PulseLock,
+    pulse_indices_at_known_phase,
 )
 from iq_simulator import SimConfig, TagSignal, generate_packet
 
@@ -44,6 +52,105 @@ N_MOVE = int(np.floor(N_EXACT_MOVE))      # integer PRI (moving rate)
 # Spectral weighting matrix (computed once for all tests)
 W, Wf = build_weighting_matrix(N_W, FS)
 NFFT = W.shape[1]
+
+
+def test_known_pulse_amplitude_subtracts_noise_without_clamping():
+    power = np.array([[0.5, 1.5, 0.5, 2.5, 0.5]], dtype=float)
+
+    assert amplitude_at_known_pulse(power, 0, [1, 3], np.array([0.5])) == 3.0
+    assert amplitude_at_known_pulse(power, 0, [0, 2, 4], np.array([1.0])) == -1.5
+
+
+def test_known_pulse_amplitude_ignores_out_of_range_indices():
+    power = np.array([[2.0, 3.0]], dtype=float)
+
+    assert amplitude_at_known_pulse(power, 0, [-1, 0, 2], np.array([0.5])) == 1.5
+    assert np.isnan(amplitude_at_known_pulse(power, 0, [-2, 4], np.array([0.5])))
+
+
+def test_known_phase_projects_into_later_segment():
+    indices = pulse_indices_at_known_phase(
+        segment_start_seconds=104.0, n_time=700, anchor_seconds=100.0,
+        pri_seconds=2.0, n_ws=10, fs=100.0, max_pulses=3)
+
+    np.testing.assert_array_equal(indices, [0, 20, 40])
+
+
+def test_measure_at_lock_uses_fixed_frequency_and_phase():
+    power = np.ones((3, 50), dtype=float)
+    power[1, [0, 20, 40]] = [20.0, 30.0, 40.0]
+    power[1, [1, 21, 41]] = [15.0, 15.0, 15.0]
+
+    signal_power, noise_power, indices = measure_at_lock(
+        power, np.array([-10.0, 0.0, 10.0]), 0.0, 104.0, 100.0, 2.0,
+        n_ws=10, fs=100.0, max_pulses=3)
+
+    np.testing.assert_array_equal(indices, [0, 20, 40])
+    assert noise_power == 1.0
+    # Pulse footprint is two half-overlapped windows: idx and idx+1.
+    assert signal_power == (20.0 + 30.0 + 40.0) + (3 * 15.0) - 6 * 1.0
+
+
+def test_measure_at_lock_captures_energy_split_across_window_pair():
+    # A 15 ms pulse over half-overlapped 15 ms windows always straddles two
+    # adjacent STFT windows. The lock projects to the first; the second holds
+    # the remainder. A single-window read would under-report by half.
+    power = np.ones((1, 50), dtype=float)
+    power[0, [20, 21]] = [11.0, 11.0]
+
+    signal_power, _, indices = measure_at_lock(
+        power, np.array([0.0]), 0.0, 104.0, 106.0, 2.0,
+        n_ws=10, fs=100.0, max_pulses=1)
+
+    np.testing.assert_array_equal(indices, [20])
+    assert signal_power == 20.0
+
+
+def test_measure_at_lock_psd_converts_buffered_measurement_units():
+    power = np.ones((3, 50), dtype=float)
+    power[1, [0, 20, 40]] = [20.0, 30.0, 40.0]
+
+    signal_power_psd, noise_power_psd, indices = measure_at_lock_psd(
+        power, np.array([-10.0, 0.0, 10.0]), 0.0, 104.0, 100.0, 2.0,
+        n_ws=10, fs=100.0, n_w=20, max_pulses=3)
+
+    np.testing.assert_array_equal(indices, [0, 20, 40])
+    assert noise_power_psd == pytest.approx(1.0 / 2000.0)
+    assert signal_power_psd == pytest.approx(87.0 / 2000.0)
+
+
+def test_lock_qualification_requires_frequency_and_phase_agreement():
+    previous = PulseLock(100.0, 10.0, 2.0, 4.0)
+
+    assert locks_agree(previous, PulseLock(250.0, 14.005, 2.0, 3.5),
+                       frequency_tolerance_hz=200.0,
+                       phase_tolerance_seconds=0.01)
+    assert not locks_agree(previous, PulseLock(350.0, 14.005, 2.0, 3.5),
+                           frequency_tolerance_hz=200.0,
+                           phase_tolerance_seconds=0.01)
+    assert not locks_agree(previous, PulseLock(100.0, 14.02, 2.0, 3.5),
+                           frequency_tolerance_hz=200.0,
+                           phase_tolerance_seconds=0.01)
+
+
+def test_agreeing_locks_refine_pri():
+    combined = combine_agreeing_locks(
+        PulseLock(100.0, 10.0, 2.0, 4.0),
+        PulseLock(120.0, 14.001, 2.0, 3.5))
+
+    assert combined.freq_hz == 110.0
+    assert abs(combined.pri_seconds - 2.0005) < 1e-12
+    assert combined.anchor_seconds == 10.0
+
+
+def test_unambiguous_candidate_locks_without_confirmation_cycle():
+    # A candidate far above the lock threshold is not a false alarm; spending
+    # a second K-group at the same heading to confirm it doubles time-to-lock
+    # for nothing. Only marginal candidates need the confirmation cycle.
+    assert lock_immediately(score_ratio=30.0, lock_score_ratio=3.0)
+    assert lock_immediately(score_ratio=267524.0, lock_score_ratio=3.0)
+    assert not lock_immediately(score_ratio=29.9, lock_score_ratio=3.0)
+    assert not lock_immediately(score_ratio=3.0, lock_score_ratio=3.0)
 
 
 @pytest.mark.parametrize('f0', [0.0, 300.0, -800.0, 1500.0])
@@ -94,7 +201,7 @@ def _generate_segment(K: int, snr_db: float, freq_offset_hz: float = 0.0,
 
 def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
                 tip: float = TIP_REST, seed: int = 42,
-                detection_margin: float = 0.90):
+                detection_margin: float = 0.90, frequency_mask=None):
     """Full pipeline: generate IQ → STFT → fold_detect. Returns fold_detect output."""
     old_K = pulse_detector.K
     pulse_detector.K = K
@@ -115,6 +222,7 @@ def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
             fold_offsets=fo,
             W=W, Wf=Wf,
             detection_margin=detection_margin,
+            frequency_mask=frequency_mask,
         )
     finally:
         pulse_detector.K = old_K
@@ -148,6 +256,17 @@ class TestSingleRateK5:
         assert abs(freq_diff - 200.0) < 2 * bin_width, (
             f"Frequency difference {freq_diff:.1f} Hz, expected ~200 Hz "
             f"(tolerance {2*bin_width:.1f} Hz)")
+
+    def test_frequency_prior_confines_reported_candidates(self):
+        frequency_mask = np.abs(Wf) <= 200.0
+        detections, _, best_candidate = _run_detect(
+            self.K, snr_db=25.0, freq_offset_hz=1200.0, seed=50,
+            frequency_mask=frequency_mask)
+
+        assert all(abs(detection.freq_hz) <= 200.0 for detection in detections)
+        if not detections:
+            assert best_candidate is not None
+            assert abs(best_candidate['freq_hz']) <= 200.0
 
     @pytest.mark.parametrize('offset_hz', [0.0, 200.0, -500.0, 1200.0])
     def test_absolute_frequency_label(self, offset_hz):

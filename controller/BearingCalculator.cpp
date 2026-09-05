@@ -15,9 +15,20 @@ const double BearingCalculator::kPatternDb[BearingCalculator::kPatternSize] = {
    -20.0,  -17.5,  -14.5,  -12.5,  -13.5,  -10.5,  -10.5,  -10.0,  -10.0
 };
 
-void BearingCalculator::addSlice(float heading_deg, double snr_db, uint32_t tag_id)
+void BearingCalculator::addSlice(float heading_deg, double signal_power, uint32_t tag_id)
 {
-    _slices.push_back({heading_deg, snr_db, tag_id});
+    addSlice(heading_deg, signal_power, tag_id, signal_power);
+}
+
+void BearingCalculator::addSlice(float heading_deg, double signal_power, uint32_t tag_id,
+                                 double snr_db)
+{
+    _slices.push_back({heading_deg, signal_power, tag_id, snr_db, true});
+}
+
+void BearingCalculator::addNoDetection(float heading_deg, uint32_t tag_id)
+{
+    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false});
 }
 
 void BearingCalculator::reset()
@@ -59,207 +70,135 @@ std::vector<BearingCalculator::Result> BearingCalculator::solve() const
     return results;
 }
 
+// Least-squares fit of power(θ) = A·pattern(θ-φ) + B for a fixed φ.
+// B is only free when there are enough detections to constrain it; otherwise
+// it is pinned at 0 (signal_power is already noise-subtracted).
+void BearingCalculator::_fitAmplitude(const std::vector<double>& g,
+                                      const std::vector<double>& p,
+                                      bool fitFloor, double& A, double& B)
+{
+    const int n = static_cast<int>(p.size());
+    double sg = 0.0, sgg = 0.0, sp = 0.0, sgp = 0.0;
+    for (int i = 0; i < n; ++i) {
+        sg  += g[i];
+        sgg += g[i] * g[i];
+        sp  += p[i];
+        sgp += g[i] * p[i];
+    }
+    if (fitFloor) {
+        const double det = n * sgg - sg * sg;
+        if (std::abs(det) > 1e-12) {
+            A = (n * sgp - sg * sp) / det;
+            B = (sp - A * sg) / n;
+            if (A >= 0.0) return;
+        }
+        A = 0.0;
+        B = sp / n;
+        return;
+    }
+    B = 0.0;
+    A = sgg > 1e-12 ? std::max(0.0, sgp / sgg) : 0.0;
+}
+
 BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const std::vector<SliceData>& slices) const
 {
     Result result {};
     result.tag_id = tag_id;
-    result.n_valid_slices = static_cast<uint32_t>(slices.size());
+    result.bearing_deg = std::numeric_limits<float>::quiet_NaN();
+    result.r_squared = 0.0f;
 
-    // Find best SNR
+    std::vector<double> detHeadings, detPowers, censHeadings;
     double bestSnr = -1e9;
+    double bestPower = -std::numeric_limits<double>::infinity();
+    double minPositivePower = std::numeric_limits<double>::infinity();
     float bestHeading = 0;
     for (const auto& s : slices) {
-        if (s.snr_db > bestSnr) {
-            bestSnr = s.snr_db;
-            bestHeading = s.heading_deg;
-        }
-    }
-    result.best_snr = static_cast<float>(bestSnr);
-
-    if (static_cast<int>(slices.size()) < kMinSlicesForFit) {
-        // Not enough data for a fit — return heading of best SNR
-        result.bearing_deg = bestHeading;
-        result.r_squared = 0.0f;
-        return result;
-    }
-
-    const int N = static_cast<int>(slices.size());
-
-    // Collect heading and SNR arrays
-    std::vector<double> headings(N);
-    std::vector<double> snrValues(N);
-    for (int i = 0; i < N; ++i) {
-        headings[i]  = slices[i].heading_deg;
-        snrValues[i] = slices[i].snr_db;
-    }
-
-    // Model: SNR(θ) = A · patternLinear(θ - φ) + B
-    // Three fitted parameters: φ (bearing), A (amplitude), B (noise floor)
-
-    // Initial estimates for A and B from data range
-    double maxVal = *std::max_element(snrValues.begin(), snrValues.end());
-    double minVal = *std::min_element(snrValues.begin(), snrValues.end());
-    double A = maxVal - minVal;
-    double B = minVal;
-
-    if (A <= 0.0) {
-        // No SNR contrast — return heading of best SNR
-        result.bearing_deg = bestHeading;
-        result.r_squared = 0.0f;
-        return result;
-    }
-
-    // Brute-force scan for best initial phi at 1° resolution.
-    // The RA-2AK pattern has sharp nulls, so the LM solver can get stuck
-    // at a local minimum if started at the nearest slice heading.
-    double phi = 0.0;
-    {
-        double bestCost = std::numeric_limits<double>::max();
-        for (int deg = 0; deg < 360; ++deg) {
-            const double testPhi = static_cast<double>(deg);
-            double testCost = 0.0;
-            for (int i = 0; i < N; ++i) {
-                const double predicted = A * patternLinear(headings[i] - testPhi) + B;
-                const double r = snrValues[i] - predicted;
-                testCost += r * r;
-            }
-            if (testCost < bestCost) {
-                bestCost = testCost;
-                phi = testPhi;
-            }
-        }
-    }
-
-    // Levenberg-Marquardt refinement of [phi, A, B]
-    double lambda = 1.0;
-
-    // Compute initial cost
-    double cost = 0.0;
-    for (int i = 0; i < N; ++i) {
-        const double predicted = A * patternLinear(headings[i] - phi) + B;
-        const double r = snrValues[i] - predicted;
-        cost += r * r;
-    }
-
-    for (int iter = 0; iter < kMaxIterations; ++iter) {
-        double JtJ[3][3] = {};
-        double Jtr[3]    = {};
-
-        for (int i = 0; i < N; ++i) {
-            const double offset    = headings[i] - phi;
-            const double pVal      = patternLinear(offset);
-            const double predicted = A * pVal + B;
-            const double residual  = snrValues[i] - predicted;
-
-            // Numerical derivative of pattern w.r.t. phi (central difference)
-            const double pPlus  = patternLinear(offset + kNumDiffStep);
-            const double pMinus = patternLinear(offset - kNumDiffStep);
-            // d/dphi: shifting phi up means offset decreases
-            const double dPhi = -A * (pMinus - pPlus) / (2.0 * kNumDiffStep);
-            const double dA   = pVal;
-            const double dB   = 1.0;
-
-            const double J[3] = { dPhi, dA, dB };
-
-            for (int r = 0; r < 3; ++r) {
-                Jtr[r] += J[r] * residual;
-                for (int c = 0; c < 3; ++c) {
-                    JtJ[r][c] += J[r] * J[c];
-                }
-            }
-        }
-
-        // Marquardt damping (multiplicative) — scales with curvature so that
-        // parameters with different magnitudes (phi°, A, B) are damped proportionally.
-        for (int k = 0; k < 3; ++k) {
-            JtJ[k][k] *= (1.0 + lambda);
-        }
-
-        // Solve 3x3 system JtJ * delta = Jtr using Cramer's rule
-        const double det =
-            JtJ[0][0] * (JtJ[1][1] * JtJ[2][2] - JtJ[1][2] * JtJ[2][1]) -
-            JtJ[0][1] * (JtJ[1][0] * JtJ[2][2] - JtJ[1][2] * JtJ[2][0]) +
-            JtJ[0][2] * (JtJ[1][0] * JtJ[2][1] - JtJ[1][1] * JtJ[2][0]);
-
-        if (std::abs(det) < 1e-15) break;
-
-        const double invDet = 1.0 / det;
-
-        double delta[3];
-        delta[0] = invDet * (
-            Jtr[0] * (JtJ[1][1] * JtJ[2][2] - JtJ[1][2] * JtJ[2][1]) -
-            JtJ[0][1] * (Jtr[1] * JtJ[2][2] - JtJ[1][2] * Jtr[2]) +
-            JtJ[0][2] * (Jtr[1] * JtJ[2][1] - JtJ[1][1] * Jtr[2]));
-        delta[1] = invDet * (
-            JtJ[0][0] * (Jtr[1] * JtJ[2][2] - JtJ[1][2] * Jtr[2]) -
-            Jtr[0] * (JtJ[1][0] * JtJ[2][2] - JtJ[1][2] * JtJ[2][0]) +
-            JtJ[0][2] * (JtJ[1][0] * Jtr[2] - Jtr[1] * JtJ[2][0]));
-        delta[2] = invDet * (
-            JtJ[0][0] * (JtJ[1][1] * Jtr[2] - Jtr[1] * JtJ[2][1]) -
-            JtJ[0][1] * (JtJ[1][0] * Jtr[2] - Jtr[1] * JtJ[2][0]) +
-            Jtr[0] * (JtJ[1][0] * JtJ[2][1] - JtJ[1][1] * JtJ[2][0]));
-
-        // Clamp phi step to prevent overshooting past sharp nulls
-        if (std::abs(delta[0]) > kMaxPhiStep) {
-            const double scale = kMaxPhiStep / std::abs(delta[0]);
-            delta[0] *= scale;
-            delta[1] *= scale;
-            delta[2] *= scale;
-        }
-
-        // Trial update
-        const double phiTrial = phi + delta[0];
-        const double ATrial   = std::max(A + delta[1], 0.0);
-        const double BTrial   = B + delta[2];
-
-        // Compute trial cost
-        double trialCost = 0.0;
-        for (int i = 0; i < N; ++i) {
-            const double predicted = ATrial * patternLinear(headings[i] - phiTrial) + BTrial;
-            const double r = snrValues[i] - predicted;
-            trialCost += r * r;
-        }
-
-        if (trialCost < cost) {
-            phi  = phiTrial;
-            A    = ATrial;
-            B    = BTrial;
-            cost = trialCost;
-            lambda *= 0.5;
-            if (lambda < 1e-7) lambda = 1e-7;
-        } else {
-            lambda *= 4.0;
-            if (lambda > 1e7) break;
+        if (!s.detected) {
+            censHeadings.push_back(s.heading_deg);
             continue;
         }
-
-        const double stepSize = std::sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
-        if (stepSize < kConvergenceEps) break;
+        detHeadings.push_back(s.heading_deg);
+        detPowers.push_back(s.signal_power);
+        bestSnr = std::max(bestSnr, s.snr_db);
+        if (s.signal_power > bestPower) {
+            bestPower = s.signal_power;
+            bestHeading = s.heading_deg;
+        }
+        if (s.signal_power > 0.0) {
+            minPositivePower = std::min(minPositivePower, s.signal_power);
+        }
     }
 
-    // Normalize phi to 0-360
+    const int nDet  = static_cast<int>(detHeadings.size());
+    const int nCens = static_cast<int>(censHeadings.size());
+    result.n_valid_slices = static_cast<uint32_t>(nDet);
+    result.best_snr = static_cast<float>(nDet > 0 ? bestSnr : 0.0);
+
+    if (nDet == 0 || bestPower <= 0.0) {
+        // Nothing usable; report the strongest heading if there was one.
+        if (nDet > 0) result.bearing_deg = bestHeading;
+        return result;
+    }
+
+    // Undetected headings had power below (roughly) the weakest detection.
+    const double censorLimit = kCensorFraction * minPositivePower;
+    const bool fitFloor = nDet >= kMinDetectedForFloor;
+
+    double sumPowerSq = 0.0;
+    for (double p : detPowers) sumPowerSq += p * p;
+
+    // The strongest detection must lie in the front half of the pattern, so
+    // only scan φ within ±90° of it. This also breaks the front/back mirror
+    // ambiguity of the symmetric pattern.
+    const int nSteps = static_cast<int>(std::lround(180.0 / kScanStepDeg)) + 1;
+    std::vector<double> costs(nSteps);
+    std::vector<double> g(nDet);
+    double A = 0.0, B = 0.0;
+    int bestIdx = 0;
+    double minCost = std::numeric_limits<double>::max();
+    for (int k = 0; k < nSteps; ++k) {
+        const double phi = bestHeading - 90.0 + k * kScanStepDeg;
+        for (int i = 0; i < nDet; ++i) g[i] = patternLinear(detHeadings[i] - phi);
+        _fitAmplitude(g, detPowers, fitFloor, A, B);
+
+        double cost = 0.0;
+        for (int i = 0; i < nDet; ++i) {
+            const double r = detPowers[i] - (A * g[i] + B);
+            cost += r * r;
+        }
+        for (int j = 0; j < nCens; ++j) {
+            const double excess = A * patternLinear(censHeadings[j] - phi) + B - censorLimit;
+            if (excess > 0.0) cost += excess * excess;
+        }
+        costs[k] = cost;
+        if (cost < minCost) {
+            minCost = cost;
+            bestIdx = k;
+        }
+    }
+
+    // Plausible set: every φ whose cost is within a factor of two of the
+    // minimum (with a small floor so exact fits still get a nonzero width).
+    const double threshold = minCost + std::max(minCost, kSpanFloorFraction * sumPowerSq);
+    int lo = bestIdx, hi = bestIdx;
+    while (lo > 0 && costs[lo - 1] <= threshold) --lo;
+    while (hi < nSteps - 1 && costs[hi + 1] <= threshold) ++hi;
+    const double spanDeg = (hi - lo) * kScanStepDeg;
+
+    double phi = bestHeading - 90.0 + 0.5 * (lo + hi) * kScanStepDeg;
     phi = std::fmod(phi, 360.0);
     if (phi < 0.0) phi += 360.0;
 
-    // Compute R²
-    double mean = 0.0;
-    for (int i = 0; i < N; ++i) {
-        mean += snrValues[i];
-    }
-    mean /= N;
-
-    double ssRes = 0.0;
-    double ssTot = 0.0;
-    for (int i = 0; i < N; ++i) {
-        const double predicted = A * patternLinear(headings[i] - phi) + B;
-        const double residual  = snrValues[i] - predicted;
-        ssRes += residual * residual;
-        ssTot += (snrValues[i] - mean) * (snrValues[i] - mean);
-    }
-
-    const double rSquared = (ssTot > 1e-12) ? (1.0 - ssRes / ssTot) : 0.0;
+    // Confidence: fraction of detected energy explained, scaled by how
+    // tightly the data pin φ and by how many observations exceed the model's
+    // parameter count. A lone detection with nothing else scores 0; two
+    // detections fit exactly but are still sparse.
+    const int nParams = fitFloor ? 3 : 2;
+    const double fitFactor  = std::clamp(1.0 - minCost / sumPowerSq, 0.0, 1.0);
+    const double spanFactor = std::clamp(1.0 - spanDeg / 180.0, 0.0, 1.0);
+    const double dofFactor  = std::clamp((nDet + nCens - nParams + 1) / kFullDof, 0.0, 1.0);
 
     result.bearing_deg = static_cast<float>(phi);
-    result.r_squared = static_cast<float>(std::max(0.0, rSquared));
+    result.r_squared = static_cast<float>(fitFactor * spanFactor * dofFactor);
     return result;
 }

@@ -139,33 +139,84 @@ static void testMultipleTags() {
                 r10->bearing_deg, r11->bearing_deg);
 }
 
-// ── Test: too few slices returns best-heading fallback ───────────────
-static void testTooFewSlices() {
+// ── Test: two detections still yield a bearing between them ─────────
+static void testTwoSlices() {
     BearingCalculator calc;
-    // Only 2 slices — below kMinSlicesForFit (3)
     calc.addSlice(0.0f, 40.0, 2);
     calc.addSlice(90.0f, 30.0, 2);
     auto results = calc.solve();
     CHECK(results.size() == 1);
-    CHECK(results[0].bearing_deg == 0.0f);  // heading of best SNR
-    CHECK(results[0].r_squared == 0.0f);
+    // Stronger slice at 0°, weaker at 90° → bearing leans toward 0° but
+    // must sit between them; mirror solution behind the antenna is rejected.
+    CHECK(results[0].bearing_deg > 0.0f && results[0].bearing_deg < 90.0f);
+    // Exact fit, but only two observations for two parameters: low confidence.
+    CHECK(results[0].r_squared > 0.0f && results[0].r_squared < 0.5f);
     CHECK(results[0].n_valid_slices == 2);
     CHECK(results[0].best_snr == 40.0f);
-    std::printf("PASS: testTooFewSlices (bearing=%.1f, R²=%.3f)\n",
+    std::printf("PASS: testTwoSlices (bearing=%.1f, conf=%.3f)\n",
                 results[0].bearing_deg, results[0].r_squared);
 }
 
-// ── Test: single slice returns that heading ──────────────────────────
+// ── Test: single slice returns that heading with zero confidence ───
 static void testSingleSlice() {
     BearingCalculator calc;
     calc.addSlice(123.0f, 35.0, 7);
     auto results = calc.solve();
     CHECK(results.size() == 1);
-    CHECK(results[0].bearing_deg == 123.0f);
+    assertNear(results[0].bearing_deg, 123.0f, 0.01f, "single slice heading");
     CHECK(results[0].r_squared == 0.0f);
     CHECK(results[0].n_valid_slices == 1);
     CHECK(results[0].best_snr == 35.0f);
     std::printf("PASS: testSingleSlice\n");
+}
+
+// ── Test: one detection plus no-detections everywhere else ──────────
+// The marginal-run case: tag locked on one heading only. Censored headings
+// must pin the bearing to that heading with real confidence.
+static void testSingleDetectionWithCensored() {
+    BearingCalculator calc;
+    calc.addSlice(0.0f, 32.8, 2);
+    for (int i = 1; i < 8; ++i) {
+        calc.addNoDetection(static_cast<float>(i * 45), 2);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    assertNear(results[0].bearing_deg, 0.0f, 10.0f, "single detection + censored");
+    CHECK(results[0].r_squared > 0.3f);
+    CHECK(results[0].n_valid_slices == 1);
+    std::printf("PASS: testSingleDetectionWithCensored (bearing=%.1f, conf=%.3f)\n",
+                results[0].bearing_deg, results[0].r_squared);
+}
+
+// ── Test: the observed marginal run (32.8 at N, 1.2 at NW, rest none) ──
+static void testMarginalRun() {
+    BearingCalculator calc;
+    calc.addSlice(0.0f, 32.8, 2);
+    calc.addSlice(315.0f, 1.2, 2);
+    for (int i = 1; i < 7; ++i) {
+        calc.addNoDetection(static_cast<float>(i * 45), 2);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    assertNear(results[0].bearing_deg, 0.0f, 20.0f, "marginal run bearing");
+    CHECK(results[0].r_squared > 0.2f);
+    CHECK(results[0].n_valid_slices == 2);
+    std::printf("PASS: testMarginalRun (bearing=%.1f, conf=%.3f)\n",
+                results[0].bearing_deg, results[0].r_squared);
+}
+
+// ── Test: only no-detections → NaN bearing, zero confidence ────────
+static void testOnlyCensored() {
+    BearingCalculator calc;
+    for (int i = 0; i < 8; ++i) {
+        calc.addNoDetection(static_cast<float>(i * 45), 4);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(std::isnan(results[0].bearing_deg));
+    CHECK(results[0].r_squared == 0.0f);
+    CHECK(results[0].n_valid_slices == 0);
+    std::printf("PASS: testOnlyCensored\n");
 }
 
 // ── Test: empty calculator returns no results ───────────────────────
@@ -260,7 +311,10 @@ static void testBearing_16slices() {
 int main() {
     testEmpty();
     testSingleSlice();
-    testTooFewSlices();
+    testTwoSlices();
+    testSingleDetectionWithCensored();
+    testMarginalRun();
+    testOnlyCensored();
     testReset();
     testBestSnr();
     testPatternSymmetry();
