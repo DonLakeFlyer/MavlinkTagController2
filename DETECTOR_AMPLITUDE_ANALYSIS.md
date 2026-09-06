@@ -23,10 +23,14 @@ changes described below:
 - One detector process remains alive for the collection. A lock requires two
   detections with `score_ratio >= 3`, no dominant single fold, frequency
   agreement within 200 Hz, and phase agreement within one STFT step. The
-  second anchor refines the PRI used for the rest of the rotation.
-- The first qualifying candidate holds the same heading for its confirmation
-  cycle. Once qualified, buffered earlier slices are remeasured at that common
-  frequency and phase, and later headings are measured without a threshold.
+  second anchor refines the PRI used for the rest of the rotation. A single
+  candidate at or above 10x the lock ratio (30 with defaults) locks
+  immediately, without a confirmation cycle; strong signals therefore lock on
+  their first cycle.
+- A marginal first qualifying candidate holds the same heading for its
+  confirmation cycle. Once qualified, buffered earlier slices are remeasured
+  at that common frequency and phase, and later headings are measured without
+  a threshold.
 - Acquisition uses the tag's configured K (GCS default 5; `--k`); locked
   measurements use `--measurement-k` (default 5, not currently set by the
   controller). The configured collar frequency gates initial acquisition to
@@ -45,8 +49,9 @@ changes described below:
 TagTracker (GCS) rotation ordering is described in that repository.
 
 Two extensions below remain intentionally incomplete: the detector qualifies
-the first two-cycle candidate and rejects a poor final pattern fit, but does
-not yet compare a bank of competing candidates by retrospective R-squared;
+the first two-cycle candidate but does not yet compare a bank of competing
+candidates by retrospective R-squared, and the controller reports fit quality
+through the confidence field rather than rejecting a poor final pattern fit;
 and a longer acquisition K remains a manually configured option rather than
 an automatic search-plan-driven escalation over an existing buffer.
 
