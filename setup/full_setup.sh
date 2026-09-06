@@ -4,7 +4,8 @@ set -e
 # wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/full_setup.sh
 
 echo "*** Install tools"
-sudo apt install build-essential git cmake libboost-all-dev libairspyhf-dev libzmq3-dev libusb-1.0-0-dev pkg-config python3 python3-venv -y
+sudo apt update
+sudo apt install build-essential git gh cmake libboost-all-dev libairspyhf-dev airspy airspyhf libzmq3-dev libusb-1.0-0-dev pkg-config python3 python3-venv -y
 git config --global pull.rebase false
 
 echo "*** Create repos directory"
@@ -39,8 +40,12 @@ if command -v raspi-config >/dev/null 2>&1; then
 
     echo "*** Install crontab entry to start controller at boot"
     CRON_LINE="@reboot /bin/bash $HOME/repos/MavlinkTagController2/setup/crontab-start-controller.sh >> $HOME/MavlinkTagController-boot.log 2>&1"
-    # Replace any existing entry for this script so a re-run never yields two @reboot controllers
-    (crontab -l 2>/dev/null | grep -Fv "crontab-start-controller.sh"; echo "$CRON_LINE") | crontab -
+    # Replace any existing entry for this script so a re-run never yields two @reboot controllers.
+    # grep exits 1 when nothing survives the filter (empty crontab); without "|| true" set -e
+    # would kill the subshell before the echo and install an empty crontab.
+    (crontab -l 2>/dev/null | grep -Fv "crontab-start-controller.sh" || true; echo "$CRON_LINE") | crontab -
+    echo "*** Installed crontab:"
+    crontab -l
 
     echo "*** Enable VNC (wayvnc) for remote desktop; desktop autologin so the session exists headless"
     # Best-effort: no desktop (Lite image) or an older raspi-config must not fail the whole setup

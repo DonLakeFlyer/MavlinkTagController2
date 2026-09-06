@@ -53,9 +53,19 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetry
     if (isRunningOnRPi()) {
         // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
         // Because of this, the process fails to find the airspy_rx executable. So we need to explicitly specify
-        // where the airspy executables are located.
-        logInfo() << "CommandHandler::CommandHandler - Running on rPi. Setting airspy path to /usr/local/bin/";
-        _airspyPath = "/usr/bin/";
+        // where the airspy executables are located. apt installs to /usr/bin, a source build to /usr/local/bin.
+        for (const char* dir : {"/usr/bin/", "/usr/local/bin/"}) {
+            if (access((std::string(dir) + "airspyhf_info").c_str(), X_OK) == 0
+                || access((std::string(dir) + "airspy_info").c_str(), X_OK) == 0) {
+                _airspyPath = dir;
+                break;
+            }
+        }
+        if (_airspyPath.empty()) {
+            logWarn() << "CommandHandler::CommandHandler - Running on rPi. airspy tools not found in /usr/bin or /usr/local/bin";
+        } else {
+            logInfo() << "CommandHandler::CommandHandler - Running on rPi. airspy tools path:" << _airspyPath;
+        }
     }
 
     using namespace std::placeholders;
@@ -1884,6 +1894,16 @@ CommandHandler::AirSpyDeviceType CommandHandler::_connectedAirSpyType(std::strin
 
     // Collect any exception messages so callers can see root cause details
     std::string exceptionDetails;
+
+    // Startup probe found no tools; a bare name would fail the same way under cron's PATH
+    // with an opaque execve error, so give the operator the fix instead.
+    if (isRunningOnRPi() && _airspyPath.empty()) {
+        logError() << "AirSpy tools not installed";
+        if (errorMessage) {
+            *errorMessage = "AirSpy tools not installed - run: sudo apt install airspy airspyhf";
+        }
+        return AirSpyDeviceType::NONE;
+    }
 
     // Try airspy_info for Mini detection
     try {
