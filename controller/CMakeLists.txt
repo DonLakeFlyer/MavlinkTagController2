@@ -63,6 +63,7 @@ if(BUILD_TESTING)
     )
     target_include_directories(test_collection_coordinator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/tunnel-protocol
     )
     add_test(NAME test_collection_coordinator COMMAND test_collection_coordinator)
 

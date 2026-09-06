@@ -4,6 +4,7 @@
 #include "TagDatabase.h"
 #include "BearingCalculator.h"
 #include "CollectionCoordinator.h"
+#include "TelemetryCache.h"
 #include "boost_process_compat.h"
 #include "detector_protocol.h"
 
@@ -20,11 +21,10 @@
 class MavlinkSystem;
 class MonitoredProcess;
 class LogFileManager;
-class TelemetryCache;
 
 class CommandHandler {
 public:
-    explicit CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode = false, const std::string& simulatorPreset = "strong", bool debugDetector = false);
+    explicit CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode = false, const std::string& simulatorPreset = "strong", bool debugDetector = false, double simulatorSnrDb = 20.0);
 
     static constexpr int kPulseUdpPort = 50000; // UDP port for pulse/heartbeat reports from detectors
 
@@ -51,8 +51,11 @@ public:
 
 private:
     struct RotationSlice {
+        uint32_t    slice_id;
         float       heading_deg;
+        bool        detected;       // false: armed heading, detector reported no pulse
         double      snr_db;
+        double      signal_power;
         double      noise_psd;
         uint8_t     confirmed_status;
         uint32_t    tag_id;
@@ -113,6 +116,7 @@ private:
     std::atomic<bool>               _detectionStopping      { false };  // stop worker owns _processes teardown
     bool                            _simulatorMode          = false;
     std::string                     _simulatorPreset;
+    double                          _simulatorSnrDb = 20.0;
     bool                            _debugDetector          = false;
     uint32_t                        _simPhase               = 0;        // 4-phase cycle: 0=A, 1=A→B, 2=B, 3=B→A
 
@@ -123,6 +127,8 @@ private:
     std::map<uint32_t, int>                     _detectorControlPorts;
     bool                                        _inRotation             = false;
     float                                       _currentHeadingDeg      = 0;
+    std::map<uint32_t, float>                   _rotationSliceHeadings;
+    std::map<uint32_t, TelemetryCache::TelemetryCacheEntry_t> _rotationSliceTelemetry;   // vehicle pose captured at ARM
     std::vector<RotationSlice>                  _rotationSlices;
 
     static constexpr int kDetectorControlPortBase = 51000;

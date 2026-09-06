@@ -40,7 +40,7 @@ static void testBearingAtZero_8slices() {
     BearingCalculator calc;
     auto slices = generateSlices(0.0f, 30.0, 5.0, 8);
     for (const auto& [hdg, snr] : slices) {
-        calc.addSlice(hdg, snr, 2);
+        calc.addSlice(hdg, snr, 2, 0.0);
     }
     auto results = calc.solve();
     CHECK(results.size() == 1);
@@ -56,7 +56,7 @@ static void testBearingAt90_8slices() {
     BearingCalculator calc;
     auto slices = generateSlices(90.0f, 25.0, 8.0, 8);
     for (const auto& [hdg, snr] : slices) {
-        calc.addSlice(hdg, snr, 3);
+        calc.addSlice(hdg, snr, 3, 0.0);
     }
     auto results = calc.solve();
     CHECK(results.size() == 1);
@@ -71,7 +71,7 @@ static void testBearingAt225_8slices() {
     BearingCalculator calc;
     auto slices = generateSlices(225.0f, 20.0, 10.0, 8);
     for (const auto& [hdg, snr] : slices) {
-        calc.addSlice(hdg, snr, 4);
+        calc.addSlice(hdg, snr, 4, 0.0);
     }
     auto results = calc.solve();
     CHECK(results.size() == 1);
@@ -86,7 +86,7 @@ static void testBearingWraparound_8slices() {
     BearingCalculator calc;
     auto slices = generateSlices(350.0f, 28.0, 6.0, 8);
     for (const auto& [hdg, snr] : slices) {
-        calc.addSlice(hdg, snr, 5);
+        calc.addSlice(hdg, snr, 5, 0.0);
     }
     auto results = calc.solve();
     CHECK(results.size() == 1);
@@ -101,7 +101,7 @@ static void testBearingOffGrid_8slices() {
     BearingCalculator calc;
     auto slices = generateSlices(22.0f, 30.0, 5.0, 8);
     for (const auto& [hdg, snr] : slices) {
-        calc.addSlice(hdg, snr, 6);
+        calc.addSlice(hdg, snr, 6, 0.0);
     }
     auto results = calc.solve();
     CHECK(results.size() == 1);
@@ -117,10 +117,10 @@ static void testMultipleTags() {
     auto slicesA = generateSlices(45.0f, 30.0, 5.0, 8);
     auto slicesB = generateSlices(270.0f, 25.0, 8.0, 8);
     for (const auto& [hdg, snr] : slicesA) {
-        calc.addSlice(hdg, snr, 10);
+        calc.addSlice(hdg, snr, 10, 0.0);
     }
     for (const auto& [hdg, snr] : slicesB) {
-        calc.addSlice(hdg, snr, 11);
+        calc.addSlice(hdg, snr, 11, 0.0);
     }
     auto results = calc.solve();
     CHECK(results.size() == 2);
@@ -139,33 +139,84 @@ static void testMultipleTags() {
                 r10->bearing_deg, r11->bearing_deg);
 }
 
-// ── Test: too few slices returns best-heading fallback ───────────────
-static void testTooFewSlices() {
+// ── Test: two detections still yield a bearing between them ─────────
+static void testTwoSlices() {
     BearingCalculator calc;
-    // Only 2 slices — below kMinSlicesForFit (3)
-    calc.addSlice(0.0f, 40.0, 2);
-    calc.addSlice(90.0f, 30.0, 2);
+    calc.addSlice(0.0f, 40.0, 2, 12.5);
+    calc.addSlice(90.0f, 30.0, 2, 9.0);
     auto results = calc.solve();
     CHECK(results.size() == 1);
-    CHECK(results[0].bearing_deg == 0.0f);  // heading of best SNR
-    CHECK(results[0].r_squared == 0.0f);
+    // Stronger slice at 0°, weaker at 90° → bearing leans toward 0° but
+    // must sit between them; mirror solution behind the antenna is rejected.
+    CHECK(results[0].bearing_deg > 0.0f && results[0].bearing_deg < 90.0f);
+    // Exact fit, but only two observations for two parameters: low confidence.
+    CHECK(results[0].r_squared > 0.0f && results[0].r_squared < 0.5f);
     CHECK(results[0].n_valid_slices == 2);
-    CHECK(results[0].best_snr == 40.0f);
-    std::printf("PASS: testTooFewSlices (bearing=%.1f, R²=%.3f)\n",
+    CHECK(results[0].best_snr == 12.5f);
+    std::printf("PASS: testTwoSlices (bearing=%.1f, conf=%.3f)\n",
                 results[0].bearing_deg, results[0].r_squared);
 }
 
-// ── Test: single slice returns that heading ──────────────────────────
+// ── Test: single slice returns that heading with zero confidence ───
 static void testSingleSlice() {
     BearingCalculator calc;
-    calc.addSlice(123.0f, 35.0, 7);
+    calc.addSlice(123.0f, 35.0, 7, 11.0);
     auto results = calc.solve();
     CHECK(results.size() == 1);
-    CHECK(results[0].bearing_deg == 123.0f);
+    assertNear(results[0].bearing_deg, 123.0f, 0.01f, "single slice heading");
     CHECK(results[0].r_squared == 0.0f);
     CHECK(results[0].n_valid_slices == 1);
-    CHECK(results[0].best_snr == 35.0f);
+    CHECK(results[0].best_snr == 11.0f);
     std::printf("PASS: testSingleSlice\n");
+}
+
+// ── Test: one detection plus no-detections everywhere else ──────────
+// The marginal-run case: tag locked on one heading only. Censored headings
+// must pin the bearing to that heading with real confidence.
+static void testSingleDetectionWithCensored() {
+    BearingCalculator calc;
+    calc.addSlice(0.0f, 32.8, 2, 0.0);
+    for (int i = 1; i < 8; ++i) {
+        calc.addNoDetection(static_cast<float>(i * 45), 2);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    assertNear(results[0].bearing_deg, 0.0f, 10.0f, "single detection + censored");
+    CHECK(results[0].r_squared > 0.3f);
+    CHECK(results[0].n_valid_slices == 1);
+    std::printf("PASS: testSingleDetectionWithCensored (bearing=%.1f, conf=%.3f)\n",
+                results[0].bearing_deg, results[0].r_squared);
+}
+
+// ── Test: the observed marginal run (32.8 at N, 1.2 at NW, rest none) ──
+static void testMarginalRun() {
+    BearingCalculator calc;
+    calc.addSlice(0.0f, 32.8, 2, 0.0);
+    calc.addSlice(315.0f, 1.2, 2, 0.0);
+    for (int i = 1; i < 7; ++i) {
+        calc.addNoDetection(static_cast<float>(i * 45), 2);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    assertNear(results[0].bearing_deg, 0.0f, 20.0f, "marginal run bearing");
+    CHECK(results[0].r_squared > 0.2f);
+    CHECK(results[0].n_valid_slices == 2);
+    std::printf("PASS: testMarginalRun (bearing=%.1f, conf=%.3f)\n",
+                results[0].bearing_deg, results[0].r_squared);
+}
+
+// ── Test: only no-detections → NaN bearing, zero confidence ────────
+static void testOnlyCensored() {
+    BearingCalculator calc;
+    for (int i = 0; i < 8; ++i) {
+        calc.addNoDetection(static_cast<float>(i * 45), 4);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(std::isnan(results[0].bearing_deg));
+    CHECK(results[0].r_squared == 0.0f);
+    CHECK(results[0].n_valid_slices == 0);
+    std::printf("PASS: testOnlyCensored\n");
 }
 
 // ── Test: empty calculator returns no results ───────────────────────
@@ -181,7 +232,7 @@ static void testReset() {
     BearingCalculator calc;
     auto slices = generateSlices(180.0f, 25.0, 5.0, 8);
     for (const auto& [hdg, snr] : slices) {
-        calc.addSlice(hdg, snr, 2);
+        calc.addSlice(hdg, snr, 2, 0.0);
     }
     calc.reset();
     auto results = calc.solve();
@@ -189,17 +240,40 @@ static void testReset() {
     std::printf("PASS: testReset\n");
 }
 
-// ── Test: best_snr field is correct ─────────────────────────────────
+// ── Test: best_snr reports the max snr_db, independent of signal_power ──
 static void testBestSnr() {
     BearingCalculator calc;
-    calc.addSlice(0.0f, 40.0, 2);
-    calc.addSlice(90.0f, 25.0, 2);
-    calc.addSlice(180.0f, 20.0, 2);
-    calc.addSlice(270.0f, 28.0, 2);
+    // Strongest power carries a lower SNR than a weaker slice; best_snr must
+    // track the dB field, not the power field.
+    calc.addSlice(0.0f, 40.0, 2, 8.0);
+    calc.addSlice(90.0f, 25.0, 2, 14.5);
+    calc.addSlice(180.0f, 20.0, 2, 6.0);
+    calc.addSlice(270.0f, 28.0, 2, 9.0);
     auto results = calc.solve();
     CHECK(results.size() == 1);
-    CHECK(results[0].best_snr == 40.0f);
+    CHECK(results[0].best_snr == 14.5f);
     std::printf("PASS: testBestSnr (best_snr=%.1f)\n", results[0].best_snr);
+}
+
+// ── Test: steep side-lobe drop-off must not drive the noise floor negative ──
+// Unconstrained OLS on this data gives B < 0, which predicts ≤0 power at the
+// censored back-lobe headings and thereby switches off their penalty
+// (r_squared inflated to ~0.99). With B pinned at 0 the censored headings
+// still cost, so confidence must stay below that.
+static void testNegativeFloorRejected() {
+    BearingCalculator calc;
+    calc.addSlice(0.0f, 30.0, 2, 0.0);
+    calc.addSlice(45.0f, 8.0, 2, 0.0);
+    calc.addSlice(315.0f, 0.5, 2, 0.0);
+    for (int h : {90, 135, 180, 225, 270}) {
+        calc.addNoDetection(static_cast<float>(h), 2);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    assertNear(results[0].bearing_deg, 0.0f, 10.0f, "negative floor rejected");
+    CHECK(results[0].r_squared > 0.5f && results[0].r_squared < 0.9f);
+    std::printf("PASS: testNegativeFloorRejected (bearing=%.1f, conf=%.3f)\n",
+                results[0].bearing_deg, results[0].r_squared);
 }
 
 // ── Test: noisy data still converges within tolerance ───────────────
@@ -211,7 +285,7 @@ static void testNoisyData() {
     // Add systematic noise: ±2.0 dB alternating
     for (size_t i = 0; i < slices.size(); ++i) {
         double noise = (i % 2 == 0) ? 2.0 : -2.0;
-        calc.addSlice(slices[i].first, slices[i].second + noise, 6);
+        calc.addSlice(slices[i].first, slices[i].second + noise, 6, 0.0);
     }
 
     auto results = calc.solve();
@@ -247,7 +321,7 @@ static void testBearing_16slices() {
     BearingCalculator calc;
     auto slices = generateSlices(160.0f, 30.0, 5.0, 16);
     for (const auto& [hdg, snr] : slices) {
-        calc.addSlice(hdg, snr, 9);
+        calc.addSlice(hdg, snr, 9, 0.0);
     }
     auto results = calc.solve();
     CHECK(results.size() == 1);
@@ -260,9 +334,13 @@ static void testBearing_16slices() {
 int main() {
     testEmpty();
     testSingleSlice();
-    testTooFewSlices();
+    testTwoSlices();
+    testSingleDetectionWithCensored();
+    testMarginalRun();
+    testOnlyCensored();
     testReset();
     testBestSnr();
+    testNegativeFloorRejected();
     testPatternSymmetry();
     testBearingAtZero_8slices();
     testBearingAt90_8slices();

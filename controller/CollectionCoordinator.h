@@ -5,6 +5,8 @@
 #include <set>
 #include <vector>
 
+#include "TunnelProtocol.h"
+
 class CollectionCoordinator {
 public:
     enum class State {
@@ -32,6 +34,10 @@ public:
     Result completeDetector(uint32_t collectionId, uint32_t sliceId, uint32_t tagId);
     Result finalize(uint32_t collectionId);
     Result cancel(uint32_t collectionId);
+
+    /// Python collections send only locked (confirmed) measurements to the GCS;
+    /// acquisition/marginal/no-detection reports stay in vehicle logs.
+    static bool forwardPulseToGcs(uint8_t detectionStatus) { return detectionStatus == TunnelProtocol::kConfirmedDetectionStatus; }
 
     /// How the last collection ended; distinguishes a FINALIZE retry from a
     /// FINALIZE that follows a CANCEL of the same id (which must not be Duplicate).

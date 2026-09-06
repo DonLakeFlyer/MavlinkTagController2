@@ -10,6 +10,46 @@ filtering around the empirical carrier and a collar-OFF control), and offline
 IQ replay confirmed the fixed-offset estimator recovers range-tracking
 amplitude the current metric compresses to floor.
 
+## Implementation status (2026-09-05)
+
+The detector/controller/TagTracker path now implements the core measurement
+changes described below:
+
+- `snr` remains the legacy max-search detection statistic. Python-mode
+  `group_snr` now carries unclamped fixed-offset absolute signal power per
+  pulse, `(sum(power) - n*noise) / n_pulses`, so acquisition and locked
+  reports share a scale regardless of K. `noise_psd` remains a separate
+  diagnostic.
+- One detector process remains alive for the collection. A lock requires two
+  detections with `score_ratio >= 3`, no dominant single fold, frequency
+  agreement within 200 Hz, and phase agreement within one STFT step. The
+  second anchor refines the PRI used for the rest of the rotation.
+- The first qualifying candidate holds the same heading for its confirmation
+  cycle. Once qualified, buffered earlier slices are remeasured at that common
+  frequency and phase, and later headings are measured without a threshold.
+- Acquisition uses the tag's configured K (GCS default 5; `--k`); locked
+  measurements use `--measurement-k` (default 5, not currently set by the
+  controller). The configured collar frequency gates initial acquisition to
+  +/-2 kHz; a lock narrows the search to +/-200 Hz. EVT thresholds and their
+  cache keys use the same gated frequency-bin count. The default false-alarm
+  probability remains 0.05.
+- The controller upserts retrospective results by `(tag_id, slice_id)` for
+  any armed slice of the current collection, including no-detection headings,
+  and fits the antenna pattern in linear absolute power. No-detection headings
+  enter the fit as censored observations, so a bearing is produced from as
+  little as one detection. The `r_squared` field carries a 0..1 confidence
+  (fit quality x how tightly the data pin the bearing x observation surplus);
+  the bearing is always sent and is NaN only when a tag had no detections at
+  all.
+
+TagTracker (GCS) rotation ordering is described in that repository.
+
+Two extensions below remain intentionally incomplete: the detector qualifies
+the first two-cycle candidate and rejects a poor final pattern fit, but does
+not yet compare a bank of competing candidates by retrospective R-squared;
+and a longer acquisition K remains a manually configured option rather than
+an automatic search-plan-driven escalation over an existing buffer.
+
 ---
 
 ## Summary
