@@ -1258,7 +1258,8 @@ std::string CommandHandler::_handleStartCollectionSlice(const mavlink_tunnel_t& 
         if (!replayComplete) {
             _currentHeadingDeg = sliceInfo.heading_deg;
             _rotationSliceHeadings[sliceInfo.slice_id] = sliceInfo.heading_deg;
-            _rotationSliceTelemetry[sliceInfo.slice_id] = _telemetryCache->telemetryForTime(secondsSinceEpoch());
+            // A duplicate ARM is a GCS retry; keep the pose from the first one.
+            _rotationSliceTelemetry.try_emplace(sliceInfo.slice_id, _telemetryCache->telemetryForTime(secondsSinceEpoch()));
         }
     }
     if (replayComplete) {

@@ -1996,6 +1996,7 @@ def main():
                     'power': power,
                     'segment_start_s': segment_start_s,
                     'k': cycle_k,
+                    'had_gap': had_gap,
                 })
 
                 qualified = [
@@ -2165,7 +2166,7 @@ def main():
                                   score_ratio=0.0,
                                   noise_psd=noise_power_psd,
                                   proc_ms=(time.monotonic() - t0) * 1000.0,
-                                  had_gap=had_gap,
+                                  had_gap=buffered['had_gap'],
                                   confidence='LOCKED',
                                   hyp_label='',
                                   detection_status=DETECTION_STATUS_CONFIRMED,
