@@ -1480,6 +1480,7 @@ def main():
     _tag_suffix = f'_{args.tag_id}' if args.tag_id else ''
     # Directory receiving this slice's jsonl/dumps; re-pointed per ARM heading.
     cycle_out_dir = args.log_dir
+    armed_heading_deg = None
     if args.log_dir:
         os.makedirs(args.log_dir, exist_ok=True)
         _jsonl_path = os.path.join(args.log_dir, f'detector{_tag_suffix}.jsonl')
@@ -1771,6 +1772,8 @@ def main():
                         # Heading starts here; the timeline itself is untouched.
                         cursor = stream.head
                         active_slice_attempts = 0
+                        armed_heading_deg = (arm_heading_deg % 360.0
+                                             if math.isfinite(arm_heading_deg) else None)
                         if args.log_dir:
                             # Heading comes off the wire: keep it a sane path component.
                             # One dir per heading: the GCS never revisits a heading
@@ -1997,6 +2000,7 @@ def main():
                     'segment_start_s': segment_start_s,
                     'k': cycle_k,
                     'had_gap': had_gap,
+                    'heading_deg': armed_heading_deg,
                 })
 
                 qualified = [
@@ -2174,6 +2178,9 @@ def main():
                                   n_pulses=int(locked_indices.size),
                                   per_pulse_power_psd=per_pulse_power_psd,
                                   slice_id=buffered['slice_id'],
+                                  # slog is open on the current heading's file;
+                                  # the analyzer re-files retro records by this.
+                                  heading_deg=buffered['heading_deg'],
                                   reported_in_cycle=cycle)
                     else:
                         pending_slices.append(buffered)
