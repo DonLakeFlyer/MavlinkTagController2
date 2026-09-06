@@ -17,11 +17,10 @@ cd ~/repos
 echo "*** Clone and build MavlinkTagController2 (controller + decimator + airspyhf_zeromq)"
 cd ~/repos
 if [ ! -d MavlinkTagController2 ]; then
-	git clone --recurse-submodules git@github.com:DonLakeFlyer/MavlinkTagController2.git
+    git clone https://github.com/DonLakeFlyer/MavlinkTagController2.git
 fi
 cd ~/repos/MavlinkTagController2
 git pull origin main
-git submodule update --init --recursive
 
 echo "*** Build all components (controller, decimator, airspyhf_zeromq)"
 rm -rf build
@@ -30,3 +29,18 @@ make
 echo "*** Set up Python virtual environment (detector + simulator)"
 cd ~/repos/MavlinkTagController2
 ./setup_venv.sh
+
+if command -v raspi-config >/dev/null 2>&1; then
+    echo "*** Configure Raspberry Pi: UTC timezone, hardware serial without login shell"
+    sudo timedatectl set-timezone UTC
+    # raspi-config nonint: 0 = enable, 1 = disable
+    sudo raspi-config nonint do_serial_hw 0
+    sudo raspi-config nonint do_serial_cons 1
+
+    echo "*** Install crontab entry to start controller at boot"
+    CRON_LINE="@reboot /bin/bash $HOME/repos/MavlinkTagController2/setup/crontab-start-controller.sh >> $HOME/MavlinkTagController-boot.log 2>&1"
+    # Replace any existing entry for this script so a re-run never yields two @reboot controllers
+    (crontab -l 2>/dev/null | grep -Fv "crontab-start-controller.sh"; echo "$CRON_LINE") | crontab -
+
+    echo "*** Setup complete. Reboot to apply serial port changes and start the controller."
+fi
