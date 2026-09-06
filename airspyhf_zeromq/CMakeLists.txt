@@ -1,4 +1,3 @@
-cmake_minimum_required(VERSION 3.12)
 project(airspyhf_zeromq C)
 
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)

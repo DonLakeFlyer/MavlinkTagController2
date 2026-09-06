@@ -1,5 +1,3 @@
-cmake_minimum_required(VERSION 3.10.2)
-
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pthread")
 
 set(Boost_USE_MULTITHREADED ON)
