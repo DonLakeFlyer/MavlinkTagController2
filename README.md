@@ -224,11 +224,18 @@ Wire header is packed little-endian, 40 bytes, no padding.
 
 ```bash
 cd ~/Downloads
-wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/full_setup.sh
-bash full_setup.sh
+wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/install.sh
+bash install.sh
 ```
 
-On a Raspberry Pi the script also sets the timezone to UTC, enables the hardware serial port (no login shell), enables VNC with desktop autologin, and installs the `@reboot` crontab entry below. Reboot after it finishes.
+`install.sh` is a small, stable script that installs git, clones or updates
+`~/repos/MavlinkTagController2`, and then runs `setup/full_setup.sh` from the freshly
+pulled checkout. Re-running it therefore always executes the current setup steps, never a
+stale download.
+
+To update an existing install, run `bash ~/repos/MavlinkTagController2/setup/install.sh`.
+
+On a Raspberry Pi `full_setup.sh` also sets the timezone to UTC, enables the hardware serial port (no login shell), enables VNC with desktop autologin, and installs the `@reboot` crontab entry below. Reboot after it finishes.
 
 ### Timezone and serial port (manual equivalent)
 

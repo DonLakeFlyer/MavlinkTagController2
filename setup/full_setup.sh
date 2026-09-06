@@ -1,34 +1,26 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/full_setup.sh
+# Do not download and run this file directly: it may be stale. Use setup/install.sh, which
+# clones/updates the repo and then runs this script from the checked-out tree.
+#
+# wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/install.sh
+# bash install.sh
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "*** Install tools"
 sudo apt update
 sudo apt install build-essential git gh cmake libboost-all-dev libairspyhf-dev airspy airspyhf libzmq3-dev libusb-1.0-0-dev pkg-config python3 python3-venv -y
 git config --global pull.rebase false
 
-echo "*** Create repos directory"
-cd ~
-if [ ! -d repos ]; then
-    mkdir repos
-fi
-cd ~/repos
-
-echo "*** Clone and build MavlinkTagController2 (controller + decimator + airspyhf_zeromq)"
-cd ~/repos
-if [ ! -d MavlinkTagController2 ]; then
-    git clone https://github.com/DonLakeFlyer/MavlinkTagController2.git
-fi
-cd ~/repos/MavlinkTagController2
-git pull origin main
-
 echo "*** Build all components (controller, decimator, airspyhf_zeromq)"
+cd "$REPO_DIR"
 rm -rf build
 make
 
 echo "*** Set up Python virtual environment (detector + simulator)"
-cd ~/repos/MavlinkTagController2
+cd "$REPO_DIR"
 ./setup_venv.sh
 
 if command -v raspi-config >/dev/null 2>&1; then
@@ -39,7 +31,7 @@ if command -v raspi-config >/dev/null 2>&1; then
     sudo raspi-config nonint do_serial_cons 1
 
     echo "*** Install crontab entry to start controller at boot"
-    CRON_LINE="@reboot /bin/bash $HOME/repos/MavlinkTagController2/setup/crontab-start-controller.sh >> $HOME/MavlinkTagController-boot.log 2>&1"
+    CRON_LINE="@reboot /bin/bash \"$REPO_DIR/setup/crontab-start-controller.sh\" >> \"$HOME/MavlinkTagController-boot.log\" 2>&1"
     # Replace any existing entry for this script so a re-run never yields two @reboot controllers.
     # grep exits 1 when nothing survives the filter (empty crontab); without "|| true" set -e
     # would kill the subshell before the echo and install an empty crontab.
