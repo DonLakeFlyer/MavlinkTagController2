@@ -724,8 +724,9 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
     pulseInfo.tag_id                        = (uint32_t)udpPulseInfo.tag_id;
     pulseInfo.frequency_hz                  = (uint32_t)udpPulseInfo.frequency_hz;
 
-    auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
-    {
+    TelemetryCache::TelemetryCacheEntry_t telemetry {};
+    if (pulseInfo.frequency_hz != 0) {
+        telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
         // Post-lock retro-measured slices can be many minutes old, well past the
         // TelemetryCache window; the pose captured at ARM is the slice's pose.
         std::lock_guard<std::mutex> lock(_rotationMutex);

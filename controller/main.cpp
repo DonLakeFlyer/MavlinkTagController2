@@ -76,7 +76,12 @@ int main(int argc, char** argv)
     }
 
     if (simulatorMode) {
-        logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB)";
+        const bool isLevelPreset = simulatorPreset == "strong" || simulatorPreset == "marginal" || simulatorPreset == "below-marginal";
+        if (isLevelPreset) {
+            logInfo() << "Simulator mode enabled (level:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB)";
+        } else {
+            logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << ", used only when no tag is configured)";
+        }
 		logInfo() << "Simulator telemetry endpoint:" << simulatorTelemetryEndpoint;
     }
     logInfo() << "Connecting to" << connectionUrl;
