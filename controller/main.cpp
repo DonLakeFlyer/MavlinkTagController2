@@ -37,15 +37,31 @@ int main(int argc, char** argv)
 	std::string connectionUrl = "udp://127.0.0.1:14540";    // default to SITL
     bool        simulatorMode = false;
     std::string simulatorPreset = "strong";
+    double      simulatorSnrDb = 20.0;
 	std::string simulatorTelemetryEndpoint = "tcp://127.0.0.1:6001";
     bool        debugDetector = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--simulator") == 0) {
             simulatorMode = true;
-            // Optional preset argument following --simulator
+            // Optional level/preset following --simulator.
+            // Signal levels are SNR at the 768 kHz simulator output. The 200x
+            // decimator adds ~23 dB of processing gain before the detector, so
+            // detector-side SNR is ~23 dB higher than the number here.
+            // Calibrated against the K=20 lock threshold of 3.0:
+            //   strong          20 dB (~43 dB at detector)  -> locks on first cycle
+            //   marginal       -21 dB (~2 dB at detector)   -> two-cycle confirmation path
+            //   below-marginal -33 dB (~-10 dB at detector) -> never locks
+            // Any other word is an iq_simulator preset, used only when no tag is configured.
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 simulatorPreset = argv[++i];
+                if (simulatorPreset == "strong") {
+                    simulatorSnrDb = 20.0;
+                } else if (simulatorPreset == "marginal") {
+                    simulatorSnrDb = -21.0;
+                } else if (simulatorPreset == "below-marginal") {
+                    simulatorSnrDb = -33.0;
+                }
             }
 		} else if (strcmp(argv[i], "--sim-telemetry-endpoint") == 0) {
 			if (i + 1 < argc) {
@@ -60,7 +76,7 @@ int main(int argc, char** argv)
     }
 
     if (simulatorMode) {
-        logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << ")";
+        logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB)";
 		logInfo() << "Simulator telemetry endpoint:" << simulatorTelemetryEndpoint;
     }
     logInfo() << "Connecting to" << connectionUrl;
@@ -80,7 +96,7 @@ int main(int argc, char** argv)
 
     auto ftpServer 			= MavlinkFtpServer { mavlink };
     auto telemetryCache     = new TelemetryCache(mavlink);
-    auto commandHandler 	= CommandHandler { mavlink, telemetryCache, simulatorMode, simulatorPreset, debugDetector };
+    auto commandHandler 	= CommandHandler { mavlink, telemetryCache, simulatorMode, simulatorPreset, debugDetector, simulatorSnrDb };
     auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), CommandHandler::kPulseUdpPort, &commandHandler };
 
 	globalMavlinkSystem		= mavlink;

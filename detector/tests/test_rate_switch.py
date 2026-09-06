@@ -690,9 +690,11 @@ class TestFoldRegressionSingleRate:
         rng = np.random.RandomState(55)
         power = rng.exponential(1.0, (n_freq, n_time)).astype(np.float32)
 
-        # Direct computation (legacy style)
+        # Direct computation (legacy style). Every valid t0 is searched: the
+        # single-rate segment is sized so max_start ~= N_A, and the multi-
+        # hypothesis fold gives pure hypotheses the same t0 range as switches.
         max_start = n_time - (K - 1) * N_A
-        search_range = min(N_A, max_start)
+        search_range = max_start
         pulse_idx = (np.arange(search_range)[:, None]
                      + np.arange(K)[None, :] * N_A)
         idx0 = np.clip(pulse_idx, 0, n_time - 1)

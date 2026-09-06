@@ -61,5 +61,12 @@ int main()
     // ...but the opposite disposition is not a duplicate either.
     CHECK(finalizable.cancel(200) == CollectionCoordinator::Result::Stale);
 
+    // Only locked measurements reach the GCS during a Python collection;
+    // acquisition, marginal and no-detection reports stay in the vehicle logs.
+    CHECK(CollectionCoordinator::forwardPulseToGcs(TunnelProtocol::kConfirmedDetectionStatus));
+    CHECK(!CollectionCoordinator::forwardPulseToGcs(TunnelProtocol::kSubthresholdDetectionStatus));
+    CHECK(!CollectionCoordinator::forwardPulseToGcs(TunnelProtocol::kSuperthresholdDetectionStatus));
+    CHECK(!CollectionCoordinator::forwardPulseToGcs(TunnelProtocol::kNoPulseDetectionStatus));
+
     return 0;
 }

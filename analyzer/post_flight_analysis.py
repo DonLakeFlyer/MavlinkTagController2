@@ -1162,7 +1162,9 @@ def generate_report(log_dir: str) -> str:
 
     for det in detectors:
         for c in det.cycles:
-            if (c.detected and det.confidence_ratio > 0
+            # Locked measurements carry no threshold, so score_ratio is 0 by design.
+            if (c.detected and c.confidence != 'LOCKED'
+                    and det.confidence_ratio > 0
                     and c.score_ratio < det.confidence_ratio * 1.5):
                 anomalies.append(
                     f'Cycle {c.cycle} (tag {det.tag_id}): '

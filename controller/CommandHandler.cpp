@@ -34,18 +34,20 @@
 #include "LogFileManager.h"
 #include "TelemetryCache.h"
 #include "BearingCalculator.h"
+#include "timeHelpers.h"
 
 // POSIX requires the application to declare this; glibc only does so under _GNU_SOURCE.
 extern char **environ;
 
 using namespace TunnelProtocol;
 
-CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode, const std::string& simulatorPreset, bool debugDetector)
+CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode, const std::string& simulatorPreset, bool debugDetector, double simulatorSnrDb)
     : _mavlink          (mavlink)
     , _telemetryCache   (telemetryCache)
     , _homePath         (getenv("HOME"))
     , _simulatorMode    (simulatorMode)
     , _simulatorPreset  (simulatorPreset)
+    , _simulatorSnrDb   (simulatorSnrDb)
     , _debugDetector    (debugDetector)
 {
     if (isRunningOnRPi()) {
@@ -722,6 +724,19 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
     pulseInfo.tag_id                        = (uint32_t)udpPulseInfo.tag_id;
     pulseInfo.frequency_hz                  = (uint32_t)udpPulseInfo.frequency_hz;
 
+    auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
+    {
+        // Post-lock retro-measured slices can be many minutes old, well past the
+        // TelemetryCache window; the pose captured at ARM is the slice's pose.
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        const auto sliceTelemetryIt = _rotationSliceTelemetry.find(sliceId);
+        if (_inRotation
+            && _collectionCoordinator.collectionId() == collectionId
+            && sliceTelemetryIt != _rotationSliceTelemetry.end()) {
+            telemetry = sliceTelemetryIt->second;
+        }
+    }
+
     if (pulseInfo.frequency_hz == 0) {
         logInfo() << "HEARTBEAT from Detector" << pulseInfo.tag_id;
     } else if (std::isfinite(udpPulseInfo.detection_status)
@@ -734,7 +749,6 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
         pulseInfo.group_seq_counter     = (uint16_t)udpPulseInfo.group_seq_counter;
         pulseInfo.start_time_seconds    = udpPulseInfo.start_time_seconds;
 
-        auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
         logDebug() << formatString("NO DETECTION Id: %2u score_ratio: %.3f noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
                                    pulseInfo.tag_id,
                                    udpPulseInfo.stft_score,
@@ -745,8 +759,6 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
                                    telemetry.attitudeEuler.yawDegrees,
                                    telemetry.position.relativeAltitude);
     } else {
-        auto telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
-
         pulseInfo.start_time_seconds            = udpPulseInfo.start_time_seconds;
         pulseInfo.predict_next_start_seconds    = udpPulseInfo.predict_next_start_seconds;
         pulseInfo.snr                           = udpPulseInfo.snr;
@@ -766,7 +778,7 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
 
         // Simulator hack: when pointing within 45° of directly away from
         // the transmitter (assumed due north), force unconfirmed with low SNR.
-        if (_simulatorMode) {
+        if (_simulatorMode && _mavlink->detectionMode() != DETECTION_MODE_PYTHON) {
             float yaw = telemetry.attitudeEuler.yawDegrees;
             // Normalize yaw-180 into [-180,180]
             float offBack = std::fmod(yaw - 180.0f + 540.0f, 360.0f) - 180.0f;
@@ -814,35 +826,65 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
         }
     }
 
-    _mavlink->sendTunnelMessage(&pulseInfo, sizeof(pulseInfo));
+    bool inRotation = false;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        inRotation = _inRotation;
+    }
+    const bool isPythonCollectionPulse = _mavlink->detectionMode() == DETECTION_MODE_PYTHON
+                                         && inRotation
+                                         && pulseInfo.frequency_hz != 0;
+    if (!isPythonCollectionPulse || CollectionCoordinator::forwardPulseToGcs(pulseInfo.detection_status)) {
+        _mavlink->sendTunnelMessage(&pulseInfo, sizeof(pulseInfo));
+    }
 
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
+        const auto headingIt = _rotationSliceHeadings.find(sliceId);
         if (_inRotation
-            && _collectionCoordinator.state() == CollectionCoordinator::State::CollectingSlice
             && _collectionCoordinator.collectionId() == collectionId
-            && _collectionCoordinator.sliceId() == sliceId
+            && headingIt != _rotationSliceHeadings.end()
             && pulseInfo.frequency_hz != 0) {
 
-            // Store slice data for pulses (both confirmed and low-confidence)
-            if (pulseInfo.detection_status != kNoPulseDetectionStatus) {
-                RotationSlice slice;
-                slice.heading_deg       = _currentHeadingDeg;
-                slice.snr_db            = pulseInfo.snr;
-                slice.noise_psd         = pulseInfo.noise_psd;
-                slice.confirmed_status  = pulseInfo.confirmed_status;
-                slice.tag_id            = pulseInfo.tag_id;
-                slice.latitude          = pulseInfo.latitude;
-                slice.longitude         = pulseInfo.longitude;
-                slice.altitude_rel      = pulseInfo.altitude_rel;
+            // Store every armed heading: detections carry power, no-detections
+            // are censored observations the bearing fit uses as nulls.
+            RotationSlice slice;
+            slice.slice_id          = sliceId;
+            slice.heading_deg       = headingIt->second;
+            slice.detected          = pulseInfo.detection_status != kNoPulseDetectionStatus;
+            slice.snr_db            = pulseInfo.snr;
+            slice.signal_power      = pulseInfo.group_snr;
+            slice.noise_psd         = pulseInfo.noise_psd;
+            slice.confirmed_status  = pulseInfo.confirmed_status;
+            slice.tag_id            = pulseInfo.tag_id;
+            slice.latitude          = pulseInfo.latitude;
+            slice.longitude         = pulseInfo.longitude;
+            slice.altitude_rel      = pulseInfo.altitude_rel;
+            const auto existing = std::find_if(
+                _rotationSlices.begin(), _rotationSlices.end(),
+                [&slice](const RotationSlice& item) {
+                    return item.slice_id == slice.slice_id
+                        && item.tag_id == slice.tag_id;
+                });
+            if (existing == _rotationSlices.end()) {
                 _rotationSlices.push_back(slice);
+            } else if (slice.detected
+                       && (!existing->detected
+                           || slice.confirmed_status >= existing->confirmed_status)) {
+                // A detection replaces a no-detection; a confirmed (locked)
+                // measurement replaces an acquisition hit. Never the reverse.
+                *existing = slice;
+            }
 
+            if (slice.detected) {
                 logInfo() << "Rotation slice stored: tag_id:" << slice.tag_id
                           << " heading:" << slice.heading_deg
                           << " snr:" << slice.snr_db
+                          << " signal_power:" << slice.signal_power
                           << " confirmed:" << slice.confirmed_status;
             } else {
-                logInfo() << "Rotation no-detection at heading:" << _currentHeadingDeg;
+                logInfo() << "Rotation no-detection stored: tag_id:" << slice.tag_id
+                          << " heading:" << slice.heading_deg;
             }
         }
     }
@@ -912,6 +954,9 @@ void CommandHandler::handlePythonDetectorMessage(
     }
 
     if (messageType == MessageType::Failed) {
+        logError() << "Python detector reported failure, collection:"
+                   << header.collection_id << "slice:" << header.slice_id
+                   << "tag:" << header.tag_id << "error:" << errorCode;
         {
             std::lock_guard<std::mutex> lock(_rotationMutex);
             if (_collectionCoordinator.state() != CollectionCoordinator::State::CollectingSlice
@@ -941,10 +986,14 @@ void CommandHandler::handlePythonDetectorMessage(
         // only collection traffic is subject to the stale-slice check.
         const bool standalone = !_inRotation
             && header.collection_id == 0 && header.slice_id == 0;
+        // After a lock the detector re-measures its buffered pre-lock cycles
+        // and reports them under their original slice ids, so any armed slice
+        // of the current collection is acceptable, not just the active one.
+        const bool knownSlice = _rotationSliceHeadings.count(header.slice_id) != 0;
         if (!standalone
             && (_collectionCoordinator.state() != CollectionCoordinator::State::CollectingSlice
                 || _collectionCoordinator.collectionId() != header.collection_id
-                || _collectionCoordinator.sliceId() != header.slice_id)) {
+                || !knownSlice)) {
             logWarn() << "Ignoring stale Python detector result, collection:"
                       << header.collection_id << "slice:" << header.slice_id
                       << "tag:" << header.tag_id;
@@ -1050,6 +1099,8 @@ std::string CommandHandler::_handleStartCollection(const mavlink_tunnel_t& tunne
             }
             _inRotation = true;
             _currentHeadingDeg = 0;
+            _rotationSliceHeadings.clear();
+            _rotationSliceTelemetry.clear();
             _rotationSlices.clear();
             startPipeline = true;
         }
@@ -1205,6 +1256,8 @@ std::string CommandHandler::_handleStartCollectionSlice(const mavlink_tunnel_t& 
         }
         if (!replayComplete) {
             _currentHeadingDeg = sliceInfo.heading_deg;
+            _rotationSliceHeadings[sliceInfo.slice_id] = sliceInfo.heading_deg;
+            _rotationSliceTelemetry[sliceInfo.slice_id] = _telemetryCache->telemetryForTime(secondsSinceEpoch());
         }
     }
     if (replayComplete) {
@@ -1277,6 +1330,8 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
         std::lock_guard<std::mutex> lock(_rotationMutex);
         slicesCopy = std::move(_rotationSlices);
         _rotationSlices.clear();
+        _rotationSliceHeadings.clear();
+        _rotationSliceTelemetry.clear();
         _detectorControlPorts.clear();
         _inRotation = false;
     }
@@ -1295,7 +1350,11 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
     // Compute bearing per tag
     BearingCalculator calculator;
     for (const auto& slice : slicesCopy) {
-        calculator.addSlice(slice.heading_deg, slice.snr_db, slice.tag_id);
+        if (slice.detected) {
+            calculator.addSlice(slice.heading_deg, slice.signal_power, slice.tag_id, slice.snr_db);
+        } else {
+            calculator.addNoDetection(slice.heading_deg, slice.tag_id);
+        }
     }
 
     auto results = calculator.solve();
@@ -1315,7 +1374,7 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
     std::map<uint32_t, std::pair<double, double>> tagLatLonSum;
     std::map<uint32_t, int> tagLatLonCount;
     for (const auto& slice : slicesCopy) {
-        if (!std::isfinite(slice.latitude) || !std::isfinite(slice.longitude)) {
+        if (!slice.detected || !std::isfinite(slice.latitude) || !std::isfinite(slice.longitude)) {
             continue;
         }
         if (slice.latitude == 0.0 && slice.longitude == 0.0) {
@@ -1332,6 +1391,8 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
         bearingResult.header.command    = COMMAND_ID_BEARING_RESULT;
         bearingResult.collection_id     = finishInfo.collection_id;
         bearingResult.tag_id            = result.tag_id;
+        // Always send the estimate; r_squared carries the 0..1 confidence so
+        // the GCS decides how to present a weak one. NaN only when no detections.
         bearingResult.bearing_deg       = result.bearing_deg;
         bearingResult.r_squared         = result.r_squared;
         bearingResult.n_valid_slices    = result.n_valid_slices;
@@ -1719,7 +1780,7 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
     //   --freq-offset-hz : tag frequency relative to radio center
     //   --tp             : pulse width (pulse_width_msecs / 1000)
     //   --tip            : inter-pulse interval (intra_pulse1_msecs / 1000)
-    //   --snr            : default 20 dB (not available in TagInfo_t)
+    //   --snr            : --simulator level (strong=20 dB, marginal=-21 dB, below-marginal=-33 dB at 768 kHz)
     //
     // The venv Python is preferred so numpy/pyzmq are available.
 
@@ -1736,10 +1797,12 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
 
     // If no tags configured, use the preset
     if (_tagDatabase.size() == 0) {
+        // Signal-level names are not iq_simulator presets; fall back to a real one.
+        const bool isLevelName = _simulatorPreset == "marginal" || _simulatorPreset == "below-marginal";
         return formatString("%s -u %s --preset %s -P 5555",
                             pythonCmd.c_str(),
                             simScript.c_str(),
-                            _simulatorPreset.c_str());
+                            isLevelName ? "strong" : _simulatorPreset.c_str());
     }
 
     // Build per-tag arguments.
@@ -1778,29 +1841,29 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
 
             switch (phase) {
             case 0: // Clean A
-                tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
-                                        freqOffsetHz, tp, tipA);
+                tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f",
+                                        freqOffsetHz, _simulatorSnrDb, tp, tipA);
                 break;
             case 1: { // A → B transition
                 double switchTime = warmupSeconds + (k + k / 2) * tipA;
-                tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f --tip-secondary %f --switch-time %f",
-                                        freqOffsetHz, tp, tipA, tipB, switchTime);
+                tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f --tip-secondary %f --switch-time %f",
+                                        freqOffsetHz, _simulatorSnrDb, tp, tipA, tipB, switchTime);
                 break;
             }
             case 2: // Clean B
-                tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
-                                        freqOffsetHz, tp, tipB);
+                tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f",
+                                        freqOffsetHz, _simulatorSnrDb, tp, tipB);
                 break;
             case 3: { // B → A transition
                 double switchTime = warmupSeconds + (k + k / 2) * tipB;
-                tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f --tip-secondary %f --switch-time %f",
-                                        freqOffsetHz, tp, tipB, tipA, switchTime);
+                tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f --tip-secondary %f --switch-time %f",
+                                        freqOffsetHz, _simulatorSnrDb, tp, tipB, tipA, switchTime);
                 break;
             }
             }
         } else {
-            tagArgs += formatString(" --freq-offset-hz %d --snr 20 --tp %f --tip %f",
-                                    freqOffsetHz, tp, tipA);
+            tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f",
+                                    freqOffsetHz, _simulatorSnrDb, tp, tipA);
         }
     }
 
