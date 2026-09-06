@@ -7,7 +7,7 @@ set -euo pipefail
 # wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/install.sh
 # bash install.sh
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="$HOME/repos/MavlinkTagController2"
 
 echo "*** Install tools"
 sudo apt update
