@@ -599,12 +599,25 @@ def lock_snr_db(signal_power, noise_power, n_windows):
     return float(10.0 * np.log10(total / noise_power))
 
 
+def lock_anchor_fold_index(hyp_label):
+    """Index of the first pulse belonging to the hypothesis' final-rate train.
+
+    Pure hypotheses anchor at pulse 0. For a switch at change-point c, pulses
+    0..c-1 are spaced at the old rate; pulse c is the first one followed by a
+    final-rate gap, so projecting the final PRI from it stays on-train.
+    """
+    if hyp_label.startswith('A_to_B_c') or hyp_label.startswith('B_to_A_c'):
+        return int(hyp_label.split('c')[1])
+    return 0
+
+
 def lock_candidate_from_detection(detection, segment_start_seconds, n_ws, fs,
                                   pri_seconds):
-    first_window = detection.fold_info['fold_windows'][0]
+    anchor_window = detection.fold_info['fold_windows'][
+        lock_anchor_fold_index(detection.hyp_label)]
     return PulseLock(
         freq_hz=float(detection.freq_hz),
-        anchor_seconds=segment_start_seconds + first_window * n_ws / fs,
+        anchor_seconds=segment_start_seconds + anchor_window * n_ws / fs,
         pri_seconds=float(pri_seconds),
         score_ratio=float(detection.score_ratio),
     )
@@ -1081,6 +1094,12 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                      if frequency_mask is not None else power.shape[0])
     cache_N_A = N_A_exact if N_A_exact is not None else N
     cache_N_B = N_B_exact if N_B_exact is not None else N_B
+    # The threshold is a max over the searched space; a cached value from a
+    # different mask or hypothesis set is the wrong false-alarm threshold.
+    search_key = (n_hypotheses, n_search_bins)
+    if evt_threshold_cache.get('search_key') != search_key:
+        evt_threshold_cache['threshold'] = None
+        evt_threshold_cache['search_key'] = search_key
     if evt_threshold_cache.get('threshold') is None:
         cache_dir = evt_threshold_cache.get('cache_dir')
         mu, sigma = load_evt_cache(cache_dir, cache_N_A, K, N_B=cache_N_B,

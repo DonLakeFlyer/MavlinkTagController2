@@ -19,6 +19,9 @@ from pulse_detector import (
     build_hypothesis_indices,
     build_weighting_matrix,
     combine_agreeing_locks,
+    Detection,
+    lock_anchor_fold_index,
+    lock_candidate_from_detection,
     lock_snr_db,
     compute_segment_samples,
     compute_stft_power,
@@ -213,6 +216,37 @@ def test_unambiguous_candidate_locks_without_confirmation_cycle():
     assert not lock_immediately(score_ratio=3.0, lock_score_ratio=3.0)
 
 
+def _detection_with_windows(hyp_label, windows):
+    return Detection(freq_hz=0.0, snr_db=20.0, signal_power=1.0, offset=windows[0],
+                     noise_psd=1e-10, stft_score=1.0, score_ratio=40.0,
+                     hyp_label=hyp_label,
+                     fold_info={'max_fold_fraction': 0.2, 'fold_snrs': [],
+                                'fold_windows': windows})
+
+
+def test_switch_hypothesis_lock_anchors_on_final_rate_train():
+    # Pulses 0..1 at rate A (spacing 10), then rate B (spacing 15) from pulse 2.
+    windows = [100, 110, 120, 135, 150]
+    assert lock_anchor_fold_index('A') == 0
+    assert lock_anchor_fold_index('B') == 0
+    assert lock_anchor_fold_index('A_to_B_c2') == 2
+    assert lock_anchor_fold_index('B_to_A_c3') == 3
+
+    lock = lock_candidate_from_detection(
+        _detection_with_windows('A_to_B_c2', windows),
+        segment_start_seconds=0.0, n_ws=10, fs=100.0, pri_seconds=1.5)
+    # Anchored at pulse 2 (window 120 -> 12.0 s); projecting PRI B lands on
+    # the real B pulses (13.5 s, 15.0 s). Anchoring at pulse 0 would put the
+    # projected train at 11.5/13.0 s, off every real pulse.
+    assert lock.anchor_seconds == pytest.approx(12.0)
+    assert lock.anchor_seconds + lock.pri_seconds == pytest.approx(13.5)
+
+    pure = lock_candidate_from_detection(
+        _detection_with_windows('A', windows),
+        segment_start_seconds=0.0, n_ws=10, fs=100.0, pri_seconds=1.0)
+    assert pure.anchor_seconds == pytest.approx(10.0)
+
+
 @pytest.mark.parametrize('f0', [0.0, 300.0, -800.0, 1500.0])
 def test_weighting_matrix_labels_pure_tone(f0):
     """W applied to an fftshift'ed window DFT must peak at the Wf entry
@@ -286,6 +320,29 @@ def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
         )
     finally:
         pulse_detector.K = old_K
+
+
+def test_evt_threshold_cache_invalidates_when_search_space_changes():
+    # The threshold is a max over the searched bins. A caller that keeps one
+    # cache dict but narrows the frequency mask must not reuse the wider
+    # threshold; fold_detect itself has to detect the change.
+    K = 5
+    cache = _evt_pool.setdefault((K, None), {})
+    _run_detect(K, snr_db=25.0)
+    full_key = cache['search_key']
+    full_threshold = cache['threshold']
+    assert full_key == (1, NFFT)
+
+    narrow_mask = np.abs(Wf) <= 200.0
+    _run_detect(K, snr_db=25.0, frequency_mask=narrow_mask)
+    assert cache['search_key'] == (1, int(np.count_nonzero(narrow_mask)))
+    # Regenerated for the narrow mask, not reused from the full search.
+    assert cache['threshold'] is not None
+    assert cache['threshold'] != full_threshold
+
+    # Restore the shared pool entry for later tests.
+    _run_detect(K, snr_db=25.0)
+    assert cache['search_key'] == full_key
 
 
 # ===================================================================
