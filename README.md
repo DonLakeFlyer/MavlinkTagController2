@@ -228,7 +228,7 @@ wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/s
 bash full_setup.sh
 ```
 
-On a Raspberry Pi the script also sets the timezone to UTC, enables the hardware serial port (no login shell), and installs the `@reboot` crontab entry below. Reboot after it finishes.
+On a Raspberry Pi the script also sets the timezone to UTC, enables the hardware serial port (no login shell), enables VNC with desktop autologin, and installs the `@reboot` crontab entry below. Reboot after it finishes.
 
 ### Timezone and serial port (manual equivalent)
 
@@ -252,6 +252,12 @@ Enable serial port:
 crontab -e
 # Add: @reboot /bin/bash /home/pi/repos/MavlinkTagController2/setup/crontab-start-controller.sh >> /home/pi/MavlinkTagController-boot.log 2>&1
 ```
+
+### Remote desktop (VNC)
+
+Flash Raspberry Pi OS **with desktop** (Bookworm or later) and run the setup script from the booted Pi. It enables the built-in `wayvnc` server, sets boot-to-desktop with autologin (so a session exists with no monitor attached), and configures a 1920x1080 headless resolution. Connect from a Mac with the TigerVNC viewer to `raspberrypi.local:5900`; log in with the Pi user's Linux credentials and accept the self-signed certificate on first connect.
+
+Manual equivalent: `sudo raspi-config` → Interface Options → VNC → Yes; System Options → Boot → Desktop; System Options → Auto Login → Desktop; Display Options → VNC Resolution.
 
 ### Check if running
 

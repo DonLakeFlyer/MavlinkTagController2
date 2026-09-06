@@ -42,5 +42,11 @@ if command -v raspi-config >/dev/null 2>&1; then
     # Replace any existing entry for this script so a re-run never yields two @reboot controllers
     (crontab -l 2>/dev/null | grep -Fv "crontab-start-controller.sh"; echo "$CRON_LINE") | crontab -
 
-    echo "*** Setup complete. Reboot to apply serial port changes and start the controller."
+    echo "*** Enable VNC (wayvnc) for remote desktop; desktop autologin so the session exists headless"
+    # Best-effort: no desktop (Lite image) or an older raspi-config must not fail the whole setup
+    sudo raspi-config nonint do_boot_behaviour B4 || echo "*** WARNING: desktop autologin not available; skipping"
+    sudo raspi-config nonint do_vnc 0 || echo "*** WARNING: VNC enable failed; skipping"
+    sudo raspi-config nonint do_vnc_resolution 1920x1080 || echo "*** WARNING: VNC resolution not supported; skipping"
+
+    echo "*** Setup complete. Reboot to apply serial port and VNC changes and start the controller."
 fi
