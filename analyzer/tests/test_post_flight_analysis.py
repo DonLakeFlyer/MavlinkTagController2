@@ -331,3 +331,41 @@ class TestPersistentRotationSession:
                 if line.startswith('| ') and '° |' in line}
         assert rows['090°'].rstrip().endswith('| 1 |')
         assert rows['270°'].rstrip().endswith('| 0 |')
+
+    def test_retro_measurements_refiled_to_their_own_heading(self, tmp_path):
+        # Headings 000 and 090 were acquisition-only (no detection record);
+        # the lock happened on 180, whose file then holds the retro MEASURED
+        # records for 000 and 090 plus its own.
+        startup = _detector_entries(3, 0, 0.0)[0]
+        for h in (0, 90):
+            hd = tmp_path / f'heading-{h:03d}'
+            hd.mkdir()
+            _jsonl(hd / 'detector_3.jsonl', [startup])
+        hd = tmp_path / 'heading-180'
+        hd.mkdir()
+
+        def measured(cycle, heading, snr):
+            return {'type': 'detection', 'cycle': cycle, 'freq_hz': 0.0,
+                    'snr_db': snr, 'score_ratio': 0.0, 'noise_psd': 1e-6,
+                    'proc_ms': 50.0, 'confidence': 'LOCKED', 'hyp_label': '',
+                    'detection_status': 2, 'heading_deg': float(heading)}
+        _jsonl(hd / 'detector_3.jsonl', [
+            startup,
+            measured(1, 0, 30.0),
+            measured(2, 90, 20.0),
+            measured(3, 180, 10.0),
+            {'type': 'session_end', 'cycles': 3, 'detections': 3,
+             'elapsed_s': 30.0},
+        ])
+        (tmp_path / 'session.json').write_text('{"detection_mode": "python"}')
+        (tmp_path / 'bearing_result.log').write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,'
+            'latitude,longitude\n3,0.0,0.9,3,30.0,38.1,-122.2\n')
+        md = generate_report(str(tmp_path))
+        rows = {line.split('|')[1].strip(): line for line in md.splitlines()
+                if line.startswith('| ') and '° |' in line}
+        assert '| 1 | 1 | 30.0 |' in rows['000°']
+        assert '| 1 | 1 | 20.0 |' in rows['090°']
+        assert '| 1 | 1 | 10.0 |' in rows['180°']
+        # Locked measurements have no threshold; not a near-threshold anomaly.
+        assert 'close to threshold' not in md

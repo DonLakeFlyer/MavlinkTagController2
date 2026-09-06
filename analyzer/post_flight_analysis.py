@@ -172,6 +172,9 @@ class DetectionCycle:
     fold_windows: List[int] = field(default_factory=list)
     # Best candidate (no-detection cycles)
     best_candidate: Optional[dict] = None
+    # Heading the record belongs to when it carries one (retro-measured
+    # slices are written to the file of the heading that produced the lock).
+    heading: Optional[str] = None
 
 
 @dataclass
@@ -474,6 +477,9 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
             fold_snrs=folds_e.get('fold_snrs', []),
             fold_windows=folds_e.get('fold_windows', []),
         )
+        heading_deg = e.get('heading_deg')
+        if heading_deg is not None:
+            c.heading = f'{float(heading_deg) % 360.0:03.0f}'
         det.cycles.append(c)
 
     # --- NO_DETECTION cycles ---
@@ -532,6 +538,29 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
         det.gap_reset = sum(1 for ev in det.gap_events if ev.get('kind') == 'reset')
 
     return det
+
+
+def _refile_retro_cycles(detectors: List['DetectorSummary']) -> None:
+    """Move records that name another heading to that heading's summary.
+
+    A locked detector re-measures its buffered pre-lock slices and writes
+    them to whichever heading file is open at the time; each such record
+    carries the heading it was measured at.
+    """
+    by_key = {(d.tag_id, d.heading): d for d in detectors if d.heading is not None}
+    for det in detectors:
+        if det.heading is None:
+            continue
+        keep = []
+        for c in det.cycles:
+            target = by_key.get((det.tag_id, c.heading)) if c.heading else None
+            if target is not None and target is not det:
+                target.cycles.append(c)
+            else:
+                keep.append(c)
+        det.cycles = keep
+    for det in detectors:
+        det.cycles.sort(key=lambda c: c.cycle)
 
 
 def parse_bearing_log(path: str) -> List[BearingResult]:
@@ -669,6 +698,7 @@ def generate_report(log_dir: str) -> str:
         if m:
             det.heading = m.group(1)
         detectors.append(det)
+    _refile_retro_cycles(detectors)
     bearings = parse_bearing_log(bearing_path)
 
     # Same discovery rule as the decimator log: root first, else per heading.
