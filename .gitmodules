@@ -1,3 +1,0 @@
-[submodule "tunnel-protocol"]
-	path = tunnel-protocol
-	url = https://github.com/DonLakeFlyer/TagTrackerTunnelProtocol.git

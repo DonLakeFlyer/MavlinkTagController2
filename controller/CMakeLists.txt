@@ -35,7 +35,6 @@ add_executable(MavlinkTagController2
 
 target_include_directories(MavlinkTagController2
     PRIVATE
-    ${CMAKE_SOURCE_DIR}/tunnel-protocol
     ${CMAKE_SOURCE_DIR}/shared
     SYSTEM
     ${Boost_INCLUDE_DIRS}
@@ -45,6 +44,7 @@ target_link_libraries(MavlinkTagController2
     PRIVATE
     ${Boost_LIBRARIES}
     mavlink
+    tunnel_protocol
     PkgConfig::CONTROLLER_ZMQ
 )
 
@@ -52,9 +52,7 @@ if(BUILD_TESTING)
     add_executable(test_collection_protocol
         tests/test_collection_protocol.cpp
     )
-    target_include_directories(test_collection_protocol PRIVATE
-        ${CMAKE_SOURCE_DIR}/tunnel-protocol
-    )
+    target_link_libraries(test_collection_protocol PRIVATE tunnel_protocol)
     add_test(NAME test_collection_protocol COMMAND test_collection_protocol)
 
     add_executable(test_collection_coordinator
@@ -63,8 +61,8 @@ if(BUILD_TESTING)
     )
     target_include_directories(test_collection_coordinator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_SOURCE_DIR}/tunnel-protocol
     )
+    target_link_libraries(test_collection_coordinator PRIVATE tunnel_protocol)
     add_test(NAME test_collection_coordinator COMMAND test_collection_coordinator)
 
     add_executable(test_detector_protocol

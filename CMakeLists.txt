@@ -106,6 +106,19 @@ if(mavlink_ADDED)
     )
 endif()
 
+# ── TagTracker tunnel protocol (header-only, fetched via CPM) ────────
+# Must stay in lockstep with the GIT_TAG in TagTracker's custom/CMakeLists.txt.
+CPMAddPackage(
+    NAME         TunnelProtocol
+    GITHUB_REPOSITORY DonLakeFlyer/TagTrackerTunnelProtocol
+    GIT_TAG      d5979b9838fe6cabadf4501360314f96b801962c
+    DOWNLOAD_ONLY YES
+)
+if(TunnelProtocol_ADDED)
+    add_library(tunnel_protocol INTERFACE)
+    target_include_directories(tunnel_protocol INTERFACE ${TunnelProtocol_SOURCE_DIR})
+endif()
+
 # ── Shared wire-format (header-only) ────────────────────────────────
 add_library(tagtracker_wireformat INTERFACE)
 target_include_directories(tagtracker_wireformat INTERFACE

@@ -203,7 +203,7 @@ Add `uniformity` to the `PulseInfo_t` population and to the log format string:
 Conf: %u Id: %2u snr: %5.1f ... uniformity: %.3f ...
 ```
 
-**TunnelProtocol** ([../tunnel-protocol/TunnelProtocol.h](../tunnel-protocol/TunnelProtocol.h)):
+**TunnelProtocol** (`TunnelProtocol.h`, fetched via CPM from [DonLakeFlyer/TagTrackerTunnelProtocol](https://github.com/DonLakeFlyer/TagTrackerTunnelProtocol)):
 
 Add `uniformity` field to `PulseInfo_t` if it needs to be forwarded to the
 GCS via MAVLink tunnel.

@@ -45,8 +45,6 @@ airspyhf_zeromq/               Airspy HF+ ZeroMQ publisher (was airspyhf-zeromq)
   tools/                       airspyhf_zeromq_rx source
   tests/                       Integration tests (require hardware)
 
-tunnel-protocol/               TunnelProtocol.h (git submodule)
-
 simulator/                     IQ signal simulator (drop-in SDR replacement)
   iq_simulator.py              Synthetic IQ generator (ZMQ PUB, wire-format compatible)
   run_sim_pipeline.sh          Standalone sim → decimator → detector pipeline
@@ -227,10 +225,12 @@ Wire header is packed little-endian, 40 bytes, no padding.
 ```bash
 cd ~/Downloads
 wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/full_setup.sh
-sh full_setup.sh
+bash full_setup.sh
 ```
 
-### Timezone and serial port
+On a Raspberry Pi the script also sets the timezone to UTC, enables the hardware serial port (no login shell), and installs the `@reboot` crontab entry below. Reboot after it finishes.
+
+### Timezone and serial port (manual equivalent)
 
 Set rPi timezone to UTC:
 * `sudo raspi-config` → Localization → Timezone → None of the above → UTC
@@ -246,11 +246,11 @@ Enable serial port:
 * `SER_TEL2_BAUD`: 921600 8N1
 * Reboot Pixhawk
 
-### Auto-start at boot
+### Auto-start at boot (manual equivalent)
 
 ```bash
 crontab -e
-# Add: @reboot /bin/bash /home/pi/repos/MavlinkTagController2/setup/crontab-start-controller.sh
+# Add: @reboot /bin/bash /home/pi/repos/MavlinkTagController2/setup/crontab-start-controller.sh >> /home/pi/MavlinkTagController-boot.log 2>&1
 ```
 
 ### Check if running
@@ -284,6 +284,6 @@ This repo consolidates what were previously three separate repositories:
 | ZeroMQ publisher | `airspyhf-zeromq` | `airspyhf_zeromq/` |
 | Wire format | `TagTrackerWireFormat` (submodule) | `shared/tagtracker_wireformat/` |
 | MAVLink headers | `c_library_v2` (submodule) | CPM package (auto-downloaded at configure time) |
-| Tunnel protocol | `TagTrackerTunnelProtocol` (submodule) | `tunnel-protocol/` (git submodule) |
+| Tunnel protocol | `TagTrackerTunnelProtocol` (submodule) | CPM package (auto-downloaded at configure time) |
 
-MAVLink headers are fetched automatically via CPM — no manual download needed. `TagTrackerTunnelProtocol` remains a git submodule at `tunnel-protocol`; clone with `--recurse-submodules` or run `git submodule update --init --recursive` after cloning.
+MAVLink headers and `TagTrackerTunnelProtocol` are both fetched automatically via CPM at configure time — no submodules, no manual download. Each is pinned to a commit by `GIT_TAG` in the top-level `CMakeLists.txt`; the tunnel protocol pin must match the one in TagTracker's `custom/CMakeLists.txt`.
