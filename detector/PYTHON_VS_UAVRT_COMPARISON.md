@@ -12,7 +12,7 @@ Source-level analysis of the Python pulse detector (`detector/pulse_detector.py`
 | State machine | Stateless — no cross-cycle memory | D (Discovery) → C (Confirmation) → T (Tracking) |
 | Input | UDP: 8-byte timestamp + 1024 complex64 IQ samples | Same UDP format |
 | Input sample rate | `--fs` (HF: 3840 Hz, Mini: 3750 Hz) | `Config.Fs` from `.config` file (same rates) |
-| Output | 12 little-endian doubles (96 bytes) to UDP 50000 | Same 12-double format to UDP 50000 |
+| Output | Typed TTDP UDP packets (`detector_protocol.py`) → `PythonPulseInfo_t` | 12 little-endian doubles (96 bytes) to UDP 50000 → `PulseInfo_t` |
 | Configuration | CLI arguments | `.config` file written by `TagDatabase::_writeDetectorConfig()` |
 | Segment overlap | None — segments are non-overlapping | Overlaps by `2*(K*M+J)` windows |
 | IQ recording | None | Writes raw IQ to binary file per segment |
@@ -138,7 +138,7 @@ Python has no equivalent — every cycle is a full discovery search. This means 
 |--------|--------|-----------------|
 | Approach | Multi-hypothesis fold bank within single process | Two separate processes, one per rate |
 | Hypotheses (K=5) | 8: pure-A, pure-B, 3× A→B, 3× B→A | 1 per process (always single-rate) |
-| Switch detection | `group_ind` encodes winning hypothesis | Not available — controller must correlate two processes externally |
+| Switch detection | `rate_state` encodes winning hypothesis (A / B / A→B / B→A) | Not available — controller must correlate two processes externally |
 | Uniformity filter | `min/max ≥ 0.25` rejects cross-rate leakage | Not implemented |
 | Transition tracking | Immediate detection of mid-segment switch | Switch causes missed detections until steady state |
 | Transition fold gain | Full K-fold gain preserved (0 dB loss) | Degraded — only aligned pulses contribute signal |
@@ -168,31 +168,32 @@ The Python multi-hypothesis detector avoids this entirely. The correct switch hy
 
 ## Output Packet Fields
 
-Both send 12 little-endian doubles (96 bytes) to UDP 50000, but several fields have **different semantics**:
+The detectors use different wire formats and different tunnel messages. uavrt sends 12 little-endian doubles (96 bytes) to UDP 50000, relayed as `PulseInfo_t`; Python sends typed TTDP packets (`detector_protocol.py`), relayed as `PythonPulseInfo_t`. Fields that appear in both are compared here by role:
 
-| Index | Field | Python meaning | uavrt_detection meaning |
-|-------|-------|----------------|-------------------------|
-| 0 | `tag_id` | `args.tag_id` (same ID for both rates) | `Config.ID` (primary) or `Config.ID + 1` (secondary rate) |
-| 1 | `frequency_hz` | `args.freq` (absolute, from GCS) | `channelCenterFreqMHz × 1e6 + detectorPulse.fp` |
-| 2 | `start_time_seconds` | `current_ts / 1e9` (wall clock) | `detectorPulse.t_0` (STFT-relative time) |
-| 3 | `predict_next` | `start_time + tip` (or `tip_secondary` for B) | Lower bound of uncertainty range |
-| 4 | `snr` | `10 log10(fold_score / noise_power)` | Signal PSD / noise PSD in dB |
-| 5 | `stft_score` | **Score/threshold ratio** (dimensionless, ~1.0 at threshold) | **Raw spectral score `yw`** (absolute units) |
-| 6 | `group_seq_counter` | `cycle` (monotonic counter) | Detection group counter |
-| 7 | `group_ind` | **Hypothesis encoding** (0=A, 1=B, 2+=switch) | **Pulse index within K-group** (1-based) |
-| 8 | `group_snr` | Same as per-pulse SNR | Group mean linear SNR → dB |
-| 9 | `detection_status` | 0/1/2/3 (includes no-detection) | Boolean `det_dec` |
-| 10 | `confirmed_status` | 1 if score_ratio ≥ confidence_ratio | 1 if `confirmpulses` passes |
-| 11 | `noise_psd` | `noise_power / (Fs × n_w)` | `yw × dt²/T × (1 + 10^(SNR/10))⁻¹` |
+| Python field | uavrt field | Python meaning | uavrt_detection meaning |
+|--------------|-------------|----------------|-------------------------|
+| `tag_id` | `tag_id` | `args.tag_id` (same ID for both rates) | `Config.ID` (primary) or `Config.ID + 1` (secondary rate) |
+| `frequency_hz` | `frequency_hz` | `args.freq` (absolute, from GCS) | `channelCenterFreqMHz × 1e6 + detectorPulse.fp` |
+| `start_time_seconds` | `start_time_seconds` | Segment start, stream time (wall clock UTC) | `detectorPulse.t_0` (STFT-relative time) |
+| `predict_next_start_seconds` | `predict_next` | `start_time + tip` (or `tip_secondary` for B) | Lower bound of uncertainty range |
+| `snr` | `snr` | `10 log10(fold_score / noise_power)` | Signal PSD / noise PSD in dB |
+| `score_ratio` | `stft_score` | **Score/threshold ratio** (dimensionless, ~1.0 at threshold) | **Raw spectral score `yw`** (absolute units) |
+| `group_seq_counter` | `group_seq_counter` | `cycle` (monotonic counter) | Detection group counter |
+| `rate_state` | `group_ind` | **Rate hypothesis** (0=A, 1=B, 2=A→B, 3=B→A) | **Pulse index within K-group** (0..K-1) |
+| `group_snr` | `group_snr` | Per-pulse fixed-offset signal power (PSD units) | Group mean linear SNR → dB |
+| `detection_status` | `detection_status` | 0/1/2/3 (includes no-detection) | Boolean `det_dec` |
+| `confirmed_status` | `confirmed_status` | 1 if score_ratio ≥ confidence_ratio | 1 if `confirmpulses` passes |
+| `noise_psd` | `noise_psd` | `noise_power / (Fs × n_w)` | `yw × dt²/T × (1 + 10^(SNR/10))⁻¹` |
+| `candidate_id` | — | 0 = provisional lock, >0 = alternate lock candidate | n/a |
 
-**Incompatible fields:** `stft_score`, `group_ind`, and `confirmed_status` have fundamentally different semantics. The controller's `PulseHandler` forwards all fields identically regardless of detector mode — it is the GCS that must interpret them differently when `detection_mode == DETECTION_MODE_PYTHON` (1).
+**Incompatible fields:** `score_ratio`/`stft_score` and `confirmed_status` have fundamentally different semantics, and the rate/group information is a different field on each side (Python `rate_state`: winning rate-switch hypothesis; uavrt `group_ind`: pulse index within the K-group). Since tunnel protocol v2 the two detectors therefore use separate messages: uavrt reports arrive as `PulseInfo_t` (`COMMAND_ID_PULSE`) via `CommandHandler::handleUavrtPulse()`, Python reports as `PythonPulseInfo_t` (`COMMAND_ID_PYTHON_PULSE`) via `CommandHandler::_handlePythonPulse()`.
 
 ## Heartbeat
 
 | Aspect | Python | uavrt_detection |
 |--------|--------|-----------------|
 | Mechanism | Dedicated 1 Hz thread | Called before each segment |
-| Format | `send_pulse_udp(frequency_hz=0, ...)` | `sendHeartbeatOverUDP` (same zero-frequency convention) |
+| Format | Header-only TTDP `MessageType.HEARTBEAT` | `sendHeartbeatOverUDP` (zero-frequency pulse report) |
 | Rate | 1 per second (independent of detection cycle) | 1 per segment (~every K×tip seconds) |
 
 ## Gap Handling
@@ -246,7 +247,7 @@ Python resets more aggressively on gaps (30 ms vs 1.0 s for zero-fill threshold)
 
 2. **Cross-cycle state:** Python is stateless. uavrt carries priori across segments for D→C→T progression and true temporal confirmation. Python compensates with `confidence_ratio`.
 
-3. **Rate-switch:** Python handles in one process with multi-hypothesis bank, preserving full K-fold gain during transitions (0 dB loss). uavrt requires two processes, each seeing degraded fold SNR during the switch segment (up to −3 dB at mid-segment switch) — enough to miss weak long-range signals. Python encodes the winning hypothesis in `group_ind`; uavrt cannot determine which rate produced a pulse without external correlation.
+3. **Rate-switch:** Python handles in one process with multi-hypothesis bank, preserving full K-fold gain during transitions (0 dB loss). uavrt requires two processes, each seeing degraded fold SNR during the switch segment (up to −3 dB at mid-segment switch) — enough to miss weak long-range signals. Python encodes the winning hypothesis in `rate_state`; uavrt cannot determine which rate produced a pulse without external correlation.
 
 4. **Segment overlap:** uavrt overlaps by `2(KM+J)` windows so boundary pulses aren't missed. Python has no overlap — a pulse straddling segment boundaries is lost.
 
@@ -256,7 +257,7 @@ Python resets more aggressively on gaps (30 ms vs 1.0 s for zero-fill threshold)
 
 7. **No-detection reports:** Python sends `detection_status=3` every cycle with noise floor. uavrt is silent when nothing is detected. This gives operators better situational awareness with the Python detector.
 
-8. **`stft_score` and `group_ind` semantics are incompatible** between detectors. The GCS must interpret these based on `detection_mode`.
+8. **Score and rate/group fields are not comparable** between detectors: Python `score_ratio`/`rate_state` vs uavrt `stft_score`/`group_ind`. They travel in separate tunnel messages (`PythonPulseInfo_t` vs `PulseInfo_t`), so the GCS keys on the command ID rather than reinterpreting shared fields.
 
 9. **Gap handling:** Python resets more aggressively (30 ms threshold) vs uavrt (1.0 s). Python recovers faster from short transients but may unnecessarily discard data during brief dropouts.
 

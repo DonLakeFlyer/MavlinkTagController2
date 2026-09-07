@@ -139,7 +139,7 @@ void UDPPulseReceiver::_receive()
             std::memcpy(&pulse,
                         buffer.data() + pulseIndex * sizeof(pulse),
                         sizeof(pulse));
-            _commandHandler->handlePulse(pulse);
+            _commandHandler->handleUavrtPulse(pulse);
         }
     }
 }

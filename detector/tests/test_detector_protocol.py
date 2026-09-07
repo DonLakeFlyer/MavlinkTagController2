@@ -72,7 +72,7 @@ def test_pulse_report_round_trips_with_integer_status_fields():
         tag_id=42,
         frequency_hz=146_170_650,
         group_seq_counter=9,
-        group_ind=2,
+        rate_state=2,
         detection_status=1,
         confirmed_status=0,
         start_time_seconds=12.5,
@@ -86,8 +86,19 @@ def test_pulse_report_round_trips_with_integer_status_fields():
 
     encoded = encode_pulse_report(report)
 
-    assert PULSE_REPORT_SIZE == 81
+    assert PULSE_REPORT_SIZE == 80
     assert decode_pulse_report(encoded) == report
+
+    # Byte layout must match TagTrackerDetectorProtocol::PulsePayload
+    # (shared/detector_protocol.h); the round-trip alone cannot catch a
+    # struct-string drift since encode and decode share it.
+    payload = encoded[HEADER_SIZE:]
+    assert len(payload) == 60
+    assert struct.unpack_from('<I', payload, 0)[0] == 146_170_650   # frequency_hz
+    assert struct.unpack_from('<I', payload, 4)[0] == 9             # group_seq_counter
+    assert payload[8:12] == bytes([2, 1, 0, 2])  # rate_state, detection, confirmed, candidate
+    assert struct.unpack_from('<d', payload, 12)[0] == 12.5         # start_time_seconds
+    assert struct.unpack_from('<d', payload, 52)[0] == 1.5e-10      # noise_psd
 
 
 def test_pulse_report_candidate_id_defaults_to_provisional_lock():
@@ -97,7 +108,7 @@ def test_pulse_report_candidate_id_defaults_to_provisional_lock():
         tag_id=42,
         frequency_hz=146_170_650,
         group_seq_counter=9,
-        group_ind=0,
+        rate_state=0,
         detection_status=2,
         confirmed_status=1,
         start_time_seconds=12.5,
@@ -119,7 +130,7 @@ def test_no_detection_uses_distinct_message_type():
         tag_id=42,
         frequency_hz=146_170_000,
         group_seq_counter=9,
-        group_ind=0,
+        rate_state=0,
         detection_status=3,
         confirmed_status=0,
         start_time_seconds=12.5,

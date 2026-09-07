@@ -32,7 +32,7 @@ CONF_RE = re.compile(
     r"\[(\d\d):(\d\d):(\d\d)\|.\]\s+Conf: (\d+) Id:\s*(\d+) snr:\s*([-\d.]+) "
     r"heading:\s*([-\d.]+) (?:score_ratio: ([\d.]+)|stft_score:\s*([\deE.+-]+)) "
     r"noise_psd:\s*([\deE.+-]+) freq:\s*(\d+) seq: (\d+)"
-    r"(?: group_ind: (\d+))? lat/lon/yaw/alt:\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)"
+    r"(?: (?:group_ind|rate_state): (\d+))? lat/lon/yaw/alt:\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)"
 )
 
 DETECTED_RE = re.compile(

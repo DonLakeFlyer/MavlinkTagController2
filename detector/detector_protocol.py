@@ -10,7 +10,7 @@ _HEADER = struct.Struct('<IHHIII')
 # candidate_id: 0 = the detector's provisional lock (the only one reported
 # before multi-candidate banking); >0 = alternate lock candidates measured
 # at the same slices so the controller can pick the best pattern fit.
-_PULSE_PAYLOAD = struct.Struct('<IIHBBB6d')
+_PULSE_PAYLOAD = struct.Struct('<IIBBBB6d')
 _ARM_PAYLOAD = struct.Struct('<f')
 HEADER_SIZE = _HEADER.size
 PULSE_REPORT_SIZE = HEADER_SIZE + _PULSE_PAYLOAD.size
@@ -54,7 +54,7 @@ class PulseReport:
     tag_id: int
     frequency_hz: int
     group_seq_counter: int
-    group_ind: int
+    rate_state: int
     detection_status: int
     confirmed_status: int
     start_time_seconds: float
@@ -112,7 +112,7 @@ def encode_pulse_report(report, message_type=MessageType.PULSE):
     payload = _PULSE_PAYLOAD.pack(
         report.frequency_hz,
         report.group_seq_counter,
-        report.group_ind,
+        report.rate_state,
         report.detection_status,
         report.confirmed_status,
         report.candidate_id,
@@ -183,7 +183,7 @@ def decode_pulse_report(packet):
         tag_id=header.tag_id,
         frequency_hz=values[0],
         group_seq_counter=values[1],
-        group_ind=values[2],
+        rate_state=values[2],
         detection_status=values[3],
         confirmed_status=values[4],
         candidate_id=values[5],

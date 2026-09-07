@@ -59,7 +59,7 @@ struct ArmMessage {
 struct PulsePayload {
     uint32_t frequency_hz;
     uint32_t group_seq_counter;
-    uint16_t group_ind;
+    uint8_t rate_state;   // TunnelProtocol kRateStateXxx
     uint8_t detection_status;
     uint8_t confirmed_status;
     uint8_t candidate_id; // 0 = provisional lock; >0 = alternate lock candidate
@@ -124,7 +124,7 @@ static_assert(sizeof(Header) == 20);
 static_assert(sizeof(FailedPayload) == 4);
 static_assert(sizeof(ArmPayload) == 4);
 static_assert(sizeof(ArmMessage) == 24);
-static_assert(sizeof(PulsePayload) == 61);
-static_assert(sizeof(PulseReport) == 81);
+static_assert(sizeof(PulsePayload) == 60);
+static_assert(sizeof(PulseReport) == 80);
 
 } // namespace TagTrackerDetectorProtocol

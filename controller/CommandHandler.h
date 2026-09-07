@@ -30,7 +30,7 @@ public:
 
     static constexpr int kPulseUdpPort = 50000; // UDP port for pulse/heartbeat reports from detectors
 
-    // UDP pulse struct sent by pulse_detector.py over UDP.  Enough for MTU 1500 bytes.
+    // UDP pulse struct sent by uavrt_detection over UDP.  Enough for MTU 1500 bytes.
     typedef struct {
         double tag_id;
         double frequency_hz;
@@ -46,10 +46,8 @@ public:
         double noise_psd;
     } UDPPulseInfo_T;
 
-    // candidateId: detector lock candidate (0 = provisional lock) — Python
-    // collection reports only; the legacy struct above is a fixed wire layout.
-    void handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t collectionId = 0, uint32_t sliceId = 0,
-                     uint8_t candidateId = 0);
+    // uavrt_detection pulses: forwarded to the GCS as PulseInfo_t, never part of a collection.
+    void handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo);
     void handlePythonDetectorMessage(const TagTrackerDetectorProtocol::Header& header,
                                      const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
                                      uint32_t errorCode = 0);
@@ -68,7 +66,7 @@ private:
         double      latitude;
         double      longitude;
         double      altitude_rel;
-        TunnelProtocol::PulseInfo_t pulse_info;  // as built for the GCS; replayed if this candidate wins
+        TunnelProtocol::PythonPulseInfo_t pulse_info;  // as built for the GCS; replayed if this candidate wins
     };
     enum class AirSpyDeviceType {
         NONE,
@@ -88,6 +86,8 @@ private:
     bool _handleSaveLogs        (void);
     bool _handleCleanLogs       (void);
     void _handleTunnelMessage   (const mavlink_message_t& message);
+    void _handlePythonPulse     (const TagTrackerDetectorProtocol::Header& header, const TagTrackerDetectorProtocol::PulsePayload& payload);
+    void _sendPythonHeartbeat   (uint32_t tagId);
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
     void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort = 0);
     bool _writeSessionInfo      (const TunnelProtocol::StartDetectionInfo_t& startDetection, AirSpyDeviceType deviceType, bool isHFMode);
@@ -150,11 +150,9 @@ private:
     // Re-fits all candidates of tagId from _rotationSlices; if a different one
     // now wins, makes it live and returns its slice reports for replay to the
     // GCS. Caller holds _rotationMutex.
-    std::vector<TunnelProtocol::PulseInfo_t> _updateLiveCandidate(uint32_t tagId);
+    std::vector<TunnelProtocol::PythonPulseInfo_t> _updateLiveCandidate(uint32_t tagId);
 
     static constexpr int kDetectorControlPortBase = 51000;
-
-    static constexpr float kBackSectorMinDeg = 165.0f;   // simulator back-sector hack threshold
 
     static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3840 Hz outgoing
     static constexpr double kSimulatorTxRangeM = 4000.0;     // simulated transmitter distance from the first vehicle pose

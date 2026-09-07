@@ -10,6 +10,7 @@ add_executable(MavlinkTagController2
     CollectionCoordinator.cpp CollectionCoordinator.h
     channelizerTuner.cpp channelizerTuner.h
     CommandHandler.cpp CommandHandler.h
+    PythonPulseMapper.cpp PythonPulseMapper.h
     UDPPulseReceiver.cpp UDPPulseReceiver.h
     MonitoredProcess.cpp MonitoredProcess.h
     log.cpp log.h
@@ -77,4 +78,15 @@ if(BUILD_TESTING)
     )
     target_include_directories(test_bearing_calculator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     add_test(NAME test_bearing_calculator COMMAND test_bearing_calculator)
+
+    add_executable(test_python_pulse_mapper
+        tests/test_python_pulse_mapper.cpp
+        PythonPulseMapper.cpp PythonPulseMapper.h
+    )
+    target_include_directories(test_python_pulse_mapper PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/shared
+    )
+    target_link_libraries(test_python_pulse_mapper PRIVATE mavlink tunnel_protocol)
+    add_test(NAME test_python_pulse_mapper COMMAND test_python_pulse_mapper)
 endif()
