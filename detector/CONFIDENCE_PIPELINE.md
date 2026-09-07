@@ -190,22 +190,24 @@ interference. Neither test is implemented in the detection decision path yet.
 
 ## UDP packet fields
 
-Each detection (or no-detection) is sent to the controller as a 96-byte UDP
-packet containing 12 double-precision floats:
+Each detection (or no-detection) is sent to the controller as a typed TTDP
+packet (`detector_protocol.py` / `shared/detector_protocol.h`): a header
+(`collection_id`, `slice_id`, `tag_id`, message type `PULSE` or
+`NO_DETECTION`) followed by the pulse payload:
 
 | Field | Value (detection) | Value (no-detection) |
 |-------|-------------------|----------------------|
-| `tag_id` | Tag ID | Tag ID |
-| `frequency_hz` | Detected frequency | Expected frequency |
-| `start_time_seconds` | Detection timestamp | Current timestamp |
-| `predict_next_start_seconds` | timestamp + PRI | 0.0 |
-| `snr` | SNR in dB | 0.0 |
-| `stft_score` | score_ratio | Best candidate score_ratio |
+| `frequency_hz` | Tag frequency (`--freq`) | Tag frequency (`--freq`) |
 | `group_seq_counter` | Cycle number | Cycle number |
-| `group_ind` | 0 | 0 |
-| `group_snr` | SNR in dB | 0.0 |
+| `rate_state` | Winning rate hypothesis (`kRateStateXxx`) | 0 (`kRateStateA`) |
 | `detection_status` | 0 (SUB) or 1 (SUPER) | 3 (NO_DETECTION) |
 | `confirmed_status` | 0 or 1 | 0 |
+| `candidate_id` | 0 (provisional lock) or >0 (alternate) | 0 |
+| `start_time_seconds` | Segment start timestamp | Segment start timestamp |
+| `predict_next_start_seconds` | timestamp + PRI | 0.0 |
+| `snr` | SNR in dB | 0.0 |
+| `score_ratio` | score_ratio | Best candidate score_ratio |
+| `group_snr` | Per-pulse signal power (PSD units) | 0.0 |
 | `noise_psd` | Noise PSD (W/Hz) | Noise PSD (W/Hz) |
 
 The controller reads `confirmed_status` to decide `Conf:0` vs `Conf:1` in logs.

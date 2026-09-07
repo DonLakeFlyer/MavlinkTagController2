@@ -35,6 +35,7 @@
 #include "LogFileManager.h"
 #include "TelemetryCache.h"
 #include "BearingCalculator.h"
+#include "PythonPulseMapper.h"
 #include "timeHelpers.h"
 
 // POSIX requires the application to declare this; glibc only does so under _GNU_SOURCE.
@@ -192,6 +193,10 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     if (tagInfo.k < 2) {
         logWarn() << "Tag " << tagId << " has invalid k=" << tagInfo.k << ", defaulting to 5";
     }
+    uint32_t measurementK = tagInfo.measurement_k >= 2 ? tagInfo.measurement_k : 5;
+    if (tagInfo.measurement_k < 2) {
+        logWarn() << "Tag " << tagId << " has invalid measurement_k=" << tagInfo.measurement_k << ", defaulting to 5";
+    }
 
     std::string repoDir     = formatString("%s/repos/MavlinkTagController2", _homePath);
     std::string venvPython  = formatString("%s/.venv/bin/python3", repoDir.c_str());
@@ -204,7 +209,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                            " --center-freq %f --pf %f"
                                            " --detection-margin %f --confidence-ratio %f"
                                            " --threshold-cache-dir \"%s\""
-                                           " --k %u",
+                                           " --k %u --measurement-k %u",
                                 pythonCmd.c_str(),
                                 repoDir.c_str(),
                                 tp, tip, sampleRate, portData,
@@ -212,7 +217,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                 centerFreqMhz, tagInfo.false_alarm_probability,
                                 detectionMargin, confidenceRatio,
                                 cacheDir.c_str(),
-                                k);
+                                k, measurementK);
     if (_debugDetector || debugDetector) {
         commandStr += " --debug";
     }
@@ -299,6 +304,7 @@ bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetectio
     bool first = true;
     for (const TagInfo_t& tag : _tagDatabase) {
         const uint32_t kEffective = tag.k >= 2 ? tag.k : 5; // mirrors _startPythonDetector
+        const uint32_t measurementKEffective = tag.measurement_k >= 2 ? tag.measurement_k : 5;
         fprintf(fp, "%s    {\n", first ? "" : ",\n");
         first = false;
         fprintf(fp, "      \"id\": %u,\n", tag.id);
@@ -310,6 +316,8 @@ bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetectio
         fprintf(fp, "      \"intra_pulse_jitter_msecs\": %u,\n", tag.intra_pulse_jitter_msecs);
         fprintf(fp, "      \"k_requested\": %u,\n", tag.k);
         fprintf(fp, "      \"k\": %u,\n", kEffective);
+        fprintf(fp, "      \"measurement_k_requested\": %u,\n", tag.measurement_k);
+        fprintf(fp, "      \"measurement_k\": %u,\n", measurementKEffective);
         fprintf(fp, "      \"false_alarm_probability\": %s,\n", jsonNumber(tag.false_alarm_probability).c_str());
         fprintf(fp, "      \"channelizer_channel_number\": %u,\n", tag.channelizer_channel_number);
         fprintf(fp, "      \"channelizer_channel_center_frequency_hz\": %u,\n", tag.channelizer_channel_center_frequency_hz);
@@ -726,31 +734,19 @@ bool CommandHandler::_handleStopDetection(bool waitForCompletion)
     return true;
 }
 
-void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t collectionId, uint32_t sliceId,
-                                 uint8_t candidateId)
+void CommandHandler::handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo)
 {
     PulseInfo_t pulseInfo;
 
     memset(&pulseInfo, 0, sizeof(pulseInfo));
 
     pulseInfo.header.command                = COMMAND_ID_PULSE;
-    pulseInfo.collection_id                 = collectionId;
-    pulseInfo.slice_id                      = sliceId;
     pulseInfo.tag_id                        = (uint32_t)udpPulseInfo.tag_id;
     pulseInfo.frequency_hz                  = (uint32_t)udpPulseInfo.frequency_hz;
 
     TelemetryCache::TelemetryCacheEntry_t telemetry {};
     if (pulseInfo.frequency_hz != 0) {
         telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
-        // Post-lock retro-measured slices can be many minutes old, well past the
-        // TelemetryCache window; the pose captured at ARM is the slice's pose.
-        std::lock_guard<std::mutex> lock(_rotationMutex);
-        const auto sliceTelemetryIt = _rotationSliceTelemetry.find(sliceId);
-        if (_inRotation
-            && _collectionCoordinator.collectionId() == collectionId
-            && sliceTelemetryIt != _rotationSliceTelemetry.end()) {
-            telemetry = sliceTelemetryIt->second;
-        }
     }
 
     if (pulseInfo.frequency_hz == 0) {
@@ -792,37 +788,7 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
         pulseInfo.yaw_deg                       = telemetry.attitudeEuler.yawDegrees;
         pulseInfo.noise_psd                     = udpPulseInfo.noise_psd;
 
-        // Simulator hack: when pointing within 45° of directly away from
-        // the transmitter (assumed due north), force unconfirmed with low SNR.
-        if (_simulatorMode && _mavlink->detectionMode() != DETECTION_MODE_PYTHON) {
-            float yaw = telemetry.attitudeEuler.yawDegrees;
-            // Normalize yaw-180 into [-180,180]
-            float offBack = std::fmod(yaw - 180.0f + 540.0f, 360.0f) - 180.0f;
-            if (std::fabs(offBack) < (180.0f - kBackSectorMinDeg)) {
-                pulseInfo.confirmed_status = 0;
-                pulseInfo.snr = 20.0;
-                pulseInfo.group_snr = 20.0;
-                pulseInfo.detection_status = 0; // subthreshold
-            }
-        }
-
-        bool isPythonDetector = (_mavlink->detectionMode() == DETECTION_MODE_PYTHON);
-        std::string pulseStatus = isPythonDetector
-            ? formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f score_ratio: %.3f noise_psd: %5.1g freq: %9u seq: %u group_ind: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
-                                        pulseInfo.confirmed_status,
-                                        pulseInfo.tag_id,
-                                        pulseInfo.snr,
-                                        pulseInfo.yaw_deg,
-                                        pulseInfo.stft_score,
-                                        pulseInfo.noise_psd,
-                                        pulseInfo.frequency_hz,
-                                        pulseInfo.group_seq_counter,
-                                        pulseInfo.group_ind,
-                                        telemetry.position.latitude,
-                                        telemetry.position.longitude,
-                                        telemetry.attitudeEuler.yawDegrees,
-                                        telemetry.position.relativeAltitude)
-            : formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f stft_score: %5.1g noise_psd: %5.1g freq: %9u seq: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+        std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f stft_score: %5.1g noise_psd: %5.1g freq: %9u seq: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
                                         pulseInfo.confirmed_status,
                                         pulseInfo.tag_id,
                                         pulseInfo.snr,
@@ -842,6 +808,74 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
         }
     }
 
+    _mavlink->sendTunnelMessage(&pulseInfo, sizeof(pulseInfo));
+}
+
+void CommandHandler::_sendPythonHeartbeat(uint32_t tagId)
+{
+    PythonPulseInfo_t heartbeat;
+    memset(&heartbeat, 0, sizeof(heartbeat));
+    heartbeat.header.command = COMMAND_ID_PYTHON_PULSE;
+    heartbeat.tag_id         = tagId;
+
+    logInfo() << "HEARTBEAT from Detector" << tagId;
+    _mavlink->sendTunnelMessage(&heartbeat, sizeof(heartbeat));
+}
+
+void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header& header,
+                                        const TagTrackerDetectorProtocol::PulsePayload& payload)
+{
+    const uint32_t collectionId = header.collection_id;
+    const uint32_t sliceId      = header.slice_id;
+    const uint8_t  candidateId  = payload.candidate_id;
+
+    TelemetryCache::TelemetryCacheEntry_t telemetry = _telemetryCache->telemetryForTime(payload.start_time_seconds);
+    {
+        // Post-lock retro-measured slices can be many minutes old, well past the
+        // TelemetryCache window; the pose captured at ARM is the slice's pose.
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        const auto sliceTelemetryIt = _rotationSliceTelemetry.find(sliceId);
+        if (_inRotation
+            && _collectionCoordinator.collectionId() == collectionId
+            && sliceTelemetryIt != _rotationSliceTelemetry.end()) {
+            telemetry = sliceTelemetryIt->second;
+        }
+    }
+
+    PythonPulseInfo_t pulseInfo = buildPythonPulseInfo(header, payload, telemetry);
+
+    if (payload.detection_status == kNoPulseDetectionStatus) {
+        logDebug() << formatString("NO DETECTION Id: %2u score_ratio: %.3f noise_psd: %5.1g freq: %9u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+                                   pulseInfo.tag_id,
+                                   pulseInfo.score_ratio,
+                                   pulseInfo.noise_psd,
+                                   pulseInfo.frequency_hz,
+                                   pulseInfo.latitude,
+                                   pulseInfo.longitude,
+                                   pulseInfo.yaw_deg,
+                                   pulseInfo.altitude_rel);
+    } else {
+        std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f score_ratio: %.3f noise_psd: %5.1g freq: %9u seq: %u rate_state: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
+                                               pulseInfo.confirmed_status,
+                                               pulseInfo.tag_id,
+                                               pulseInfo.snr,
+                                               pulseInfo.yaw_deg,
+                                               pulseInfo.score_ratio,
+                                               pulseInfo.noise_psd,
+                                               pulseInfo.frequency_hz,
+                                               pulseInfo.cycle_counter,
+                                               pulseInfo.rate_state,
+                                               pulseInfo.latitude,
+                                               pulseInfo.longitude,
+                                               pulseInfo.yaw_deg,
+                                               pulseInfo.altitude_rel);
+        if (pulseInfo.confirmed_status) {
+            logInfo() << pulseStatus;
+        } else {
+            logDebug() << pulseStatus;
+        }
+    }
+
     bool inRotation = false;
     uint8_t liveCandidate = 0;
     {
@@ -849,24 +883,20 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
         inRotation = _inRotation;
         liveCandidate = _liveCandidateFor(pulseInfo.tag_id);
     }
-    const bool isPythonCollectionPulse = _mavlink->detectionMode() == DETECTION_MODE_PYTHON
-                                         && inRotation
-                                         && pulseInfo.frequency_hz != 0;
     // The GCS live view follows one lock candidate per tag: the provisional
     // lock until another candidate's pattern fit clearly overtakes it.
-    if (!isPythonCollectionPulse
+    if (!inRotation
         || (candidateId == liveCandidate && CollectionCoordinator::forwardPulseToGcs(pulseInfo.detection_status))) {
         _mavlink->sendTunnelMessage(&pulseInfo, sizeof(pulseInfo));
     }
 
-    std::vector<PulseInfo_t> replay;
+    std::vector<PythonPulseInfo_t> replay;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
         const auto headingIt = _rotationSliceHeadings.find(sliceId);
         if (_inRotation
             && _collectionCoordinator.collectionId() == collectionId
-            && headingIt != _rotationSliceHeadings.end()
-            && pulseInfo.frequency_hz != 0) {
+            && headingIt != _rotationSliceHeadings.end()) {
 
             // Store every armed heading: detections carry power, no-detections
             // are censored observations the bearing fit uses as nulls.
@@ -876,7 +906,7 @@ void CommandHandler::handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t co
             slice.heading_deg       = headingIt->second;
             slice.detected          = pulseInfo.detection_status != kNoPulseDetectionStatus;
             slice.snr_db            = pulseInfo.snr;
-            slice.signal_power      = pulseInfo.group_snr;
+            slice.signal_power      = pulseInfo.signal_psd;
             slice.noise_psd         = pulseInfo.noise_psd;
             slice.confirmed_status  = pulseInfo.confirmed_status;
             slice.tag_id            = pulseInfo.tag_id;
@@ -929,7 +959,7 @@ uint8_t CommandHandler::_liveCandidateFor(uint32_t tagId) const
     return it == _liveCandidate.end() ? 0 : it->second;
 }
 
-std::vector<TunnelProtocol::PulseInfo_t> CommandHandler::_updateLiveCandidate(uint32_t tagId)
+std::vector<TunnelProtocol::PythonPulseInfo_t> CommandHandler::_updateLiveCandidate(uint32_t tagId)
 {
     BearingCalculator calculator;
     uint32_t nCandidates = 0;
@@ -967,7 +997,7 @@ std::vector<TunnelProtocol::PulseInfo_t> CommandHandler::_updateLiveCandidate(ui
     }
 
     _liveCandidate[tagId] = best->candidate_id;
-    std::vector<PulseInfo_t> replay;
+    std::vector<PythonPulseInfo_t> replay;
     for (const auto& slice : _rotationSlices) {
         if (slice.tag_id == tagId && slice.candidate_id == best->candidate_id && slice.detected
             && slice.pulse_info.detection_status == kConfirmedDetectionStatus) {
@@ -989,9 +1019,7 @@ void CommandHandler::handlePythonDetectorMessage(
 
     const auto messageType = static_cast<MessageType>(header.message_type);
     if (messageType == MessageType::Heartbeat) {
-        UDPPulseInfo_T heartbeat {};
-        heartbeat.tag_id = header.tag_id;
-        handlePulse(heartbeat);
+        _sendPythonHeartbeat(header.tag_id);
         return;
     }
 
@@ -1096,20 +1124,7 @@ void CommandHandler::handlePythonDetectorMessage(
         return;
     }
 
-    UDPPulseInfo_T pulse {};
-    pulse.tag_id = header.tag_id;
-    pulse.frequency_hz = pulsePayload->frequency_hz;
-    pulse.start_time_seconds = pulsePayload->start_time_seconds;
-    pulse.predict_next_start_seconds = pulsePayload->predict_next_start_seconds;
-    pulse.snr = pulsePayload->snr;
-    pulse.stft_score = pulsePayload->score_ratio;
-    pulse.group_seq_counter = pulsePayload->group_seq_counter;
-    pulse.group_ind = pulsePayload->group_ind;
-    pulse.group_snr = pulsePayload->group_snr;
-    pulse.detection_status = pulsePayload->detection_status;
-    pulse.confirmed_status = pulsePayload->confirmed_status;
-    pulse.noise_psd = pulsePayload->noise_psd;
-    handlePulse(pulse, header.collection_id, header.slice_id, pulsePayload->candidate_id);
+    _handlePythonPulse(header, *pulsePayload);
 }
 
 void CommandHandler::_handleDetectorProcessFailure(uint32_t tagId, int exitCode)
@@ -1534,7 +1549,7 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
             for (const auto& slice : slicesCopy) {
                 if (slice.tag_id == result.tag_id && slice.candidate_id == result.candidate_id
                     && slice.detected && slice.pulse_info.detection_status == kConfirmedDetectionStatus) {
-                    PulseInfo_t replay = slice.pulse_info;
+                    PythonPulseInfo_t replay = slice.pulse_info;
                     _mavlink->sendTunnelMessage(&replay, sizeof(replay));
                     ++replayed;
                 }
@@ -1978,10 +1993,10 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
     // through a 4-phase pattern across successive pie slices so the detector
     // sees every combination:
     //
-    //   Phase 0 (clean A):  --tip tipA                                     → group_ind 0
-    //   Phase 1 (A→B):      --tip tipA --tip-secondary tipB --switch-time T → group_ind 2+
-    //   Phase 2 (clean B):  --tip tipB                                     → group_ind 1
-    //   Phase 3 (B→A):      --tip tipB --tip-secondary tipA --switch-time T → group_ind 2+
+    //   Phase 0 (clean A):  --tip tipA                                     → rate_state A
+    //   Phase 1 (A→B):      --tip tipA --tip-secondary tipB --switch-time T → rate_state A_TO_B
+    //   Phase 2 (clean B):  --tip tipB                                     → rate_state B
+    //   Phase 3 (B→A):      --tip tipB --tip-secondary tipA --switch-time T → rate_state B_TO_A
     //
     // switch_time places the rate change at the midpoint of the K-group.
     // The detector discards the first warmupSeconds of IQ data before

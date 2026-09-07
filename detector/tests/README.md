@@ -136,14 +136,13 @@ Unit tests for the multi-hypothesis rate-switch internals.
 |------|-------------|
 | `test_scores_match_direct` | `fold_multi_hypothesis` scores match direct numpy computation |
 
-#### TestHypLabelToGroupInd
+#### TestHypLabelToRateState
 
 | Test | Description |
 |------|-------------|
-| `test_pure_a` / `test_pure_b` | Pure labels map to correct group_ind constants |
-| `test_a_to_b_c1` / `test_a_to_b_c3` | A→B change-point labels map to correct group_ind (1+c) |
-| `test_b_to_a_c1` / `test_b_to_a_c3` | B→A change-point labels map to correct group_ind (K-1+c) |
-| `test_unknown_label_defaults_a` | Unknown label defaults to group_ind A |
-| `test_single_rate_always_zero` | Single-rate always produces group_ind 0 |
-| `test_group_ind_ranges_no_overlap_k5` | A→B and B→A group_ind ranges are disjoint |
+| `test_pure_a` / `test_pure_b` | Pure labels map to `RATE_STATE_A` / `RATE_STATE_B` |
+| `test_a_to_b_any_changepoint` | Every A→B change-point label maps to `RATE_STATE_A_TO_B` |
+| `test_b_to_a_any_changepoint` | Every B→A change-point label maps to `RATE_STATE_B_TO_A` |
+| `test_unknown_label_defaults_a` | Unknown label defaults to `RATE_STATE_A` |
+| `test_wire_values_match_tunnel_protocol` | Rate states are 0/1/2/3, matching `kRateStateXxx` in TunnelProtocol.h |
 | `test_last_rate_determines_predict_tip` | `last_rate` field correctly selects the TIP for prediction |

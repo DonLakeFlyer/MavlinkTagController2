@@ -21,8 +21,10 @@ from pulse_detector import (
     Detection,
     DOMINANT_FOLD_THRESHOLD,
     FOLD_LOCAL_RADIUS,
-    HYP_GROUP_IND_A,
-    HYP_GROUP_IND_B,
+    RATE_STATE_A,
+    RATE_STATE_B,
+    RATE_STATE_A_TO_B,
+    RATE_STATE_B_TO_A,
     OCCAM_MARGIN,
     build_hypothesis_indices,
     build_weighting_matrix,
@@ -30,7 +32,8 @@ from pulse_detector import (
     compute_stft_power,
     fold_detect,
     fold_multi_hypothesis,
-    hyp_label_to_group_ind,
+    hyp_label_to_rate_state,
+    rate_state_for_pri,
     _evt_cache_path,
     load_evt_cache,
     save_evt_cache,
@@ -717,80 +720,76 @@ class TestFoldRegressionSingleRate:
 
 
 # ---------------------------------------------------------------------------
-# Hypothesis → group_ind encoding and predict_next_s logic
+# Hypothesis → rate_state encoding and predict_next_s logic
 # ---------------------------------------------------------------------------
 
-class TestHypLabelToGroupInd:
-    """Tests for hyp_label_to_group_ind() mapping."""
+class TestHypLabelToRateState:
+    """Tests for hyp_label_to_rate_state() mapping."""
 
     def test_pure_a(self):
-        gind, last_rate = hyp_label_to_group_ind('A', K=5)
-        assert gind == HYP_GROUP_IND_A
+        state, last_rate = hyp_label_to_rate_state('A')
+        assert state == RATE_STATE_A
         assert last_rate == 'A'
 
     def test_pure_b(self):
-        gind, last_rate = hyp_label_to_group_ind('B', K=5)
-        assert gind == HYP_GROUP_IND_B
+        state, last_rate = hyp_label_to_rate_state('B')
+        assert state == RATE_STATE_B
         assert last_rate == 'B'
 
-    def test_a_to_b_c1(self):
-        gind, last_rate = hyp_label_to_group_ind('A_to_B_c1', K=5)
-        assert gind == 2  # 1 + c = 1 + 1
-        assert last_rate == 'B'
+    def test_a_to_b_any_changepoint(self):
+        for c in range(1, 4):
+            state, last_rate = hyp_label_to_rate_state(f'A_to_B_c{c}')
+            assert state == RATE_STATE_A_TO_B
+            assert last_rate == 'B'
 
-    def test_a_to_b_c3(self):
-        gind, last_rate = hyp_label_to_group_ind('A_to_B_c3', K=5)
-        assert gind == 4  # 1 + 3
-        assert last_rate == 'B'
-
-    def test_b_to_a_c1(self):
-        gind, last_rate = hyp_label_to_group_ind('B_to_A_c1', K=5)
-        assert gind == 5  # K - 1 + c = 4 + 1
-        assert last_rate == 'A'
-
-    def test_b_to_a_c3(self):
-        gind, last_rate = hyp_label_to_group_ind('B_to_A_c3', K=5)
-        assert gind == 7  # K - 1 + c = 4 + 3
-        assert last_rate == 'A'
+    def test_b_to_a_any_changepoint(self):
+        for c in range(1, 4):
+            state, last_rate = hyp_label_to_rate_state(f'B_to_A_c{c}')
+            assert state == RATE_STATE_B_TO_A
+            assert last_rate == 'A'
 
     def test_unknown_label_defaults_a(self):
-        gind, last_rate = hyp_label_to_group_ind('something_weird', K=5)
-        assert gind == HYP_GROUP_IND_A
+        state, last_rate = hyp_label_to_rate_state('something_weird')
+        assert state == RATE_STATE_A
         assert last_rate == 'A'
 
-    def test_single_rate_always_zero(self):
-        """Single-rate tags always produce label 'A'."""
-        gind, last_rate = hyp_label_to_group_ind('A', K=5)
-        assert gind == 0
-
-    def test_group_ind_ranges_no_overlap_k5(self):
-        """With K=5, A→B and B→A group_ind ranges should not collide
-        with pure A (0), pure B (1), or each other."""
-        a_to_b_inds = set()
-        b_to_a_inds = set()
-        for c in range(1, 4):  # K-1 = 4, c ranges 1..3
-            g, _ = hyp_label_to_group_ind(f'A_to_B_c{c}', K=5)
-            a_to_b_inds.add(g)
-            g, _ = hyp_label_to_group_ind(f'B_to_A_c{c}', K=5)
-            b_to_a_inds.add(g)
-        assert HYP_GROUP_IND_A not in a_to_b_inds
-        assert HYP_GROUP_IND_B not in a_to_b_inds
-        assert HYP_GROUP_IND_A not in b_to_a_inds
-        assert HYP_GROUP_IND_B not in b_to_a_inds
-        # A→B and B→A ranges must be disjoint
-        assert a_to_b_inds.isdisjoint(b_to_a_inds), (
-            f"Overlap between A→B {a_to_b_inds} and B→A {b_to_a_inds}"
-        )
+    def test_wire_values_match_tunnel_protocol(self):
+        # Must match kRateStateXxx in TunnelProtocol.h.
+        assert RATE_STATE_A == 0
+        assert RATE_STATE_B == 1
+        assert RATE_STATE_A_TO_B == 2
+        assert RATE_STATE_B_TO_A == 3
 
     def test_last_rate_determines_predict_tip(self):
         """Verify the last_rate field correctly selects the right TIP."""
         tip_a = 1.0
         tip_b = 1.5
         # A_to_B → last gap is B → predict uses tip_b
-        _, last = hyp_label_to_group_ind('A_to_B_c2', K=5)
+        _, last = hyp_label_to_rate_state('A_to_B_c2')
         predict_tip = tip_b if last == 'B' else tip_a
         assert predict_tip == tip_b
         # B_to_A → last gap is A → predict uses tip_a
-        _, last = hyp_label_to_group_ind('B_to_A_c2', K=5)
+        _, last = hyp_label_to_rate_state('B_to_A_c2')
         predict_tip = tip_b if last == 'B' else tip_a
         assert predict_tip == tip_a
+
+
+class TestRateStateForPri:
+    """Locked-path rate classification from a (refined) PRI."""
+
+    def test_exact_rates(self):
+        assert rate_state_for_pri(2.0, 2.0, 1.5) == RATE_STATE_A
+        assert rate_state_for_pri(1.5, 2.0, 1.5) == RATE_STATE_B
+
+    def test_refined_rate_b_stays_b(self):
+        # combine_agreeing_locks refines PRI from elapsed cycles, so a
+        # confirmed rate-B lock is never exactly tip_secondary.
+        assert rate_state_for_pri(1.5005, 2.0, 1.5) == RATE_STATE_B
+        assert rate_state_for_pri(1.4993, 2.0, 1.5) == RATE_STATE_B
+
+    def test_refined_rate_a_stays_a(self):
+        assert rate_state_for_pri(2.0007, 2.0, 1.5) == RATE_STATE_A
+
+    def test_single_rate_always_a(self):
+        assert rate_state_for_pri(1.5, 2.0, None) == RATE_STATE_A
+        assert rate_state_for_pri(2.0, 2.0, None) == RATE_STATE_A

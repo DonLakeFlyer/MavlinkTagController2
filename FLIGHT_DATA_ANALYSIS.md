@@ -106,7 +106,7 @@ From `CommandHandler.cpp`, each pulse is logged as:
 
 ```
 Conf: %u Id: %2u snr: %5.1f heading: %3.1f score_ratio: %.3f noise_psd: %5.1g
-freq: %9u seq: %u group_ind: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f
+freq: %9u seq: %u rate_state: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f
 ```
 
 and each solved bearing as:

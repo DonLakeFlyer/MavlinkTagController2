@@ -158,46 +158,32 @@ See [CW_REJECTION.md](CW_REJECTION.md) for the full design.
 
 ### What
 
-Add `uniformity` as a 13th field in the UDP pulse packet so the controller
+Add `uniformity` as a new field in the TTDP pulse payload so the controller
 can log it and downstream consumers (TagTracker) can use it.
 
 ### Wire format change
 
 This is a **breaking change** to the detector↔controller interface.
 
-**Detector side** ([pulse_detector.py](pulse_detector.py)):
+**Detector side** ([detector_protocol.py](detector_protocol.py), [pulse_detector.py](pulse_detector.py)):
 
 ```python
-# Current: struct.pack('<12d', ...)
-# Proposed: struct.pack('<13d', ..., uniformity)
+# Current:  _PULSE_PAYLOAD = struct.Struct('<IIBBBB6d')
+# Proposed: _PULSE_PAYLOAD = struct.Struct('<IIBBBB7d')
 ```
 
-Add `uniformity` parameter to `send_pulse_udp()` and append it as field 12
-(0-indexed). Packet grows from 96 to 104 bytes.
+Add `uniformity` to `PulseReport` and `encode_pulse_report()`, and pass it
+through `send_pulse_udp()`. The payload grows by 8 bytes.
 
-**Controller side** ([../controller/PulseHandler.h](../controller/PulseHandler.h)):
+**Controller side** ([../shared/detector_protocol.h](../shared/detector_protocol.h)):
 
-```cpp
-typedef struct {
-    double tag_id;
-    double frequency_hz;
-    double start_time_seconds;
-    double predict_next_start_seconds;
-    double snr;
-    double stft_score;
-    double group_seq_counter;
-    double group_ind;
-    double group_snr;
-    double detection_status;
-    double confirmed_status;
-    double noise_psd;
-    double uniformity;        // NEW
-} UDPPulseInfo_T;
-```
+Append `double uniformity;` to `TagTrackerDetectorProtocol::PulsePayload`
+and update the expected payload size check.
 
-**Controller side** ([../controller/PulseHandler.cpp](../controller/PulseHandler.cpp)):
+**Controller side** ([../controller/CommandHandler.cpp](../controller/CommandHandler.cpp)):
 
-Add `uniformity` to the `PulseInfo_t` population and to the log format string:
+Copy `payload.uniformity` into `PythonPulseInfo_t` in `_handlePythonPulse()`
+and add it to the log format string:
 
 ```
 Conf: %u Id: %2u snr: %5.1f ... uniformity: %.3f ...
@@ -205,10 +191,10 @@ Conf: %u Id: %2u snr: %5.1f ... uniformity: %.3f ...
 
 **TunnelProtocol** (`TunnelProtocol.h`, fetched via CPM from [DonLakeFlyer/TagTrackerTunnelProtocol](https://github.com/DonLakeFlyer/TagTrackerTunnelProtocol)):
 
-Add `uniformity` field to `PulseInfo_t` if it needs to be forwarded to the
-GCS via MAVLink tunnel.
+Add `uniformity` field to `PythonPulseInfo_t` if it needs to be forwarded to
+the GCS via MAVLink tunnel.
 
-### Both sides must be updated in the same commit.
+### Detector, shared header, controller, and tests must be updated in the same commit.
 
 ---
 
@@ -242,7 +228,7 @@ After 8-heading rotation completes:
 
 ### Where in controller
 
-[../controller/PulseHandler.cpp](../controller/PulseHandler.cpp) or a new
+[../controller/CommandHandler.cpp](../controller/CommandHandler.cpp) or a new
 rotation-level aggregation class. The controller currently processes each
 pulse independently — it would need to buffer a rotation's worth of pulses
 before applying this check.

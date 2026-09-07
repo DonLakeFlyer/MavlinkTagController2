@@ -18,7 +18,7 @@ from flight_checks import (  # noqa: E402
 
 PY_PULSE = ("[10:00:01|I] Conf: 1 Id:  2 snr:  14.0 heading: 45.0 "
             "score_ratio: 3.500 noise_psd: 1.0e-05 freq: 146170000 seq: 7 "
-            "group_ind: 1 lat/lon/yaw/alt: 38.100000 -122.200000   45  90")
+            "rate_state: 1 lat/lon/yaw/alt: 38.100000 -122.200000   45  90")
 LEGACY_PULSE = ("[10:00:02|I] Conf: 0 Id:  3 snr:  11.5 heading: 45.0 "
                 "stft_score: 3.2e+01 noise_psd: 2.0e-05 freq: 146170150 "
                 "seq: 8 lat/lon/yaw/alt: 38.100000 -122.200000   45  90")

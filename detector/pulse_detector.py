@@ -86,15 +86,12 @@ DETECTION_STATUS_SUPERTHRESHOLD = 1  # Superthreshold pulse
 DETECTION_STATUS_CONFIRMED     = 2  # Confirmed pulse
 DETECTION_STATUS_NO_DETECTION   = 3  # Searched but no pulse found
 
-# Hypothesis encoding carried in PulseInfo_t.group_ind (uint16_t).
-# The GCS interprets this to determine tag activity state.
-#   0 = rate A only (resting)
-#   1 = rate B only (moving)
-#   2..K-1 = A→B switch at change-point c  (group_ind = 1 + c)
-#   K..2K-3 = B→A switch at change-point c  (group_ind = K - 1 + c)
-# For single-rate tags group_ind is always 0.
-HYP_GROUP_IND_A = 0
-HYP_GROUP_IND_B = 1
+# Rate-switch hypothesis outcome carried in PythonPulseInfo_t.rate_state.
+# Fixed enum, independent of K. For single-rate tags always RATE_STATE_A.
+RATE_STATE_A = 0        # rate A only (resting)
+RATE_STATE_B = 1        # rate B only (moving)
+RATE_STATE_A_TO_B = 2   # switched A->B within the K-group
+RATE_STATE_B_TO_A = 3   # switched B->A within the K-group
 
 # If any single fold carries more than this fraction of the total K-fold
 # score, the detection is likely a transient rather than a real pulse train.
@@ -122,26 +119,35 @@ class PulseLock(NamedTuple):
     score_ratio: float
 
 
-def hyp_label_to_group_ind(label, K=5):
-    """Map a hypothesis label to the group_ind encoding.
+def hyp_label_to_rate_state(label):
+    """Map a hypothesis label to (rate_state, last_rate).
 
-    Returns (group_ind, 'last_rate') where last_rate is 'A' or 'B'
-    indicating which PRI governs the *last* gap in the hypothesis
-    (used for predict_next_start_seconds).
+    last_rate is 'A' or 'B': the PRI governing the *last* gap in the
+    hypothesis (used for predict_next_start_seconds).
     """
     if label == 'A':
-        return (HYP_GROUP_IND_A, 'A')
+        return (RATE_STATE_A, 'A')
     if label == 'B':
-        return (HYP_GROUP_IND_B, 'B')
-    # Switch labels: "A_to_B_c{c}" or "B_to_A_c{c}"
+        return (RATE_STATE_B, 'B')
     if label.startswith('A_to_B_c'):
-        c = int(label.split('c')[1])
-        return (1 + c, 'B')       # last gap uses rate B
+        return (RATE_STATE_A_TO_B, 'B')
     if label.startswith('B_to_A_c'):
-        c = int(label.split('c')[1])
-        return (K - 1 + c, 'A')   # last gap uses rate A
+        return (RATE_STATE_B_TO_A, 'A')
     # Fallback for unknown labels — treat as rate A
-    return (HYP_GROUP_IND_A, 'A')
+    return (RATE_STATE_A, 'A')
+
+
+def rate_state_for_pri(pri_seconds, tip, tip_secondary):
+    """Classify a lock's PRI as RATE_STATE_A or RATE_STATE_B.
+
+    combine_agreeing_locks() refines the PRI from elapsed cycles, so it will
+    not equal either configured TIP exactly; pick the nearer one.
+    """
+    if tip_secondary is None:
+        return RATE_STATE_A
+    return (RATE_STATE_B
+            if abs(pri_seconds - tip_secondary) < abs(pri_seconds - tip)
+            else RATE_STATE_A)
 
 # Global flag for graceful shutdown
 _should_stop = False
@@ -158,7 +164,7 @@ def _signal_handler(signum, frame):
 
 def send_pulse_udp(pulse_sock, dest_addr, tag_id, frequency_hz,
                    start_time_seconds, predict_next_start_seconds,
-                   snr, stft_score, group_seq_counter, group_ind,
+                   snr, stft_score, group_seq_counter, rate_state,
                    group_snr, detection_status, confirmed_status,
                    noise_psd, collection_id=0, slice_id=0, candidate_id=0):
     """Send a typed pulse or no-detection report to the controller."""
@@ -168,7 +174,7 @@ def send_pulse_udp(pulse_sock, dest_addr, tag_id, frequency_hz,
         tag_id=tag_id,
         frequency_hz=frequency_hz,
         group_seq_counter=group_seq_counter,
-        group_ind=group_ind,
+        rate_state=rate_state,
         detection_status=detection_status,
         confirmed_status=confirmed_status,
         start_time_seconds=start_time_seconds,
@@ -2114,7 +2120,7 @@ def main():
                     # before weaker candidates are banked behind it.
                     for detection in sorted(qualified, key=lambda item: item.score_ratio,
                                             reverse=True):
-                        _, last_rate = hyp_label_to_group_ind(detection.hyp_label, K=K)
+                        _, last_rate = hyp_label_to_rate_state(detection.hyp_label)
                         candidate_pri = (
                             args.tip_secondary
                             if last_rate == 'B' and args.tip_secondary else args.tip)
@@ -2276,7 +2282,8 @@ def main():
                             # No threshold in the locked path, so no honest ratio exists.
                             stft_score=0.0,
                             group_seq_counter=cycle,
-                            group_ind=0,
+                            rate_state=rate_state_for_pri(
+                                candidate.pri_seconds, args.tip, args.tip_secondary),
                             group_snr=per_pulse_power_psd,
                             detection_status=DETECTION_STATUS_CONFIRMED,
                             confirmed_status=1,
@@ -2382,9 +2389,9 @@ def main():
                         confidence_flag = '  [LOW]'
                     hyp_flag = f'  hyp={det.hyp_label}' if det.hyp_label != 'A' else ''
 
-                    # Map hypothesis label → group_ind encoding and
-                    # determine which PRI to use for next-pulse prediction.
-                    gind, last_rate = hyp_label_to_group_ind(det.hyp_label, K=K)
+                    # Map hypothesis label → rate_state and determine which
+                    # PRI to use for next-pulse prediction.
+                    rate_state, last_rate = hyp_label_to_rate_state(det.hyp_label)
                     if last_rate == 'B' and tip_secondary:
                         predict_tip = tip_secondary
                     else:
@@ -2406,7 +2413,7 @@ def main():
                             snr=det.snr_db,
                             stft_score=det.score_ratio,
                             group_seq_counter=cycle,
-                            group_ind=gind,
+                            rate_state=rate_state,
                             group_snr=det.signal_power,
                             detection_status=det_status,
                             confirmed_status=1 if not is_marginal else 0,
@@ -2473,7 +2480,7 @@ def main():
                         snr=0.0,
                         stft_score=nodet_score_ratio,
                         group_seq_counter=cycle,
-                        group_ind=0,
+                        rate_state=RATE_STATE_A,
                         group_snr=0.0,
                         detection_status=DETECTION_STATUS_NO_DETECTION,
                         confirmed_status=0,

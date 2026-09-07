@@ -51,26 +51,28 @@ For a correctly matched hypothesis, all K folds land on real pulses, so power is
 
 The C++ detector (`DETECTION_MODE_UAVRT`) launches **two** processes per dual-rate tag — one for each PRI — with tag IDs `id` (primary) and `id + 1` (secondary). Tag Tracker distinguishes rates by tag ID (even = secondary).
 
-The Python detector (`DETECTION_MODE_PYTHON`) launches a **single** process per tag. Both rates and all switch hypotheses are evaluated in one fold pass. Rate-switch information is encoded in the `group_ind` field of each pulse report.
+The Python detector (`DETECTION_MODE_PYTHON`) launches a **single** process per tag. Both rates and all switch hypotheses are evaluated in one fold pass. Rate-switch information is carried in the `rate_state` field of each pulse report.
 
 ### Detector → Controller (UDP)
 
-`send_pulse_udp()` packs 12 little-endian IEEE-754 doubles (96 bytes) to `127.0.0.1:50000`:
+`send_pulse_udp()` sends a typed TTDP packet (`detector_protocol.py`, magic `"TTDP"`) to `127.0.0.1:<pulse-port>`. The header (`<IHHIII`: magic, message type, payload length, `collection_id`, `slice_id`, `tag_id`) is followed by the pulse payload (`<IIBBBB6d`) for `MessageType.PULSE` / `MessageType.NO_DETECTION`:
 
-| Index | Field | Type | Description |
-|-------|-------|------|-------------|
-| 0 | `tag_id` | double→uint32 | Tag ID from `TagInfo_t.id` |
-| 1 | `frequency_hz` | double→uint32 | Detection frequency; 0 = heartbeat |
-| 2 | `start_time_seconds` | double | Segment collection timestamp (wall clock) |
-| 3 | `predict_next_start_seconds` | double | Expected next pulse time (uses last-rate PRI) |
-| 4 | `snr` | double | Per-pulse SNR in dB |
-| 5 | `stft_score` | double | Score / threshold ratio |
-| 6 | `group_seq_counter` | double→uint16 | Cycle counter (same for all pulses in a group) |
-| 7 | `group_ind` | double→uint16 | Rate-switch hypothesis encoding (see below) |
-| 8 | `group_snr` | double | Incoherently summed K-group SNR |
-| 9 | `detection_status` | double→uint8 | 0=sub, 1=super, 2=confirmed, 3=no-detection |
-| 10 | `confirmed_status` | double→uint8 | 1=confirmed, 0=unconfirmed |
-| 11 | `noise_psd` | double | Estimated noise PSD at pulse frequency |
+| Field | Type | Description |
+|-------|------|-------------|
+| `frequency_hz` | uint32 | Absolute tag frequency (`--freq`) |
+| `group_seq_counter` | uint32 | Cycle counter (same for all reports from one cycle) |
+| `rate_state` | uint8 | Winning rate hypothesis (see below) |
+| `detection_status` | uint8 | 0=sub, 1=super, 2=confirmed, 3=no-detection |
+| `confirmed_status` | uint8 | 1=confirmed, 0=unconfirmed |
+| `candidate_id` | uint8 | 0 = provisional lock, >0 = alternate lock candidate |
+| `start_time_seconds` | double | Segment start (stream time, wall-clock UTC) |
+| `predict_next_start_seconds` | double | Expected next pulse time (uses last-rate PRI) |
+| `snr` | double | Per-pulse SNR in dB |
+| `score_ratio` | double | Score / threshold ratio |
+| `group_snr` | double | Per-pulse fixed-offset signal power (PSD units) |
+| `noise_psd` | double | Estimated noise PSD at pulse frequency |
+
+Heartbeats are header-only `MessageType.HEARTBEAT` packets, not zero-frequency pulse reports.
 
 ### `predict_next_start_seconds` rate selection
 
@@ -82,43 +84,30 @@ Tag Tracker can compare successive `predict_next_start_seconds` values against b
 
 ### Controller → GCS (MAVLink tunnel)
 
-`PulseHandler::handlePulse()` copies all UDP fields into `PulseInfo_t` and attaches vehicle telemetry (lat/lon/alt/roll/pitch/yaw) from the telemetry cache based on `start_time_seconds`. The struct is sent as raw bytes inside a `TUNNEL` MAVLink message.
+`CommandHandler::_handlePythonPulse()` copies the detector report fields into `PythonPulseInfo_t` and attaches vehicle telemetry (lat/lon/alt/roll/pitch/yaw) from the telemetry cache based on `start_time_seconds`. The struct is sent as raw bytes inside a `TUNNEL` MAVLink message.
 
-Key `PulseInfo_t` fields for rate-switch (defined in `TunnelProtocol.h`):
+Key `PythonPulseInfo_t` fields for rate-switch (defined in `TunnelProtocol.h`; uavrt reports use the separate `PulseInfo_t` with its own `group_ind` = pulse index within the K-group):
 
 | Field | Type | Rate-switch usage |
 |-------|------|-------------------|
 | `tag_id` | uint32_t | Same tag ID for both rates (no +1 split) |
-| `group_ind` | uint16_t | Hypothesis encoding (see below) |
+| `rate_state` | uint8_t | `kRateStateXxx` (see below) |
 | `predict_next_start_seconds` | double | Uses winning hypothesis's last-rate PRI |
 | `detection_status` | uint8_t | 3 = no detection (one per cycle, not two) |
-| `stft_score` | double | Score/threshold ratio; for no-detection carries best sub-threshold ratio |
+| `score_ratio` | double | Score/threshold ratio; for no-detection carries best sub-threshold ratio |
 
-### `group_ind` hypothesis encoding
+### `rate_state` encoding
 
-The `group_ind` field encodes the winning rate-switch hypothesis for the K-group:
+`rate_state` is a fixed 4-value enum, independent of K. The change-point index is not carried on the wire; it appears only in the detector log's `hyp_label`.
 
-| `group_ind` value | Meaning | Hypothesis label |
-|-------------------|---------|------------------|
-| 0 | Pure rate A (primary/resting TIP) | `"A"` |
-| 1 | Pure rate B (secondary/moving TIP) | `"B"` |
-| 2 .. K−1 | A→B switch at change-point c (c = group_ind − 1) | `"A_to_B_c{c}"` |
-| K .. 2K−3 | B→A switch at change-point c (c = group_ind − K + 1) | `"B_to_A_c{c}"` |
+| `rate_state` | Constant | Meaning | Hypothesis labels |
+|--------------|----------|---------|-------------------|
+| 0 | `kRateStateA` | Pure rate A (primary/resting TIP) | `"A"` |
+| 1 | `kRateStateB` | Pure rate B (secondary/moving TIP) | `"B"` |
+| 2 | `kRateStateAToB` | Switched A→B within the K-group | `"A_to_B_c{c}"` |
+| 3 | `kRateStateBToA` | Switched B→A within the K-group | `"B_to_A_c{c}"` |
 
-For K=5, the values are:
-
-| `group_ind` | Hypothesis |
-|-------------|------------|
-| 0 | Pure A |
-| 1 | Pure B |
-| 2 | A→B switch at pulse 1 |
-| 3 | A→B switch at pulse 2 |
-| 4 | A→B switch at pulse 3 |
-| 5 | B→A switch at pulse 1 |
-| 6 | B→A switch at pulse 2 |
-| 7 | B→A switch at pulse 3 |
-
-For single-rate tags (`intra_pulse2_msecs == 0`), `group_ind` is always 0.
+For single-rate tags (`intra_pulse2_msecs == 0`), `rate_state` is always `kRateStateA`.
 
 ### No-detection behavior
 
@@ -126,8 +115,8 @@ When the detector searches a cycle and finds no pulse above threshold, it sends 
 
 - `snr = 0`
 - `predict_next_start_seconds = 0`
-- `group_ind = 0`
-- `stft_score` = best sub-threshold score ratio (useful for diagnostics)
+- `rate_state = kRateStateA`
+- `score_ratio` = best sub-threshold score ratio (useful for diagnostics)
 - `noise_psd` = observed noise floor
 
 Because the Python detector is a single process, Tag Tracker receives **one** no-detection message per cycle per tag — unlike the C++ detector which sends two (one per tag ID).
@@ -136,8 +125,8 @@ Because the Python detector is a single process, Tag Tracker receives **one** no
 
 To support Python rate-switch detection, Tag Tracker must:
 
-1. **Decode `group_ind`** using the encoding table above when `detection_mode == DETECTION_MODE_PYTHON` (1). The tag's K value (from `TagInfo_t.k`) is needed to interpret the B→A range.
-2. **Display activity state**: Map `group_ind` to a user-visible label (resting/moving/switching). Change-point hypotheses indicate the tag is transitioning.
+1. **Decode `rate_state`** using the table above from `PythonPulseInfo_t` (`COMMAND_ID_PYTHON_PULSE`). No K-dependent decoding is needed.
+2. **Display activity state**: Map `rate_state` to a user-visible label (resting/moving/switching). `kRateStateAToB` / `kRateStateBToA` indicate the tag is transitioning.
 3. **Use `predict_next_start_seconds` for timing**: This already reflects the detected rate. No need for Tag Tracker to independently compute next-pulse timing.
 4. **Handle single no-detection per tag**: Only one `detection_status == 3` message per cycle (not two).
 5. **No tag ID splitting**: Both rates report under the same `tag_id`. Do not look for an even-numbered companion tag when `detection_mode == DETECTION_MODE_PYTHON`.
@@ -157,13 +146,17 @@ Complete:
 2. EVT threshold calibrated over full hypothesis bank.
 3. Max-fold-fraction diagnostic computed per detection for confidence downgrade.
 4. Detection logs include hypothesis label (e.g. `hyp=A_to_B_c2`).
-5. UDP reporting includes `group_ind` derived from hypothesis label.
+5. UDP reporting includes `rate_state` derived from hypothesis label (`hyp_label_to_rate_state`).
 6. Controller launches a single detector process per tag; passes `--tip-secondary` when dual-rate.
 
 ## Tests
 
-- Hypothesis index generation for pure and switch schedules.
-- Boundary conditions for valid offsets and segment edges.
-- Uniformity metric correctness.
-- End-to-end fold detection at both rates and during switches.
-- EVT false alarm rate validation with full hypothesis bank.
+`detector/tests/test_rate_switch.py`:
+
+- Hypothesis index generation for pure and switch schedules, including fractional PRI rounding and offset-range bounds.
+- Multi-hypothesis fold: correct hypothesis wins for injected signals; Occam preference for pure over marginal switch.
+- Max-fold-fraction diagnostic and its use in confidence downgrade (detections are never discarded).
+- Segment length computation for single- and dual-rate.
+- EVT cache naming isolation between single-rate, dual-rate, and legacy formats.
+- End-to-end `fold_detect` at rate A and across an A→B switch; single-rate regression against the legacy fold path.
+- `hyp_label_to_rate_state` mapping and `last_rate` → predict-TIP selection.

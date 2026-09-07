@@ -14,12 +14,13 @@ int main()
     static_assert(sizeof(FailedPayload) == 4);
     static_assert(sizeof(ArmPayload) == 4);
     static_assert(sizeof(ArmMessage) == 24);
-    static_assert(sizeof(PulsePayload) == 61);
-    static_assert(sizeof(PulseReport) == 81);
+    static_assert(sizeof(PulsePayload) == 60);
+    static_assert(sizeof(PulseReport) == 80);
     static_assert(offsetof(Header, collection_id) == 8);
     static_assert(offsetof(ArmMessage, payload) == 20);
-    static_assert(offsetof(PulsePayload, candidate_id) == 12);
-    static_assert(offsetof(PulsePayload, start_time_seconds) == 13);
+    static_assert(offsetof(PulsePayload, rate_state) == 8);
+    static_assert(offsetof(PulsePayload, candidate_id) == 11);
+    static_assert(offsetof(PulsePayload, start_time_seconds) == 12);
 
     Header header {};
     header.magic = kMagic;
