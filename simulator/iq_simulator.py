@@ -135,6 +135,7 @@ class SimConfig:
     telemetry_sub_endpoint: str = "tcp://127.0.0.1:6001"  # ZMQ SUB endpoint for controller telemetry
     telemetry_topic: str = "vehicle_pose"
     tx_offset_north_m: float = 4000.0
+    tx_offset_east_m: float = 0.0
 
 
 @dataclass
@@ -316,13 +317,17 @@ def _start_telemetry_subscriber(cfg: SimConfig, telem_state: DirectionalTelemetr
                     telem_state.has_pose = True
 
                     if not telem_state.tx_initialized:
-                        tx_lat, tx_lon = _offset_latlon_north_east(lat, lon, cfg.tx_offset_north_m, 0.0)
+                        tx_lat, tx_lon = _offset_latlon_north_east(
+                            lat, lon, cfg.tx_offset_north_m, cfg.tx_offset_east_m)
                         telem_state.tx_lat_deg = tx_lat
                         telem_state.tx_lon_deg = tx_lon
                         telem_state.tx_initialized = True
+                        tx_bearing = math.degrees(math.atan2(
+                            cfg.tx_offset_east_m, cfg.tx_offset_north_m)) % 360.0
                         print(
                             "iq_simulator: initialized transmitter location "
-                            f"{cfg.tx_offset_north_m:.0f}m north of first vehicle pose",
+                            f"{cfg.tx_offset_north_m:.0f}m north, {cfg.tx_offset_east_m:.0f}m east "
+                            f"of first vehicle pose (bearing {tx_bearing:.0f} deg)",
                             file=sys.stderr,
                         )
         finally:
@@ -440,7 +445,8 @@ def generate_packet(
                 effective_snr_db = snr_at_distance(
                     tag.snr_db,
                     max(1.0, distance_m),
-                    ref_distance_m=max(1.0, cfg.tx_offset_north_m),
+                    ref_distance_m=max(1.0, math.hypot(cfg.tx_offset_north_m,
+                                                       cfg.tx_offset_east_m)),
                 ) + attenuation_db
 
         # Amplitude from SNR: snr_linear = (amp^2) / (noise_sigma^2)
@@ -704,6 +710,9 @@ Examples:
                     help="Telemetry topic prefix (default: vehicle_pose)")
     p.add_argument("--tx-offset-north-m", type=float, default=4000.0,
                     help="Fixed transmitter offset north of first vehicle pose (default: 4000m)")
+    p.add_argument("--tx-offset-east-m", type=float, default=0.0,
+                    help="Fixed transmitter offset east of first vehicle pose (default: 0m). "
+                         "Together with --tx-offset-north-m this sets the true bearing.")
 
 
     args = p.parse_args()
@@ -754,6 +763,7 @@ Examples:
     cfg.telemetry_sub_endpoint = args.telemetry_sub_endpoint
     cfg.telemetry_topic = args.telemetry_topic
     cfg.tx_offset_north_m = args.tx_offset_north_m
+    cfg.tx_offset_east_m = args.tx_offset_east_m
 
     # Build tags from CLI if --freq-offset-hz was given
     if args.freq_offset_hz is not None:
@@ -803,7 +813,8 @@ if __name__ == "__main__":
     if cfg.telemetry_sub_endpoint:
         print(
             "iq_simulator: directional antenna mode enabled "
-            f"(endpoint={cfg.telemetry_sub_endpoint}, tx_offset_north={cfg.tx_offset_north_m:.0f}m)",
+            f"(endpoint={cfg.telemetry_sub_endpoint}, tx_offset_north={cfg.tx_offset_north_m:.0f}m, "
+            f"tx_offset_east={cfg.tx_offset_east_m:.0f}m)",
             file=sys.stderr,
         )
     run(cfg)

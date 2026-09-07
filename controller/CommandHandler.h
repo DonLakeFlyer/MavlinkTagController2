@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -24,7 +25,8 @@ class LogFileManager;
 
 class CommandHandler {
 public:
-    explicit CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode = false, const std::string& simulatorPreset = "strong", bool debugDetector = false, double simulatorSnrDb = 20.0);
+    explicit CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode = false, const std::string& simulatorPreset = "strong", bool debugDetector = false, double simulatorSnrDb = 20.0,
+                            double simulatorTxBearingDeg = 0.0, double simulatorInterfererSnrDb = std::numeric_limits<double>::quiet_NaN());
 
     static constexpr int kPulseUdpPort = 50000; // UDP port for pulse/heartbeat reports from detectors
 
@@ -44,7 +46,10 @@ public:
         double noise_psd;
     } UDPPulseInfo_T;
 
-    void handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t collectionId = 0, uint32_t sliceId = 0);
+    // candidateId: detector lock candidate (0 = provisional lock) — Python
+    // collection reports only; the legacy struct above is a fixed wire layout.
+    void handlePulse(const UDPPulseInfo_T& udpPulseInfo, uint32_t collectionId = 0, uint32_t sliceId = 0,
+                     uint8_t candidateId = 0);
     void handlePythonDetectorMessage(const TagTrackerDetectorProtocol::Header& header,
                                      const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
                                      uint32_t errorCode = 0);
@@ -52,6 +57,7 @@ public:
 private:
     struct RotationSlice {
         uint32_t    slice_id;
+        uint8_t     candidate_id;   // detector lock candidate this power was measured at
         float       heading_deg;
         bool        detected;       // false: armed heading, detector reported no pulse
         double      snr_db;
@@ -62,6 +68,7 @@ private:
         double      latitude;
         double      longitude;
         double      altitude_rel;
+        TunnelProtocol::PulseInfo_t pulse_info;  // as built for the GCS; replayed if this candidate wins
     };
     enum class AirSpyDeviceType {
         NONE,
@@ -117,6 +124,8 @@ private:
     bool                            _simulatorMode          = false;
     std::string                     _simulatorPreset;
     double                          _simulatorSnrDb = 20.0;
+    double                          _simulatorTxBearingDeg = 0.0;       // true bearing of the simulated transmitter from the first vehicle pose
+    double                          _simulatorInterfererSnrDb;          // NaN: no interferer; else a flat (pattern-free) pulse train +1 kHz from the tag
     bool                            _debugDetector          = false;
     uint32_t                        _simPhase               = 0;        // 4-phase cycle: 0=A, 1=A→B, 2=B, 3=B→A
 
@@ -130,10 +139,24 @@ private:
     std::map<uint32_t, float>                   _rotationSliceHeadings;
     std::map<uint32_t, TelemetryCache::TelemetryCacheEntry_t> _rotationSliceTelemetry;   // vehicle pose captured at ARM
     std::vector<RotationSlice>                  _rotationSlices;
+    std::map<uint32_t, uint8_t>                 _liveCandidate;         // tag_id -> lock candidate the GCS is currently shown
+
+    // Live view switches to another candidate only when its pattern fit is
+    // clearly better, to avoid flip-flopping on a marginal rotation.
+    static constexpr float    kLiveCandidateSwitchMargin = 0.15f;
+    static constexpr uint32_t kLiveCandidateMinSlices    = 3;
+
+    uint8_t _liveCandidateFor(uint32_t tagId) const;
+    // Re-fits all candidates of tagId from _rotationSlices; if a different one
+    // now wins, makes it live and returns its slice reports for replay to the
+    // GCS. Caller holds _rotationMutex.
+    std::vector<TunnelProtocol::PulseInfo_t> _updateLiveCandidate(uint32_t tagId);
 
     static constexpr int kDetectorControlPortBase = 51000;
 
     static constexpr float kBackSectorMinDeg = 165.0f;   // simulator back-sector hack threshold
 
     static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3840 Hz outgoing
+    static constexpr double kSimulatorTxRangeM = 4000.0;     // simulated transmitter distance from the first vehicle pose
+    static constexpr int kSimulatorInterfererOffsetHz = 1000; // inside the +/-2 kHz acquisition band, outside the 200 Hz lock tolerance
 };

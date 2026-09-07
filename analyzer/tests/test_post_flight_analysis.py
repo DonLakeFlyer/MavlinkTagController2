@@ -16,8 +16,44 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from post_flight_analysis import (  # noqa: E402
     RATE_WARNING_TRANSIENT_MAX, correlate_holes_with_gaps, generate_report,
-    parse_decimator_log, parse_rx_log,
+    parse_bearing_candidates_log, parse_bearing_log, parse_decimator_log,
+    parse_rx_log,
 )
+
+
+class TestBearingCsvParsers:
+    def test_malformed_rows_are_skipped_not_fatal(self, tmp_path, capsys):
+        path = tmp_path / 'bearing_result.log'
+        path.write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude\n'
+            '3,45.0,0.9,8,12.0,38.1,-122.2\n'
+            '4,garbage,0.5,8,10.0\n'          # non-numeric field
+            '5,nan,0.1,3,9.0\n'               # rejected rotation: NaN bearing is valid
+            '6,90.0\n'                        # truncated trailing row
+            '\n')                             # blank trailing line: not a row
+        results = parse_bearing_log(str(path))
+        assert [r.tag_id for r in results] == [3, 5]
+        assert results[0].latitude == 38.1
+        err = capsys.readouterr().err
+        assert 'skipping malformed row 3' in err
+        assert 'skipping malformed row 5' in err and '2 of 5 fields' in err
+        assert 'row 6' not in err
+
+    def test_candidate_rows_skip_malformed(self, tmp_path, capsys):
+        path = tmp_path / 'bearing_candidates.log'
+        path.write_text(
+            'tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected\n'
+            '2,0,45,0,8,35.9,0,0\n'
+            '2,1,134.25,0.974,8,36.0,1,0\n'
+            '2,x,1.0,0.5,8,1.0,0,0\n'
+            '2,2,10.0,0.1\n'                  # truncated (partial write)
+            '2,3,10.0,0.1,8,1.0,yes,0\n')     # corrupt flag must not read as False
+        results = parse_bearing_candidates_log(str(path))
+        assert [(c.candidate_id, c.selected) for c in results] == [(0, False), (1, True)]
+        err = capsys.readouterr().err
+        assert 'skipping malformed row 4' in err
+        assert 'skipping malformed row 5' in err and '4 of 8 fields' in err
+        assert 'skipping malformed row 6' in err and "'yes'" in err
 
 
 def _jsonl(path: Path, entries):
@@ -369,3 +405,12 @@ class TestPersistentRotationSession:
         assert '| 1 | 1 | 10.0 |' in rows['180°']
         # Locked measurements have no threshold; not a near-threshold anomaly.
         assert 'close to threshold' not in md
+
+    def test_nan_bearing_distinguishes_no_detections_from_floor(self, tmp_path):
+        (tmp_path / 'bearing_result.log').write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude\n'
+            '3,nan,0.000,0,-1000000000.0,0,0\n'   # detector never saw a pulse
+            '4,nan,0.050,1,9.0,0,0\n')            # one detection, fit below floor
+        md = generate_report(str(tmp_path))
+        assert '| 3 | none (no detections) |' in md
+        assert '| 4 | none (below confidence floor) |' in md

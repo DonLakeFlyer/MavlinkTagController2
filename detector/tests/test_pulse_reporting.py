@@ -44,3 +44,26 @@ def test_pulse_send_reports_success():
 
 def test_pulse_send_reports_socket_failure():
     assert not send_test_pulse(FakeSocket(OSError('send failed')))
+
+
+def test_pulse_send_carries_candidate_id():
+    from detector_protocol import decode_pulse_report
+
+    class CapturingSocket(FakeSocket):
+        def sendto(self, packet, destination):
+            self.packet = packet
+            return len(packet)
+
+    sock = CapturingSocket()
+    send_pulse_udp(
+        sock, ('127.0.0.1', 50000), tag_id=42, frequency_hz=146_170_000,
+        start_time_seconds=12.5, predict_next_start_seconds=14.5, snr=18.25,
+        stft_score=0.0, group_seq_counter=9, group_ind=0, group_snr=1e-9,
+        detection_status=2, confirmed_status=1, noise_psd=1.5e-10,
+        collection_id=7, slice_id=3, candidate_id=3)
+    report = decode_pulse_report(sock.packet)
+    assert report.candidate_id == 3
+    assert report.slice_id == 3
+
+    send_test_pulse(sock)
+    assert decode_pulse_report(sock.packet).candidate_id == 0

@@ -142,6 +142,7 @@ static void testMultipleTags() {
 // ── Test: two detections still yield a bearing between them ─────────
 static void testTwoSlices() {
     BearingCalculator calc;
+    calc.setConfidenceFloor(0.0f);  // exercising the fit, not the rejection rule
     calc.addSlice(0.0f, 40.0, 2, 12.5);
     calc.addSlice(90.0f, 30.0, 2, 9.0);
     auto results = calc.solve();
@@ -153,6 +154,7 @@ static void testTwoSlices() {
     CHECK(results[0].r_squared > 0.0f && results[0].r_squared < 0.5f);
     CHECK(results[0].n_valid_slices == 2);
     CHECK(results[0].best_snr == 12.5f);
+    CHECK(!results[0].rejected);
     std::printf("PASS: testTwoSlices (bearing=%.1f, conf=%.3f)\n",
                 results[0].bearing_deg, results[0].r_squared);
 }
@@ -160,6 +162,7 @@ static void testTwoSlices() {
 // ── Test: single slice returns that heading with zero confidence ───
 static void testSingleSlice() {
     BearingCalculator calc;
+    calc.setConfidenceFloor(0.0f);
     calc.addSlice(123.0f, 35.0, 7, 11.0);
     auto results = calc.solve();
     CHECK(results.size() == 1);
@@ -168,6 +171,108 @@ static void testSingleSlice() {
     CHECK(results[0].n_valid_slices == 1);
     CHECK(results[0].best_snr == 11.0f);
     std::printf("PASS: testSingleSlice\n");
+}
+
+// ── Test: with the default floor a lone detection is not a bearing ────
+static void testSingleSliceRejectedByFloor() {
+    BearingCalculator calc;
+    calc.addSlice(123.0f, 35.0, 7, 11.0);
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(results[0].rejected);
+    CHECK(std::isnan(results[0].bearing_deg));
+    CHECK(results[0].r_squared == 0.0f);
+    CHECK(results[0].n_valid_slices == 1);   // still reported so the GCS can show what was seen
+    std::printf("PASS: testSingleSliceRejectedByFloor\n");
+}
+
+// ── Test: competing lock candidates — pattern-shaped one wins ─────────
+// Candidate 0 (the detector's provisional lock) is a noise lock: flat-ish
+// powers with no pattern structure. Candidate 1 traces the antenna pattern
+// around the rotation. Selection must pick candidate 1 even though the
+// detector reported 0 first.
+static void testCandidateSelection() {
+    BearingCalculator calc;
+    const double noiseLock[8] = {3.1, 2.7, 3.4, 2.9, 3.3, 2.6, 3.0, 3.2};
+    for (int i = 0; i < 8; ++i) {
+        calc.addSlice(static_cast<float>(i * 45), noiseLock[i], 2, 3.0, 0);
+    }
+    auto slices = generateSlices(225.0f, 30.0, 2.0, 8);
+    for (const auto& [hdg, power] : slices) {
+        calc.addSlice(hdg, power, 2, 9.0, 1);
+    }
+
+    auto candidates = calc.solveCandidates();
+    CHECK(candidates.size() == 2);
+    for (const auto& c : candidates) {
+        CHECK(c.tag_id == 2);
+        CHECK(c.n_candidates == 2);
+    }
+
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(results[0].candidate_id == 1);
+    CHECK(results[0].n_candidates == 2);
+    CHECK(!results[0].rejected);
+    assertNear(results[0].bearing_deg, 225.0f, kBearingToleranceDeg, "selected candidate bearing");
+    CHECK(results[0].r_squared > 0.9f);
+    CHECK(results[0].best_snr == 9.0f);
+    std::printf("PASS: testCandidateSelection (candidate=%u, bearing=%.1f, conf=%.3f)\n",
+                results[0].candidate_id, results[0].bearing_deg, results[0].r_squared);
+}
+
+// ── Test: no-detection headings are censored observations for every candidate ──
+static void testNoDetectionsSharedAcrossCandidates() {
+    BearingCalculator calc;
+    // Both candidates saw a pulse only at 0°; six other headings were empty.
+    calc.addSlice(0.0f, 32.8, 2, 0.0, 0);
+    calc.addSlice(0.0f, 20.0, 2, 0.0, 1);
+    for (int i = 1; i < 8; ++i) {
+        calc.addNoDetection(static_cast<float>(i * 45), 2);
+    }
+    auto candidates = calc.solveCandidates();
+    CHECK(candidates.size() == 2);
+    for (const auto& c : candidates) {
+        // Without the censored headings a lone detection scores 0.
+        CHECK(c.r_squared > 0.3f);
+        assertNear(c.bearing_deg, 0.0f, 10.0f, "censored shared across candidates");
+    }
+    std::printf("PASS: testNoDetectionsSharedAcrossCandidates\n");
+}
+
+// ── Test: every candidate below the floor → no bearing, best one reported ──
+static void testAllCandidatesRejected() {
+    BearingCalculator calc;
+    calc.setConfidenceFloor(0.95f);
+    auto good = generateSlices(90.0f, 30.0, 5.0, 8);
+    for (size_t i = 0; i < good.size(); ++i) {
+        // ±2 dB alternating noise keeps confidence below 0.95
+        calc.addSlice(good[i].first, good[i].second + ((i % 2) ? -2.0 : 2.0), 3, 0.0, 0);
+        calc.addSlice(good[i].first, 3.0 + 0.1 * i, 3, 0.0, 1);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(results[0].rejected);
+    CHECK(std::isnan(results[0].bearing_deg));
+    CHECK(results[0].candidate_id == 0);   // best of the bad set is still identified
+    CHECK(results[0].r_squared > 0.5f && results[0].r_squared < 0.95f);
+    CHECK(results[0].n_valid_slices == 8);
+    std::printf("PASS: testAllCandidatesRejected (conf=%.3f)\n", results[0].r_squared);
+}
+
+// ── Test: single candidate keeps legacy behaviour (candidate 0, not rejected) ──
+static void testSingleCandidateDefaults() {
+    BearingCalculator calc;
+    auto slices = generateSlices(0.0f, 30.0, 5.0, 8);
+    for (const auto& [hdg, power] : slices) {
+        calc.addSlice(hdg, power, 2, 0.0);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(results[0].candidate_id == 0);
+    CHECK(results[0].n_candidates == 1);
+    CHECK(!results[0].rejected);
+    std::printf("PASS: testSingleCandidateDefaults\n");
 }
 
 // ── Test: one detection plus no-detections everywhere else ──────────
@@ -334,6 +439,7 @@ static void testBearing_16slices() {
 int main() {
     testEmpty();
     testSingleSlice();
+    testSingleSliceRejectedByFloor();
     testTwoSlices();
     testSingleDetectionWithCensored();
     testMarginalRun();
@@ -341,6 +447,10 @@ int main() {
     testReset();
     testBestSnr();
     testNegativeFloorRejected();
+    testCandidateSelection();
+    testNoDetectionsSharedAcrossCandidates();
+    testAllCandidatesRejected();
+    testSingleCandidateDefaults();
     testPatternSymmetry();
     testBearingAtZero_8slices();
     testBearingAt90_8slices();

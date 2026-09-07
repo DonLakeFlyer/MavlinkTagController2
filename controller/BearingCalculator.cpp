@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <utility>
 
 // RA-2AK measured antenna pattern in dB, normalized to 0 dB at boresight.
 // Eyeballed from the Telonics RA-2A reception radiation pattern polar plot.
@@ -16,14 +17,14 @@ const double BearingCalculator::kPatternDb[BearingCalculator::kPatternSize] = {
 };
 
 void BearingCalculator::addSlice(float heading_deg, double signal_power, uint32_t tag_id,
-                                 double snr_db)
+                                 double snr_db, uint8_t candidate_id)
 {
-    _slices.push_back({heading_deg, signal_power, tag_id, snr_db, true});
+    _slices.push_back({heading_deg, signal_power, tag_id, snr_db, true, candidate_id});
 }
 
 void BearingCalculator::addNoDetection(float heading_deg, uint32_t tag_id)
 {
-    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false});
+    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false, 0});
 }
 
 void BearingCalculator::reset()
@@ -50,17 +51,66 @@ double BearingCalculator::patternLinear(double offsetDeg)
     return std::pow(10.0, db / 10.0);
 }
 
-std::vector<BearingCalculator::Result> BearingCalculator::solve() const
+std::vector<BearingCalculator::Result> BearingCalculator::solveCandidates() const
 {
-    // Group slices by tag_id
-    std::map<uint32_t, std::vector<SliceData>> tagGroups;
+    // Detections group by (tag, candidate); no-detections are censored
+    // observations shared by every candidate of their tag.
+    std::map<uint32_t, std::vector<SliceData>> noDetections;
+    std::map<std::pair<uint32_t, uint8_t>, std::vector<SliceData>> groups;
     for (const auto& s : _slices) {
-        tagGroups[s.tag_id].push_back(s);
+        if (s.detected) {
+            groups[{s.tag_id, s.candidate_id}].push_back(s);
+        } else {
+            noDetections[s.tag_id].push_back(s);
+        }
+    }
+    // A tag with only no-detections still gets a (NaN) result.
+    for (const auto& [tagId, slices] : noDetections) {
+        groups.try_emplace({tagId, 0});
+    }
+
+    std::map<uint32_t, uint32_t> candidateCounts;
+    for (const auto& [key, slices] : groups) {
+        candidateCounts[key.first]++;
     }
 
     std::vector<Result> results;
-    for (const auto& [tagId, slices] : tagGroups) {
-        results.push_back(_solveForTag(tagId, slices));
+    for (const auto& [key, slices] : groups) {
+        std::vector<SliceData> fitSlices = slices;
+        const auto censored = noDetections.find(key.first);
+        if (censored != noDetections.end()) {
+            fitSlices.insert(fitSlices.end(), censored->second.begin(), censored->second.end());
+        }
+        Result result = _solveForTag(key.first, fitSlices);
+        result.candidate_id = key.second;
+        result.n_candidates = candidateCounts[key.first];
+        result.rejected = false;
+        results.push_back(result);
+    }
+    return results;
+}
+
+std::vector<BearingCalculator::Result> BearingCalculator::solve() const
+{
+    std::map<uint32_t, Result> best;
+    for (const auto& candidate : solveCandidates()) {
+        auto it = best.find(candidate.tag_id);
+        if (it == best.end()) {
+            best.emplace(candidate.tag_id, candidate);
+        } else if (candidate.r_squared > it->second.r_squared
+                   || (candidate.r_squared == it->second.r_squared
+                       && candidate.n_valid_slices > it->second.n_valid_slices)) {
+            it->second = candidate;
+        }
+    }
+
+    std::vector<Result> results;
+    for (auto& [tagId, result] : best) {
+        if (result.n_valid_slices > 0 && result.r_squared < _confidenceFloor) {
+            result.rejected = true;
+            result.bearing_deg = std::numeric_limits<float>::quiet_NaN();
+        }
+        results.push_back(result);
     }
     return results;
 }

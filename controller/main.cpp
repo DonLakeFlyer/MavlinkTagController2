@@ -11,9 +11,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <future>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <cstring>
 #include <ifaddrs.h>
@@ -38,6 +41,9 @@ int main(int argc, char** argv)
     bool        simulatorMode = false;
     std::string simulatorPreset = "strong";
     double      simulatorSnrDb = 20.0;
+    std::optional<double> simulatorTxBearingDegArg;   // explicit --sim-tx-bearing-deg; wins over a preset's default
+    double      simulatorTxBearingDeg = 0.0;
+    double      simulatorInterfererSnrDb = std::numeric_limits<double>::quiet_NaN();
 	std::string simulatorTelemetryEndpoint = "tcp://127.0.0.1:6001";
     bool        debugDetector = false;
 
@@ -52,6 +58,12 @@ int main(int argc, char** argv)
             //   strong          20 dB (~43 dB at detector)  -> locks on first cycle
             //   marginal       -21 dB (~2 dB at detector)   -> two-cycle confirmation path
             //   below-marginal -33 dB (~-10 dB at detector) -> never locks
+            //   competing      -18 dB tag at bearing 135 + flat -18 dB interferer +1 kHz:
+            //                  the interferer takes the provisional lock on the first
+            //                  heading, the tag is below threshold there and is only
+            //                  admitted near 135 (post-lock), so earlier headings must
+            //                  be filled in retrospectively and the finish-time
+            //                  candidate selection must pick the tag.
             // Any other word is an iq_simulator preset, used only when no tag is configured.
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 simulatorPreset = argv[++i];
@@ -61,7 +73,18 @@ int main(int argc, char** argv)
                     simulatorSnrDb = -21.0;
                 } else if (simulatorPreset == "below-marginal") {
                     simulatorSnrDb = -33.0;
+                } else if (simulatorPreset == "competing") {
+                    simulatorSnrDb = -18.0;
+                    simulatorInterfererSnrDb = -18.0;
+                    simulatorTxBearingDeg = 135.0;
                 }
+            }
+        } else if (strcmp(argv[i], "--sim-tx-bearing-deg") == 0) {
+            // Where the simulated transmitter sits relative to the first vehicle
+            // pose. Off the first rotation heading, the lock happens partway
+            // round and earlier headings are filled in retrospectively.
+            if (i + 1 < argc) {
+                simulatorTxBearingDegArg = atof(argv[++i]);
             }
 		} else if (strcmp(argv[i], "--sim-telemetry-endpoint") == 0) {
 			if (i + 1 < argc) {
@@ -76,9 +99,15 @@ int main(int argc, char** argv)
     }
 
     if (simulatorMode) {
-        const bool isLevelPreset = simulatorPreset == "strong" || simulatorPreset == "marginal" || simulatorPreset == "below-marginal";
+        if (simulatorTxBearingDegArg) {
+            simulatorTxBearingDeg = *simulatorTxBearingDegArg;
+        }
+        const bool isLevelPreset = simulatorPreset == "strong" || simulatorPreset == "marginal" || simulatorPreset == "below-marginal"
+                                   || simulatorPreset == "competing";
         if (isLevelPreset) {
-            logInfo() << "Simulator mode enabled (level:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB)";
+            logInfo() << "Simulator mode enabled (level:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB"
+                      << " tx bearing:" << simulatorTxBearingDeg << "deg"
+                      << " interferer snr:" << simulatorInterfererSnrDb << "dB)";
         } else {
             logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << ", used only when no tag is configured)";
         }
@@ -101,7 +130,8 @@ int main(int argc, char** argv)
 
     auto ftpServer 			= MavlinkFtpServer { mavlink };
     auto telemetryCache     = new TelemetryCache(mavlink);
-    auto commandHandler 	= CommandHandler { mavlink, telemetryCache, simulatorMode, simulatorPreset, debugDetector, simulatorSnrDb };
+    auto commandHandler 	= CommandHandler { mavlink, telemetryCache, simulatorMode, simulatorPreset, debugDetector, simulatorSnrDb,
+                                           simulatorTxBearingDeg, simulatorInterfererSnrDb };
     auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), CommandHandler::kPulseUdpPort, &commandHandler };
 
 	globalMavlinkSystem		= mavlink;

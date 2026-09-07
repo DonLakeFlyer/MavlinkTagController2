@@ -7,7 +7,10 @@ import struct
 
 MAGIC = 0x50445454  # "TTDP" on the wire
 _HEADER = struct.Struct('<IHHIII')
-_PULSE_PAYLOAD = struct.Struct('<IIHBB6d')
+# candidate_id: 0 = the detector's provisional lock (the only one reported
+# before multi-candidate banking); >0 = alternate lock candidates measured
+# at the same slices so the controller can pick the best pattern fit.
+_PULSE_PAYLOAD = struct.Struct('<IIHBBB6d')
 _ARM_PAYLOAD = struct.Struct('<f')
 HEADER_SIZE = _HEADER.size
 PULSE_REPORT_SIZE = HEADER_SIZE + _PULSE_PAYLOAD.size
@@ -60,6 +63,7 @@ class PulseReport:
     score_ratio: float
     group_snr: float
     noise_psd: float
+    candidate_id: int = 0
 
 
 def encode_header(message_type, payload_length, collection_id, slice_id, tag_id):
@@ -111,6 +115,7 @@ def encode_pulse_report(report, message_type=MessageType.PULSE):
         report.group_ind,
         report.detection_status,
         report.confirmed_status,
+        report.candidate_id,
         report.start_time_seconds,
         report.predict_next_start_seconds,
         report.snr,
@@ -181,10 +186,11 @@ def decode_pulse_report(packet):
         group_ind=values[2],
         detection_status=values[3],
         confirmed_status=values[4],
-        start_time_seconds=values[5],
-        predict_next_start_seconds=values[6],
-        snr=values[7],
-        score_ratio=values[8],
-        group_snr=values[9],
-        noise_psd=values[10],
+        candidate_id=values[5],
+        start_time_seconds=values[6],
+        predict_next_start_seconds=values[7],
+        snr=values[8],
+        score_ratio=values[9],
+        group_snr=values[10],
+        noise_psd=values[11],
     )

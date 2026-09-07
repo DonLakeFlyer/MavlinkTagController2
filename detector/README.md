@@ -143,17 +143,17 @@ Defined in `TunnelProtocol.h` and mirrored in the detector:
 |-------|------|------|
 | `0` | SUBTHRESHOLD | Marginal detection (fold score < confidence_ratio × threshold) |
 | `1` | SUPERTHRESHOLD | Confident detection (fold score ≥ confidence_ratio × threshold) |
-| `2` | CONFIRMED | Reserved for stateful detectors (uavrt_detection); **never sent by pulse_detector.py** |
+| `2` | CONFIRMED | Fixed-coordinate measurement at a lock candidate (collection mode only, after the provisional lock) |
 | `3` | NO_DETECTION | Detector searched this cycle and found nothing |
 
 ### Confirmed Status
 
-Binary (0 or 1). Since the Python detector is stateless (no cross-cycle confirmation), it uses the confidence ratio as a proxy:
+Binary (0 or 1). For acquisition reports the Python detector uses the confidence ratio as a proxy; locked measurements (`detection_status=2`) always carry `confirmed_status=1`:
 
-- `confirmed_status=1` — confident detection (score ≥ confidence_ratio × threshold; default ratio 1.3)
+- `confirmed_status=1` — confident detection (score ≥ confidence_ratio × threshold; default ratio 1.3) or a locked measurement
 - `confirmed_status=0` — everything else (marginal, no detection)
 
-The controller logs `confirmed_status=1` pulses at Info level and `confirmed_status=0` at Debug level. Both are forwarded to the GCS.
+The controller logs `confirmed_status=1` pulses at Info level and `confirmed_status=0` at Debug level. Outside a collection both are forwarded to the GCS; during a collection only CONFIRMED (locked) reports of the live lock candidate are forwarded (see below).
 
 ### Per-Cycle Report Types
 
@@ -162,6 +162,11 @@ The controller logs `confirmed_status=1` pulses at Info level and `confirmed_sta
 | **Strong detection** (score ≥ confidence_ratio × threshold) | `1` (SUPERTHRESHOLD) | `1` | frequency, SNR, noise_psd, stft_score |
 | **Marginal detection** (score < confidence_ratio × threshold) | `0` (SUBTHRESHOLD) | `0` | frequency, SNR, noise_psd, stft_score |
 | **No detection** | `3` (NO_DETECTION) | `0` | noise_psd, start_time (no frequency/SNR) |
+| **Locked measurement** (collection mode, after lock) | `2` (CONFIRMED) | `1` | group_snr = per-pulse power at the candidate's frequency/phase, `candidate_id` |
+
+### Lock Candidates (`candidate_id`)
+
+In collection mode the detector banks up to `MAX_LOCK_CANDIDATES` (4) qualifying fold peaks. The first one confirmed by a second agreeing sighting (or strong enough to lock immediately) becomes the *provisional* lock. The fold search keeps running on the shorter post-lock cycles so a tag found later in the rotation is still admitted (append-only once locked). Every slice's spectrogram is retained for the rotation and each slice is measured at **all** banked candidates, reported once per buffered cycle per candidate (the controller upserts per slice) with `candidate_id` set (`0` = provisional lock, `1..3` = alternates); a late candidate is therefore also measured on every earlier heading. The controller keeps one entry per `(tag_id, candidate_id, slice_id)`, fits the antenna pattern to each candidate at `FinishCollection`, and reports the best-fitting one (or no bearing if none clears the confidence floor). The GCS live view follows one candidate per tag — the provisional lock until another candidate's pattern fit clearly overtakes it, at which point the controller replays that candidate's headings so the display corrects mid-rotation. Acquisition (`0`/`1`) and no-detection (`3`) reports always carry `candidate_id = 0`.
 
 Heartbeats are not pulse reports: the detector sends a header-only TTDP `HEARTBEAT` message (see `shared/detector_protocol.h`) once per second, with no `PulsePayload`.
 
@@ -441,6 +446,10 @@ FA_per_rotation = 1 - (1 - 5e-2)^8 = ~34% chance of ≥1 false dot per rotation
 In practice, false alarms are marginal detections near threshold (low SNR) and flagged as `[LOW]`/`SUBTHRESHOLD`, making them easy to distinguish from real tags which show consistent frequency and SNR patterns across multiple headings.
 
 ## Troubleshooting
+
+### Detector or simulator dies immediately with `Illegal instruction` (SIGILL, "Process fail: 4")
+
+Seen on aarch64 VMs (Parallels on Apple silicon) after a host/hypervisor update: the guest advertises SME in `/proc/cpuinfo`, the OpenBLAS bundled with numpy selects its `armv9sme` kernel, and the guest kernel faults on the first SME instruction. Verify with `OPENBLAS_VERBOSE=2 .venv/bin/python -c "import numpy"` (prints `Core: armv9sme`). Fix: `OPENBLAS_CORETYPE=ARMV8` in the environment of every process that imports numpy — system-wide via a line in `/etc/environment` (re-login), or `Environment=` in a systemd unit.
 
 ### No Detections
 

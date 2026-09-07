@@ -81,12 +81,35 @@ def test_pulse_report_round_trips_with_integer_status_fields():
         score_ratio=2.75,
         group_snr=18.25,
         noise_psd=1.5e-10,
+        candidate_id=2,
     )
 
     encoded = encode_pulse_report(report)
 
-    assert PULSE_REPORT_SIZE == 80
+    assert PULSE_REPORT_SIZE == 81
     assert decode_pulse_report(encoded) == report
+
+
+def test_pulse_report_candidate_id_defaults_to_provisional_lock():
+    report = PulseReport(
+        collection_id=7,
+        slice_id=3,
+        tag_id=42,
+        frequency_hz=146_170_650,
+        group_seq_counter=9,
+        group_ind=0,
+        detection_status=2,
+        confirmed_status=1,
+        start_time_seconds=12.5,
+        predict_next_start_seconds=14.5,
+        snr=18.25,
+        score_ratio=0.0,
+        group_snr=1e-9,
+        noise_psd=1.5e-10,
+    )
+
+    assert report.candidate_id == 0
+    assert decode_pulse_report(encode_pulse_report(report)).candidate_id == 0
 
 
 def test_no_detection_uses_distinct_message_type():

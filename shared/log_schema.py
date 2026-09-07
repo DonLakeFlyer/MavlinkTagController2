@@ -31,6 +31,12 @@ EVT_THRESHOLD    = 'evt_threshold'
 HYPOTHESIS       = 'hypothesis'
 SESSION_END      = 'session_end'
 STFT_DEBUG       = 'stft_debug'
+# Lock-candidate bank: admission/merge/lock events and per-candidate
+# fixed-coordinate measurements (issue #134). DETECTION records carry only
+# the provisional lock (candidate 0) so existing per-heading summaries are
+# unchanged.
+LOCK_CANDIDATE   = 'lock_candidate'
+CANDIDATE_MEASUREMENT = 'candidate_measurement'
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ The report is written to <log-dir>/analysis.md.
 import datetime
 import glob
 import json
+import math
 import os
 import re
 import statistics
@@ -241,6 +242,19 @@ class BearingResult:
     best_snr: float = 0.0
     latitude: float = 0.0
     longitude: float = 0.0
+
+
+@dataclass
+class BearingCandidate:
+    """One lock candidate's pattern fit (bearing_candidates.log)."""
+    tag_id: int = 0
+    candidate_id: int = 0
+    bearing_deg: float = 0.0
+    confidence: float = 0.0
+    n_valid_slices: int = 0
+    best_snr: float = 0.0
+    selected: bool = False
+    rejected: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -564,17 +578,23 @@ def _refile_retro_cycles(detectors: List['DetectorSummary']) -> None:
 
 
 def parse_bearing_log(path: str) -> List[BearingResult]:
-    """Parse bearing_result.log CSV."""
+    """Parse bearing_result.log CSV. Malformed rows are skipped, not fatal."""
     results = []
     try:
         with open(path) as f:
             header = True
-            for line in f:
+            for line_no, line in enumerate(f, 1):
                 if header:
                     header = False
                     continue
+                if not line.strip():
+                    continue
                 parts = line.strip().split(',')
-                if len(parts) >= 5:
+                if len(parts) < 5:
+                    print(f'Warning: skipping malformed row {line_no} in {path}: '
+                          f'{len(parts)} of 5 fields', file=sys.stderr)
+                    continue
+                try:
                     br = BearingResult(
                         tag_id=int(parts[0]),
                         bearing_deg=float(parts[1]),
@@ -585,7 +605,53 @@ def parse_bearing_log(path: str) -> List[BearingResult]:
                     if len(parts) >= 7:
                         br.latitude = float(parts[5])
                         br.longitude = float(parts[6])
-                    results.append(br)
+                except ValueError as exc:
+                    print(f'Warning: skipping malformed row {line_no} in {path}: {exc}',
+                          file=sys.stderr)
+                    continue
+                results.append(br)
+    except FileNotFoundError:
+        pass
+    return results
+
+
+def parse_bearing_candidates_log(path: str) -> List[BearingCandidate]:
+    """Parse bearing_candidates.log CSV (one row per tag x lock candidate).
+
+    Malformed rows are skipped, not fatal.
+    """
+    results = []
+    try:
+        with open(path) as f:
+            header = True
+            for line_no, line in enumerate(f, 1):
+                if header:
+                    header = False
+                    continue
+                if not line.strip():
+                    continue
+                parts = line.strip().split(',')
+                if len(parts) < 8:
+                    print(f'Warning: skipping malformed row {line_no} in {path}: '
+                          f'{len(parts)} of 8 fields', file=sys.stderr)
+                    continue
+                try:
+                    for flag in (parts[6], parts[7]):
+                        if flag not in ('0', '1'):
+                            raise ValueError(f'flag must be 0 or 1, got {flag!r}')
+                    results.append(BearingCandidate(
+                        tag_id=int(parts[0]),
+                        candidate_id=int(parts[1]),
+                        bearing_deg=float(parts[2]),
+                        confidence=float(parts[3]),
+                        n_valid_slices=int(parts[4]),
+                        best_snr=float(parts[5]),
+                        selected=parts[6] == '1',
+                        rejected=parts[7] == '1',
+                    ))
+                except ValueError as exc:
+                    print(f'Warning: skipping malformed row {line_no} in {path}: {exc}',
+                          file=sys.stderr)
     except FileNotFoundError:
         pass
     return results
@@ -700,6 +766,8 @@ def generate_report(log_dir: str) -> str:
         detectors.append(det)
     _refile_retro_cycles(detectors)
     bearings = parse_bearing_log(bearing_path)
+    bearing_candidates = parse_bearing_candidates_log(
+        os.path.join(log_dir, 'bearing_candidates.log'))
 
     # Same discovery rule as the decimator log: root first, else per heading.
     rx_paths = [os.path.join(os.path.dirname(dp), 'airspyhf_zeromq_rx.log')
@@ -1182,9 +1250,36 @@ def generate_report(log_dir: str) -> str:
             quality = ''
             if b.r_squared < 0.5:
                 quality = ' \u26a0 low R\u00b2'
-            w(f'| {b.tag_id} | {b.bearing_deg:.1f} | '
+            if math.isfinite(b.bearing_deg):
+                bearing_str = f'{b.bearing_deg:.1f}'
+            elif b.n_valid_slices == 0:
+                bearing_str = 'none (no detections)'
+            else:
+                bearing_str = 'none (below confidence floor)'
+            w(f'| {b.tag_id} | {bearing_str} | '
               f'{b.r_squared:.3f}{quality} | {b.n_valid_slices} '
               f'| {b.best_snr:.1f} |')
+        w()
+
+    if bearing_candidates:
+        w('### Lock Candidates')
+        w()
+        w('Each detector lock candidate fitted independently; the controller '
+          'reports the one with the highest confidence.')
+        w()
+        w('| Tag ID | Candidate | Bearing (deg) | Confidence | Valid Slices | '
+          'Best SNR (dB) | Outcome |')
+        w('|---|---|---|---|---|---|---|')
+        for c in bearing_candidates:
+            outcome = ''
+            if c.selected and c.rejected:
+                outcome = 'best, rejected (below floor)'
+            elif c.selected:
+                outcome = 'selected'
+            bearing_str = f'{c.bearing_deg:.1f}' if math.isfinite(c.bearing_deg) else 'n/a'
+            w(f'| {c.tag_id} | {c.candidate_id} | {bearing_str} | '
+              f'{c.confidence:.3f} | {c.n_valid_slices} | {c.best_snr:.1f} '
+              f'| {outcome} |')
         w()
 
     # ========== Anomalies ==========

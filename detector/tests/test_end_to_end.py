@@ -15,6 +15,7 @@ import pytest
 
 import pulse_detector
 from pulse_detector import (
+    admit_lock_candidate,
     amplitude_at_known_pulse,
     build_hypothesis_indices,
     build_weighting_matrix,
@@ -216,6 +217,53 @@ def test_unambiguous_candidate_locks_without_confirmation_cycle():
     assert not lock_immediately(score_ratio=3.0, lock_score_ratio=3.0)
 
 
+_BANK_TOL = dict(frequency_tolerance_hz=200.0, pri_tolerance_seconds=0.01,
+                 phase_tolerance_seconds=0.01)
+
+
+def test_candidate_bank_admits_distinct_and_merges_agreeing():
+    bank = []
+    assert admit_lock_candidate(bank, PulseLock(100.0, 10.0, 2.0, 4.0), **_BANK_TOL) == (0, 'admitted')
+    # Different frequency: a competing candidate, not a confirmation.
+    assert admit_lock_candidate(bank, PulseLock(900.0, 10.0, 2.0, 3.5), **_BANK_TOL) == (1, 'admitted')
+    assert len(bank) == 2
+    # Same train seen again two PRIs later: merges into entry 0 and confirms it.
+    assert admit_lock_candidate(
+        bank, PulseLock(120.0, 14.001, 2.0, 5.0), **_BANK_TOL) == (0, 'merged')
+    assert len(bank) == 2
+    assert bank[0].freq_hz == 110.0
+    assert abs(bank[0].pri_seconds - 2.0005) < 1e-12
+
+
+def test_candidate_bank_is_bounded_and_evicts_weakest():
+    bank = []
+    for i in range(4):
+        admit_lock_candidate(bank, PulseLock(1000.0 * i, 10.0, 2.0, 3.0 + i),
+                             max_candidates=4, **_BANK_TOL)
+    assert len(bank) == 4
+    # Weaker than every entry: dropped.
+    assert admit_lock_candidate(bank, PulseLock(-1000.0, 10.0, 2.0, 2.0),
+                                max_candidates=4, **_BANK_TOL) == (None, 'dropped')
+    # Stronger than the weakest (entry 0, score 3.0): replaces it.
+    assert admit_lock_candidate(bank, PulseLock(-1000.0, 10.0, 2.0, 3.5),
+                                max_candidates=4, **_BANK_TOL) == (0, 'replaced')
+    assert bank[0].freq_hz == -1000.0
+
+
+def test_candidate_bank_is_frozen_once_locked():
+    # Reported ids must stay valid: no merges, no evictions, append only.
+    bank = [PulseLock(0.0, 10.0, 2.0, 3.0), PulseLock(1000.0, 10.0, 2.0, 9.0)]
+    assert admit_lock_candidate(bank, PulseLock(20.0, 14.0, 2.0, 50.0),
+                                locked=True, **_BANK_TOL) == (0, 'seen')
+    assert bank[0] == PulseLock(0.0, 10.0, 2.0, 3.0)
+    assert admit_lock_candidate(bank, PulseLock(-1500.0, 10.0, 2.0, 4.0),
+                                locked=True, **_BANK_TOL) == (2, 'admitted')
+    assert admit_lock_candidate(bank, PulseLock(1800.0, 10.0, 2.0, 99.0),
+                                max_candidates=3, locked=True,
+                                **_BANK_TOL) == (None, 'dropped')
+    assert len(bank) == 3
+
+
 def _detection_with_windows(hyp_label, windows):
     return Detection(freq_hz=0.0, snr_db=20.0, signal_power=1.0, offset=windows[0],
                      noise_psd=1e-10, stft_score=1.0, score_ratio=40.0,
@@ -295,7 +343,8 @@ def _generate_segment(K: int, snr_db: float, freq_offset_hz: float = 0.0,
 
 def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
                 tip: float = TIP_REST, seed: int = 42,
-                detection_margin: float = 0.90, frequency_mask=None):
+                detection_margin: float = 0.90, frequency_mask=None,
+                max_detections: int = 1, extra_tags=()):
     """Full pipeline: generate IQ → STFT → fold_detect. Returns fold_detect output."""
     old_K = pulse_detector.K
     pulse_detector.K = K
@@ -303,7 +352,17 @@ def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
         N_A_exact = tip * FS / N_WS
         fo = _fold_offsets(K, tip)
         samples_needed = compute_segment_samples(N_WS, N_OL, K, N_A_exact)
-        iq = _generate_segment(K, snr_db, freq_offset_hz, tip, seed)
+        if extra_tags:
+            cfg = SimConfig(
+                sample_rate=FS, samples_per_packet=samples_needed,
+                noise_power_dbfs=-40.0,
+                tags=[TagSignal(freq_offset_hz=freq_offset_hz, snr_db=snr_db,
+                                tp=TP, tip=tip)] + list(extra_tags),
+                seed=seed)
+            iq = generate_packet(cfg, sample_offset=0,
+                                 rng=np.random.default_rng(seed), telem_state=None)
+        else:
+            iq = _generate_segment(K, snr_db, freq_offset_hz, tip, seed)
 
         power, n_win = compute_stft_power(iq, N_W, N_OL, NFFT, W=W)
 
@@ -317,9 +376,46 @@ def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
             W=W, Wf=Wf,
             detection_margin=detection_margin,
             frequency_mask=frequency_mask,
+            max_detections=max_detections,
         )
     finally:
         pulse_detector.K = old_K
+
+
+def test_fold_detect_rejects_geometry_that_disagrees_with_k_folds():
+    # k_folds keys the EVT threshold: a mismatch with the folded geometry
+    # would silently apply the wrong false-alarm threshold.
+    power = np.ones((NFFT, 3000), dtype=np.float32)
+    offsets_k5 = _fold_offsets(5, TIP_REST)
+    with pytest.raises(ValueError, match='fold_offsets has 5 folds but k_folds=20'):
+        fold_detect(power, N, PF, FS, NFFT, N_W, N_OL, 1, {},
+                    fold_offsets=offsets_k5, W=W, Wf=Wf, k_folds=20)
+    hyps_k5 = build_hypothesis_indices(N_EXACT, 5, 3000, N_EXACT_MOVE)
+    with pytest.raises(ValueError, match=r'built for \[5\] folds but k_folds=20'):
+        fold_detect(power, N, PF, FS, NFFT, N_W, N_OL, 1, {},
+                    hypotheses=hyps_k5, W=W, Wf=Wf, k_folds=20)
+    with pytest.raises(ValueError, match='k_folds must be >= 1'):
+        fold_detect(power, N, PF, FS, NFFT, N_W, N_OL, 1, {},
+                    fold_offsets=offsets_k5, W=W, Wf=Wf, k_folds=0)
+
+
+def test_fold_detect_returns_extra_peaks_only_when_asked():
+    # Two trains 1 kHz apart: the default single-peak result keeps reports
+    # single, while the candidate bank asks for the alternates.
+    second = TagSignal(freq_offset_hz=1000.0, snr_db=20.0, tp=TP, tip=TIP_REST)
+    single, _, _ = _run_detect(5, snr_db=25.0, seed=91, extra_tags=[second])
+    assert len(single) == 1
+    assert abs(single[0].freq_hz) < 100.0
+
+    multi, _, _ = _run_detect(5, snr_db=25.0, seed=91, extra_tags=[second],
+                              max_detections=4)
+    # At 25 dB a spectral sidelobe may also clear the threshold, so only the
+    # ordering and the two real trains are asserted.
+    assert 2 <= len(multi) <= 4
+    assert abs(multi[0].freq_hz) < 100.0            # strongest first
+    assert any(abs(d.freq_hz - 1000.0) < 100.0 for d in multi[1:])
+    assert all(multi[i].snr_db >= multi[i + 1].snr_db
+               for i in range(len(multi) - 1))
 
 
 def test_evt_threshold_cache_invalidates_when_search_space_changes():
