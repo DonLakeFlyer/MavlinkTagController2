@@ -10,7 +10,7 @@ filtering around the empirical carrier and a collar-OFF control), and offline
 IQ replay confirmed the fixed-offset estimator recovers range-tracking
 amplitude the current metric compresses to floor.
 
-## Implementation status (2026-09-05)
+## Implementation status (2026-09-06)
 
 The detector/controller/TagTracker path now implements the core measurement
 changes described below:
@@ -33,27 +33,94 @@ changes described below:
   a threshold.
 - Acquisition uses the tag's configured K (GCS default 5; `--k`); locked
   measurements use `--measurement-k` (default 5, not currently set by the
-  controller). The configured collar frequency gates initial acquisition to
-  +/-2 kHz; a lock narrows the search to +/-200 Hz. EVT thresholds and their
-  cache keys use the same gated frequency-bin count. The default false-alarm
-  probability remains 0.05.
-- The controller upserts retrospective results by `(tag_id, slice_id)` for
-  any armed slice of the current collection, including no-detection headings,
-  and fits the antenna pattern in linear absolute power. No-detection headings
-  enter the fit as censored observations, so a bearing is produced from as
-  little as one detection. The `r_squared` field carries a 0..1 confidence
-  (fit quality x how tightly the data pin the bearing x observation surplus);
-  the bearing is always sent and is NaN only when a tag had no detections at
-  all.
+  controller; #133). The configured collar frequency gates the fold search to
+  +/-2 kHz (`ACQUISITION_SEARCH_HZ`) throughout the rotation; the +/-200 Hz
+  `LOCKED_SEARCH_HZ` is the agreement tolerance between two sightings of the
+  same candidate, not a post-lock search band. EVT thresholds and their
+  cache keys use the gated frequency-bin count and the fold count (separate
+  caches for K and `measurement_k`). The default false-alarm probability
+  remains 0.05.
+- The controller upserts retrospective results by `(tag_id, candidate_id,
+  slice_id)` for any armed slice of the current collection, including
+  no-detection headings, and fits the antenna pattern in linear absolute
+  power. No-detection headings enter the fit as censored observations, so a
+  bearing is produced from as little as one detection. The `r_squared` field
+  carries a 0..1 confidence (fit quality x how tightly the data pin the
+  bearing x observation surplus).
+- Retrospective lock selection (issue #134, 2026-09-06). The detector no
+  longer commits to a single candidate. Every cycle's qualifying peaks (up to
+  `MAX_LOCK_CANDIDATES = 4`, strongest first, sidelobe-merged) are offered to
+  a candidate bank; before the lock a second sighting that passes
+  `locks_agree` merges into its entry and confirms it. The first confirmed
+  (or immediate) candidate becomes the *provisional* lock and is moved to
+  bank index 0. The fold search keeps running after the lock, on the
+  `measurement_k` segments and over the full acquisition band, so a tag that
+  only becomes detectable later in the rotation is still admitted; once
+  locked the bank is append-only (reported ids never change). Every slice's
+  spectrogram is retained for the rotation (bounded by
+  `MAX_BUFFERED_SLICES`), and each buffered cycle is reported once per
+  candidate (a slice held for lock confirmation yields two cycles; the
+  controller upserts per slice), so a
+  late candidate is measured on every earlier heading too. Reports carry a
+  `candidate_id` (new uint8 in the detector UDP `PulsePayload`; 0 =
+  provisional lock). Cycle pacing is unchanged: acquisition K before the
+  lock, `measurement_k` after, so rotation time is the same as before; the
+  post-lock search is correspondingly less sensitive than acquisition
+  (fewer pulses folded).
+  Selection happens controller-side at `FinishCollection`:
+  `BearingCalculator::solveCandidates()` fits each `(tag, candidate)` using
+  that candidate's powers plus the tag's shared no-detection headings, and
+  `solve()` reports the candidate with the highest confidence. The GCS live
+  view follows one candidate per tag: the provisional lock at first, but the
+  controller re-fits all candidates on every stored slice and switches the
+  live candidate when another one's confidence exceeds the current one by
+  `kLiveCandidateSwitchMargin` (0.15) with at least 3 detected slices,
+  replaying that candidate's per-slice values so headings already flown are
+  redrawn. If the final pick still differs from the live candidate, it is
+  replayed once more ahead of the bearing result (TagTracker keeps the
+  latest confirmed value per tag per slice). All candidates' fits are logged
+  (`Bearing candidate:` lines and `bearing_candidates.log`).
+- Rejection floor. A rotation whose best candidate scores below
+  `BearingCalculator::kDefaultConfidenceFloor` (0.2, provisional) reports
+  `bearing_deg = NaN` with the confidence and slice count of the best
+  candidate; TagTracker treats a non-finite bearing as invalid. The floor
+  applies to single-candidate rotations too, so a lone detection with no
+  censored headings no longer yields a bearing. The value was chosen from
+  the modelled separation below (false-lock composite confidence ~0.15-0.2,
+  true lock on eight headings ~0.7+) and is to be tuned by Monte-Carlo
+  (#137). It is specific to the RA-2AK pattern table in
+  `BearingCalculator::kPatternDb`.
 
 TagTracker (GCS) rotation ordering is described in that repository.
 
-Two extensions below remain intentionally incomplete: the detector qualifies
-the first two-cycle candidate but does not yet compare a bank of competing
-candidates by retrospective R-squared, and the controller reports fit quality
-through the confidence field rather than rejecting a poor final pattern fit;
-and a longer acquisition K remains a manually configured option rather than
-an automatic search-plan-driven escalation over an existing buffer.
+### Follow-ups
+
+- #136 — post-lock candidate discovery folds only the current 5-pulse segment
+  (~6 dB less sensitive than K=20 acquisition). Proposed: fold a rolling
+  acquisition-length window of the continuous IQ stream (already retained by
+  `IqStream`) with the cached acquisition threshold; rotation time unchanged.
+- #137 — the antenna pattern is hard-coded in three places (controller
+  `kPatternDb`, TagTracker `RotationInfo`, simulator `_ANTENNA_GAIN_DB`) and
+  the confidence floor is therefore RA-2AK-specific. Proposed: pattern as a
+  configuration input carried over the tunnel, and a pattern-vs-flat
+  likelihood ratio for candidate selection/rejection with per-antenna
+  Monte-Carlo tuning.
+- #133 — `measurement_k` configurable from the GCS.
+- A longer acquisition K is still a manually configured option rather than an
+  automatic search-plan-driven escalation over an existing buffer.
+
+### Manual test
+
+`MavlinkTagController2 --simulator competing`: tag at bearing 135 with the
+antenna pattern applied, weak enough to be below threshold on the first
+headings, plus a flat interferer 1 kHz away that takes the provisional lock.
+Expected in the logs: `LOCKED freq=+99x Hz` on the first heading;
+`CANDIDATE 1 admitted after lock` a few headings later with `retro(cycle N)`
+measurements of the earlier slices in `py_detector_<tag>.log`; `Live
+candidate switch: 0 -> 1` in `MavlinkTagController.log` once candidate 1 has
+three slices; `Bearing candidate:` lines for both with candidate 1 selected
+near 135 deg. Any level combined with `--sim-tx-bearing-deg` off the first
+heading exercises the retro fill-in without an interferer.
 
 ---
 

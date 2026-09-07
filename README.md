@@ -159,9 +159,12 @@ The MAVLink controller receives tag definitions over a MAVLink tunnel, writes pe
 | CLI argument | Description |
 | --- | --- |
 | `[connection_url]` | MAVLink connection URL (default: `udp://127.0.0.1:14540`) |
-| `--simulator [preset]` | Enable simulator mode; optional preset (default: `strong`) |
+| `--simulator [level\|preset]` | Enable simulator mode; optional signal level or preset (default: `strong`) |
+| `--sim-tx-bearing-deg <deg>` | True bearing of the simulated transmitter from the first vehicle pose (default: 0, i.e. due north). Set it off the first rotation heading to exercise the lock happening partway round and earlier headings being filled in retrospectively. |
 
-Available simulator presets: `strong`, `weak`, `noise-only`, `two-tags`, `distant`, `dropout`, `gap`. See [simulator/README.md](simulator/README.md) for details.
+Signal levels (used when a tag is configured; the tag's own frequency/PRI are used): `strong` locks on the first cycle; `marginal` needs the two-cycle confirmation; `below-marginal` never locks; `competing` puts the tag at bearing 135 (weak enough to be below threshold on the first headings) and adds a heading-independent interferer 1 kHz away that takes the provisional lock on the first heading, so the tag is admitted mid-rotation, earlier headings are filled in retrospectively, and the finish-time lock-candidate selection has to pick the tag (see `DETECTOR_AMPLITUDE_ANALYSIS.md`, issue #134).
+
+Available simulator presets (used only when no tag is configured): `strong`, `weak`, `noise-only`, `two-tags`, `distant`, `dropout`, `gap`. See [simulator/README.md](simulator/README.md) for details.
 
 In simulator mode the controller bypasses SDR hardware detection, spawns `iq_simulator.py` as the IQ source (ZMQ PUB on port 5555), and runs the decimator with `--shift-khz 0` (no DC-spur offset needed). Tag parameters from the MAVLink tag database are mapped to simulator `--freq-offset-hz`, `--tp`, and `--tip` arguments. If no tags are configured, the selected preset is used.
 
