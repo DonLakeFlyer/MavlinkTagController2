@@ -47,7 +47,7 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetry
                                double simulatorTxBearingDeg, double simulatorInterfererSnrDb)
     : _mavlink          (mavlink)
     , _telemetryCache   (telemetryCache)
-    , _homePath         (getenv("HOME"))
+    , _homePath         (homeDir().c_str())
     , _simulatorMode    (simulatorMode)
     , _simulatorPreset  (simulatorPreset)
     , _simulatorSnrDb   (simulatorSnrDb)

@@ -968,6 +968,34 @@ def save_evt_cache(cache_dir, N_A, K, mu, sigma, N_B=None,
 # Per-cycle spectrogram dump
 # ---------------------------------------------------------------------------
 
+def build_cycle_meta(args, cycle, timestamp_ns, nfft, n_w, n_ol, power,
+                     had_gap, gap_fills, detections, best_candidate):
+    """Sidecar dict for write_cycle_dump. Keys are read by analyzer/*.py."""
+    return {
+        'cycle': cycle,
+        'timestamp_ns': timestamp_ns,
+        'fs': args.fs,
+        'center_freq_mhz': args.center_freq,
+        'tag_freq_hz': args.freq,
+        'nfft': nfft,
+        'n_w': n_w,
+        'n_ol': n_ol,
+        'power_shape': list(power.shape),
+        'had_gap': had_gap,
+        'gap_fills': gap_fills,
+        'detections': [
+            {
+                'freq_hz': d.freq_hz,
+                'snr_db': d.snr_db,
+                'score_ratio': d.score_ratio,
+                'noise_psd': d.noise_psd,
+                'hyp_label': d.hyp_label,
+            } for d in detections
+        ] if detections else [],
+        'best_candidate': best_candidate,
+    }
+
+
 def write_cycle_dump(log_dir, tag_id, cycle, power, segment, meta):
     """Write tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json} for offline analysis.
 
@@ -2194,27 +2222,9 @@ def main():
             if args.dump_spectrogram and args.log_dir:
                 t_dump_start = time.monotonic()
                 try:
-                    meta = {
-                        'cycle': cycle,
-                        'timestamp_ns': current_ts,
-                        'fs': args.fs,
-                        'nfft': nfft,
-                        'n_w': n_w,
-                        'n_ol': n_ol,
-                        'power_shape': list(power.shape),
-                        'had_gap': had_gap,
-                        'gap_fills': had_gap_fills,
-                        'detections': [
-                            {
-                                'freq_hz': d.freq_hz,
-                                'snr_db': d.snr_db,
-                                'score_ratio': d.score_ratio,
-                                'noise_psd': d.noise_psd,
-                                'hyp_label': d.hyp_label,
-                            } for d in detections
-                        ] if detections else [],
-                        'best_candidate': best_candidate,
-                    }
+                    meta = build_cycle_meta(args, cycle, current_ts, nfft, n_w, n_ol,
+                                            power, had_gap, had_gap_fills,
+                                            detections, best_candidate)
                     write_cycle_dump(cycle_out_dir, args.tag_id, cycle, power, segment, meta)
                 except OSError as exc:
                     print(f'WARNING: disabling spectrogram dump after I/O '
