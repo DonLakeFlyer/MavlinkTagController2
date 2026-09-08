@@ -226,8 +226,9 @@ class TestDumpSpectrogram:
         assert 'log-dir' in result.stderr.lower() or 'log-dir' in result.stdout.lower()
 
     def test_dump_produces_sidecar_files(self, tmp_path):
-        """write_cycle_dump writes power/iq/meta with the STFT geometry
-        the analyzer relies on."""
+        """build_cycle_meta + write_cycle_dump write power/iq/meta with the
+        STFT geometry and RF context the analyzer relies on."""
+        import types
         import pulse_detector as pd
 
         log_dir = str(tmp_path / 'dump')
@@ -242,8 +243,10 @@ class TestDumpSpectrogram:
               + 1j * np.random.randn(int(fs * 12))).astype(np.complex64)
         power, _ = pd.compute_stft_power(iq, n_w, n_ol, nfft, W=W)
 
-        meta = {'cycle': 7, 'fs': fs, 'nfft': nfft, 'n_w': n_w,
-                'n_ol': n_ol, 'detections': []}
+        args = types.SimpleNamespace(fs=fs, center_freq=146.17, freq=146_160_000)
+        meta = pd.build_cycle_meta(args, 7, 123_456_789, nfft, n_w, n_ol, power,
+                                   had_gap=False, gap_fills=0, detections=[],
+                                   best_candidate=None)
         prefix = pd.write_cycle_dump(log_dir, 3, 7, power, iq, meta)
 
         assert prefix == os.path.join(log_dir, 'tag3_cycle_0007')
@@ -252,5 +255,12 @@ class TestDumpSpectrogram:
         assert np.load(f'{prefix}_iq.npy').dtype == np.complex64
         with open(f'{prefix}_meta.json') as f:
             loaded = json.load(f)
-        for key in ('fs', 'nfft', 'n_w', 'n_ol', 'detections'):
-            assert loaded[key] == meta[key]
+        # Contract read by analyzer/psd_spectrum.py and post_flight_analysis.py.
+        assert loaded['fs'] == fs
+        assert loaded['center_freq_mhz'] == 146.17
+        assert loaded['tag_freq_hz'] == 146_160_000
+        assert loaded['nfft'] == nfft
+        assert loaded['n_w'] == n_w
+        assert loaded['n_ol'] == n_ol
+        assert loaded['power_shape'] == list(power.shape)
+        assert loaded['detections'] == []

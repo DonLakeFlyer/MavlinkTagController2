@@ -6,13 +6,14 @@
 
 #include "MavlinkFtpServer.h"
 #include "MavlinkSystem.h"
+#include "platformHelpers.h"
 #include "log.h"
 
 namespace fs = std::filesystem;
 
 MavlinkFtpServer::MavlinkFtpServer(MavlinkSystem* mavlink)
     : _mavlink  (mavlink)
-    , _homePath (getenv("HOME"))
+    , _homePath (homeDir())
 {
     using namespace std::placeholders;
     _mavlink->subscribeToMessage(MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL, std::bind(&MavlinkFtpServer::_handleFileTransferProtocol, this, _1));
@@ -48,9 +49,9 @@ void MavlinkFtpServer::_handleFileTransferProtocol(const mavlink_message_t& msg)
         return;
     }
 
-    logDebug() << "_handleFileTransferProtocol opcode: " << _opcodeToString(payload.opcode) 
-        << "size:" << payload.size 
-        << "offset:" << payload.offset 
+    logDebug() << "_handleFileTransferProtocol opcode: " << _opcodeToString(payload.opcode)
+        << "size:" << payload.size
+        << "offset:" << payload.offset
         << "seq:" << payload.seq_number;
 
     switch (payload.opcode) {

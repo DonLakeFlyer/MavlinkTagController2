@@ -8,6 +8,7 @@ Tools in this folder:
 | `ipi_analyzer.py` (`run_ipi_analyzer.sh`) | live SDR | Observe rate-switch behaviour: log every inter-pulse gap and classify it as resting / moving / anomalous |
 | `flight_checks.py` | recorded logs | Run the FLIGHT_DATA_ANALYSIS.md checks against flight logs |
 | `iq_replay.py` | raw IQ capture | Offline detector replay + fixed-offset amplitude (Check 6) |
+| `psd_spectrum.py` | raw IQ capture or detector `_iq.npy` dump | Noise-floor PSD: Welch spectrum, flatness, spikiness, DC-spike height |
 
 Detect a strong pulsed signal at a specific frequency and measure its **pulse width** (ms) and **repetition rate** (Hz / interval in seconds).
 
@@ -192,6 +193,79 @@ at the locked (bin, phase).
 | `--top` | 5 | Number of top candidates to print |
 | `--lock-offset` | *(self-lock)* | Fold-offset index from an independent lock; without it the phase is re-maximized on the data being measured, which positively biases the amplitude |
 | `--lock-bin` | *(entered freq)* | Frequency bin from an independent lock (use with `--lock-offset`) |
+
+## psd_spectrum.py
+
+Port of [psdSpectrum](https://github.com/DonLakeFlyer/psdSpectrum) `psd.py`
+that reads this pipeline's own captures instead of psdSpectrum's
+`capture_*.sh` output. Sample rate and centre frequency come from the
+sidecar written next to the IQ, so there is no `-sdr` flag.
+
+| Input | Sidecar | Rate |
+|-------|---------|------|
+| `airspy-hf.N.dat` / `airspy-mini.N.dat` (COMMAND_ID_RAW_CAPTURE) | `airspy-*.N.json` | 768 kHz / 3 MHz (Mini decimated ×4 to 750 kHz, as psd.py) |
+| `tagN_cycle_NNNN_iq.npy` (`--dump-spectrogram`) | `tagN_cycle_NNNN_meta.json` | 3840 / 3750 Hz |
+
+```bash
+# Interactive plot
+.venv/bin/python analyzer/psd_spectrum.py ~/Logs/Logs-RawCapture-*/airspy-hf.1.dat
+
+# Headless: save PNG
+.venv/bin/python analyzer/psd_spectrum.py ~/Logs/Logs-Detectors-*/tag2_cycle_0012_iq.npy --png psd.png
+
+# Metrics only, HF+ noise floor directly comparable with the original psd.py
+.venv/bin/python analyzer/psd_spectrum.py capture.dat --no-plot --dc-exclude-hz 0
+```
+
+Welch PSD: 20 ms Hann segments, 50 % overlap, `scaling='density'`, two-sided,
+50 Hz bins for both HF+ and Mini raw captures.
+Metrics (all in dB):
+
+| Metric | Meaning |
+|--------|---------|
+| Noise floor | Mean PSD in dBFS/Hz |
+| Flatness | 10 log₁₀(geometric mean / arithmetic mean); 0 = flat, more negative = bumpier |
+| Spikiness | Max excursion above a 101-bin median-filter baseline |
+| DC spike | Same excursion measured inside the excluded band around baseband 0 |
+
+The AirSpy HF+ has a DC spike at baseband 0, which is why raw captures are
+tuned 10 kHz above the tag. Raw captures therefore default to
+`--dc-exclude-hz 200`: bins within ±200 Hz of DC are left out of
+noise-floor / flatness / spikiness and reported separately as the DC-spike
+height, so the metrics describe the usable spectrum. Detector dumps default
+to 0 (their baseband is centred on the tag; the HF+ spike sits at +10 kHz).
+
+Four intentional deviations from psd.py:
+
+- Flatness takes the geometric mean in the log domain. psd.py adds an
+  absolute `1e-10` to the linear PSD first, which biases flatness positive
+  (+2.5 dB on white noise) once the floor is near 1e-10 W/Hz, as it is at
+  768 kHz.
+- Mini captures use the same 20 ms window as HF+ after decimation, so both
+  SDRs get 50 Hz bins. psd.py sizes the window at 3 MHz and only then
+  decimates, giving Mini an 80 ms window / 12.5 Hz bins.
+- The spikiness baseline median filter runs on the DC-centred spectrum with
+  circular padding (the two-sided spectrum's ends are adjacent in the DFT).
+  psd.py filters Welch's native `0, +f…, -f…` order with zero padding, which
+  distorts its baseline for ~50 bins around DC and around the ±Nyquist seam
+  and can hide spurs there.
+- Mini metrics are restricted to the decimator's flat passband (|f| ≤ 0.8 ×
+  output Nyquist = ±300 kHz); the plot shades the excluded skirts. psd.py
+  averages over the full ±375 kHz, so the outer 75 kHz of filter roll-off
+  depresses its noise floor and flatness.
+
+The plot uses absolute RF on the x-axis when the sidecar carries a centre
+frequency (always for raw captures; detector dumps from builds that write
+`center_freq_mhz` / `tag_freq_hz` to `_meta.json`) and marks the tag
+frequency with a dashed red line. Y-limits are noise floor −2 dB to +18 dB,
+as in psd.py.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--png PATH` | *(show window)* | Save the plot instead of displaying it |
+| `--no-plot` | off | Print metrics only |
+| `--title` | file name | Plot title (metrics are appended on a second line) |
+| `--dc-exclude-hz` | 200 raw / 0 dump | Half-width of the band around baseband 0 excluded from metrics |
 
 For an unbiased fixed-offset validation, obtain the lock (bin and fold
 offset) from held-out data of the **same continuous stream** — e.g. lock on

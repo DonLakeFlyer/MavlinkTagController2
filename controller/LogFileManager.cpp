@@ -5,6 +5,7 @@
 #include "platformHelpers.h"
 
 #include <chrono>
+#include <cstdio>
 #include <iomanip>
 #include <ctime>
 #include <filesystem>
@@ -27,7 +28,16 @@ LogFileManager* LogFileManager::instance()
 
 LogFileManager::LogFileManager()
 {
-    _homeDir = std::string(getenv("HOME"));
+    _homeDir = homeDir();
+    _logsRoot = _homeDir + "/Logs";
+    std::error_code errorCode;
+    fs::create_directories(_logsRoot, errorCode);
+    if (errorCode) {
+        // Log::~Log() calls LogFileManager::instance(); _instance is not yet set
+        // here, so logging would recurse into this constructor.
+        std::fprintf(stderr, "Failed to create logs root %s: %s\n",
+                     _logsRoot.c_str(), errorCode.message().c_str());
+    }
 }
 
 void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
@@ -65,12 +75,12 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
     char buffer[80];
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%d_%H-%M-%S", &vehicleTimeUTC);
 
-    std::string logDir = formatString("%s/%s-%s", _homeDir.c_str(), logDirPrefix.c_str(), buffer);
+    std::string logDir = formatString("%s/%s-%s", _logsRoot.c_str(), logDirPrefix.c_str(), buffer);
 
     std::error_code errorCode;
-    fs::create_directory(logDir.c_str(), errorCode);
+    fs::create_directories(logDir.c_str(), errorCode);
     if (errorCode) {
-        logDebug() << "Failed to create directory " << logDir << ": " << errorCode.message();
+        logError() << "Failed to create directory " << logDir << ": " << errorCode.message();
     }
 
     switch (logType) {
@@ -155,17 +165,27 @@ std::list<std::string> LogFileManager::_listLogFileDirs()
 {
     std::list<std::string> logDirs;
 
+    std::error_code ec;
     fs::directory_iterator end_itr;
-    for (fs::directory_iterator itr(_homeDir); itr != end_itr; ++itr) {
-        if (fs::is_directory(itr->status())) {
+    for (fs::directory_iterator itr(_logsRoot, ec); !ec && itr != end_itr; itr.increment(ec)) {
+        std::error_code statusEc;
+        const auto status = itr->status(statusEc);
+        if (statusEc) {
+            logWarn() << "Skipping " << itr->path() << ": " << statusEc.message();
+            continue;
+        }
+        if (fs::is_directory(status)) {
             std::string dirName = itr->path().filename().string();
             if (dirName.find(_logsDirPrefix) == 0) {
                 logDirs.push_back(dirName);
             }
         }
     }
+    if (ec) {
+        logWarn() << "Error listing " << _logsRoot << ": " << ec.message();
+    }
 
-    logDebug() << "Found " << logDirs.size() << " log directories in " << _homeDir;
+    logDebug() << "Found " << logDirs.size() << " log directories in " << _logsRoot;
 
     return logDirs;
 }
@@ -239,7 +259,7 @@ void LogFileManager::saveLogsToSDCard()
 
     // Copy all directories in logDirs to //media/pi/LOGS
     for (const auto& logDir: logDirs) {
-        fs::path srcDir = _homeDir + "/" + logDir;
+        fs::path srcDir = _logsRoot + "/" + logDir;
         fs::path dstDir = sdCardPath + "/" + logDir;
         std::error_code errorCode;
         logInfo() << "Copying directory " << srcDir << " to " << dstDir;
@@ -276,7 +296,7 @@ void LogFileManager::cleanLocalLogs()
 
     // Delete all directories in logDirs
     for (const auto& logDir: logDirs) {
-        fs::path dirPath = _homeDir + "/" + logDir;
+        fs::path dirPath = _logsRoot + "/" + logDir;
         std::error_code errorCode;
         logInfo() << "Removing directory " << dirPath;
         fs::remove_all(dirPath, errorCode);
@@ -346,7 +366,7 @@ unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double t
         }
 
         // Skip if this is the currently active detector or raw-capture directory
-        fs::path dirPath = _homeDir + "/" + logDirs.front();
+        fs::path dirPath = _logsRoot + "/" + logDirs.front();
         if (dirPath.string() == _logDirDetectors || dirPath.string() == _logDirRawCapture) {
             logDirs.pop_front();
             continue;

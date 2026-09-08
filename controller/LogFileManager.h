@@ -48,6 +48,7 @@ private:
 	std::list<std::string> _listLogFileDirs();
 
 	std::string _homeDir;
+	std::string _logsRoot;
 	std::string _logDirDetectors;
 	std::string _logDirRawCapture;
 	std::string _logDirRotation;
