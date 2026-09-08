@@ -8,6 +8,7 @@ Tools in this folder:
 | `ipi_analyzer.py` (`run_ipi_analyzer.sh`) | live SDR | Observe rate-switch behaviour: log every inter-pulse gap and classify it as resting / moving / anomalous |
 | `flight_checks.py` | recorded logs | Run the FLIGHT_DATA_ANALYSIS.md checks against flight logs |
 | `iq_replay.py` | raw IQ capture | Offline detector replay + fixed-offset amplitude (Check 6) |
+| `capture_noise.sh` | live SDR | Capture baseline noise with `airspyhf_rx` (+10 kHz DC-spike offset, writes `.json` sidecar) and run `psd_spectrum.py` |
 | `psd_spectrum.py` | raw IQ capture or detector `_iq.npy` dump | Noise-floor PSD: Welch spectrum, flatness, spikiness, DC-spike height |
 
 Detect a strong pulsed signal at a specific frequency and measure its **pulse width** (ms) and **repetition rate** (Hz / interval in seconds).
