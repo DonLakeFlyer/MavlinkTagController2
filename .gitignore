@@ -87,6 +87,3 @@ singlecomplex2double.m
 # Python
 __pycache__/
 *.pyc
-
-# Agent skills are symlinked from ~/repos/AgentSkills
-.github/skills/
