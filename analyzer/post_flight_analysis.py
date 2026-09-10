@@ -19,7 +19,7 @@ import re
 import statistics
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # Allow importing shared log_schema from the repo
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -231,6 +231,7 @@ class DetectorSummary:
     hypothesis_summaries: List[dict] = field(default_factory=list)
     evt_info: List[dict] = field(default_factory=list)
     heading: Optional[str] = None  # e.g. '000', '045' for rotation headings
+    revisit_slice: Optional[int] = None  # heading-NNN-sSS: confirmation revisit of a flown heading
 
 
 @dataclass
@@ -242,6 +243,9 @@ class BearingResult:
     best_snr: float = 0.0
     latitude: float = 0.0
     longitude: float = 0.0
+    # Trailing columns added with protocol v3; absent in older logs.
+    n_sighted_slices: Optional[int] = None
+    confirmed: Optional[bool] = None
 
 
 @dataclass
@@ -255,6 +259,7 @@ class BearingCandidate:
     best_snr: float = 0.0
     selected: bool = False
     rejected: bool = False
+    n_sighted_slices: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -554,20 +559,33 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
     return det
 
 
+def _heading_label(det: 'DetectorSummary') -> str:
+    if det.revisit_slice is not None:
+        return f'{det.heading}° (revisit, slice {det.revisit_slice})'
+    return f'{det.heading}°'
+
+
 def _refile_retro_cycles(detectors: List['DetectorSummary']) -> None:
     """Move records that name another heading to that heading's summary.
 
     A locked detector re-measures its buffered pre-lock slices and writes
     them to whichever heading file is open at the time; each such record
-    carries the heading it was measured at.
+    carries the heading it was measured at. A revisit shares its heading
+    with an earlier slice: records stay in the file that wrote them, and
+    records from elsewhere naming that heading go to the first (original)
+    slice.
     """
-    by_key = {(d.tag_id, d.heading): d for d in detectors if d.heading is not None}
+    by_key: Dict[Tuple[Optional[int], str], 'DetectorSummary'] = {}
+    for d in detectors:
+        if d.heading is not None:
+            by_key.setdefault((d.tag_id, d.heading), d)
     for det in detectors:
         if det.heading is None:
             continue
         keep = []
         for c in det.cycles:
-            target = by_key.get((det.tag_id, c.heading)) if c.heading else None
+            target = (by_key.get((det.tag_id, c.heading))
+                      if c.heading and c.heading != det.heading else None)
             if target is not None and target is not det:
                 target.cycles.append(c)
             else:
@@ -590,9 +608,11 @@ def parse_bearing_log(path: str) -> List[BearingResult]:
                 if not line.strip():
                     continue
                 parts = line.strip().split(',')
-                if len(parts) < 5:
+                # 5 = original, 7 = + lat/lon, 9 = protocol v3; anything else is
+                # a truncated write.
+                if len(parts) not in (5, 7, 9):
                     print(f'Warning: skipping malformed row {line_no} in {path}: '
-                          f'{len(parts)} of 5 fields', file=sys.stderr)
+                          f'{len(parts)} fields (expected 5, 7 or 9)', file=sys.stderr)
                     continue
                 try:
                     br = BearingResult(
@@ -605,6 +625,11 @@ def parse_bearing_log(path: str) -> List[BearingResult]:
                     if len(parts) >= 7:
                         br.latitude = float(parts[5])
                         br.longitude = float(parts[6])
+                    if len(parts) >= 9:
+                        br.n_sighted_slices = int(parts[7])
+                        if parts[8] not in ('0', '1'):
+                            raise ValueError(f'confirmed must be 0 or 1, got {parts[8]!r}')
+                        br.confirmed = parts[8] == '1'
                 except ValueError as exc:
                     print(f'Warning: skipping malformed row {line_no} in {path}: {exc}',
                           file=sys.stderr)
@@ -648,6 +673,7 @@ def parse_bearing_candidates_log(path: str) -> List[BearingCandidate]:
                         best_snr=float(parts[5]),
                         selected=parts[6] == '1',
                         rejected=parts[7] == '1',
+                        n_sighted_slices=int(parts[8]) if len(parts) >= 9 else None,
                     ))
                 except ValueError as exc:
                     print(f'Warning: skipping malformed row {line_no} in {path}: {exc}',
@@ -759,10 +785,12 @@ def generate_report(log_dir: str) -> str:
     for jp in jsonl_files:
         # Tag with heading if inside a heading subdirectory
         parent = os.path.basename(os.path.dirname(jp))
-        m = re.match(r'heading-(\d+)', parent)
+        m = re.match(r'heading-(\d+)(?:-s(\d+))?$', parent)
         det = parse_detector_jsonl(jp, per_slice=persistent_layout and m is not None)
         if m:
             det.heading = m.group(1)
+            if m.group(2) is not None:
+                det.revisit_slice = int(m.group(2))
         detectors.append(det)
     _refile_retro_cycles(detectors)
     bearings = parse_bearing_log(bearing_path)
@@ -982,7 +1010,7 @@ def generate_report(log_dir: str) -> str:
                 ratio_str = '—'
             total_gaps = det.gap_zerofill + det.gap_reset
             gap_str = str(total_gaps) if total_gaps else '0'
-            w(f'| {det.heading}° | {det.tag_id} | {n_cyc} | {n_det} '
+            w(f'| {_heading_label(det)} | {det.tag_id} | {n_cyc} | {n_det} '
               f'| {snr_str} | {ratio_str} | {gap_str} |')
         w()
 
@@ -1030,7 +1058,7 @@ def generate_report(log_dir: str) -> str:
         tag_label = (f'Tag {det.tag_id}' if det.tag_id is not None
                      else f'Port {det.port}')
         if det.heading is not None:
-            tag_label += f' @ heading {det.heading}°'
+            tag_label += f' @ heading {_heading_label(det)}'
         w(f'## Detector: {tag_label}')
         w()
 
@@ -1243,21 +1271,25 @@ def generate_report(log_dir: str) -> str:
     if bearings:
         w('## Bearing Results')
         w()
-        w('| Tag ID | Bearing (deg) | R\u00b2 | Valid Slices | '
+        w('| Tag ID | Bearing (deg) | R\u00b2 | Valid Slices | Sighted | '
           'Best SNR (dB) |')
-        w('|---|---|---|---|---|')
+        w('|---|---|---|---|---|---|')
         for b in bearings:
             quality = ''
             if b.r_squared < 0.5:
                 quality = ' \u26a0 low R\u00b2'
             if math.isfinite(b.bearing_deg):
                 bearing_str = f'{b.bearing_deg:.1f}'
+                if b.confirmed is False:
+                    bearing_str += ' (unconfirmed)'
             elif b.n_valid_slices == 0:
                 bearing_str = 'none (no detections)'
             else:
                 bearing_str = 'none (below confidence floor)'
+            sighted_str = ('n/a' if b.n_sighted_slices is None
+                           else str(b.n_sighted_slices))
             w(f'| {b.tag_id} | {bearing_str} | '
-              f'{b.r_squared:.3f}{quality} | {b.n_valid_slices} '
+              f'{b.r_squared:.3f}{quality} | {b.n_valid_slices} | {sighted_str} '
               f'| {b.best_snr:.1f} |')
         w()
 
@@ -1265,11 +1297,12 @@ def generate_report(log_dir: str) -> str:
         w('### Lock Candidates')
         w()
         w('Each detector lock candidate fitted independently; the controller '
-          'reports the one with the highest confidence.')
+          'reports the one with the highest confidence. Sighted counts the '
+          'headings where the fold search found the candidate itself.')
         w()
         w('| Tag ID | Candidate | Bearing (deg) | Confidence | Valid Slices | '
-          'Best SNR (dB) | Outcome |')
-        w('|---|---|---|---|---|---|---|')
+          'Sighted | Best SNR (dB) | Outcome |')
+        w('|---|---|---|---|---|---|---|---|')
         for c in bearing_candidates:
             outcome = ''
             if c.selected and c.rejected:
@@ -1277,8 +1310,10 @@ def generate_report(log_dir: str) -> str:
             elif c.selected:
                 outcome = 'selected'
             bearing_str = f'{c.bearing_deg:.1f}' if math.isfinite(c.bearing_deg) else 'n/a'
+            sighted_str = ('n/a' if c.n_sighted_slices is None
+                           else str(c.n_sighted_slices))
             w(f'| {c.tag_id} | {c.candidate_id} | {bearing_str} | '
-              f'{c.confidence:.3f} | {c.n_valid_slices} | {c.best_snr:.1f} '
+              f'{c.confidence:.3f} | {c.n_valid_slices} | {sighted_str} | {c.best_snr:.1f} '
               f'| {outcome} |')
         w()
 
@@ -1287,7 +1322,8 @@ def generate_report(log_dir: str) -> str:
 
     for det in detectors:
         for c in det.cycles:
-            # Locked measurements carry no threshold, so score_ratio is 0 by design.
+            # Locked measurements carry the sighting's fold score (0 when
+            # only measured), not a threshold test of their own.
             if (c.detected and c.confidence != 'LOCKED'
                     and det.confidence_ratio > 0
                     and c.score_ratio < det.confidence_ratio * 1.5):

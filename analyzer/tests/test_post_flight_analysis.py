@@ -36,8 +36,33 @@ class TestBearingCsvParsers:
         assert results[0].latitude == 38.1
         err = capsys.readouterr().err
         assert 'skipping malformed row 3' in err
-        assert 'skipping malformed row 5' in err and '2 of 5 fields' in err
+        assert 'skipping malformed row 5' in err and '2 fields' in err
         assert 'row 6' not in err
+
+    def test_eight_field_row_is_truncated_v3_not_legacy(self, tmp_path, capsys):
+        path = tmp_path / 'bearing_result.log'
+        path.write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed\n'
+            '3,45.0,0.9,8,12.0,38.1,-122.2,3,1\n'
+            '4,46.0,0.8,8,11.0,38.1,-122.2,2\n')   # partial write: confirmed missing
+        results = parse_bearing_log(str(path))
+        assert [r.tag_id for r in results] == [3]
+        assert results[0].n_sighted_slices == 3 and results[0].confirmed is True
+        err = capsys.readouterr().err
+        assert 'skipping malformed row 3' in err and '8 fields' in err
+
+    def test_only_5_7_9_field_rows_are_valid(self, tmp_path, capsys):
+        # Latitude without longitude (6) is as impossible as a 8-field v3 row.
+        path = tmp_path / 'bearing_result.log'
+        path.write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude\n'
+            '1,45.0,0.9,8,12.0\n'                      # oldest format
+            '2,45.0,0.9,8,12.0,38.1\n'                 # truncated legacy row
+            '3,45.0,0.9,8,12.0,38.1,-122.2\n')         # legacy
+        results = parse_bearing_log(str(path))
+        assert [r.tag_id for r in results] == [1, 3]
+        err = capsys.readouterr().err
+        assert 'skipping malformed row 3' in err and '6 fields' in err
 
     def test_candidate_rows_skip_malformed(self, tmp_path, capsys):
         path = tmp_path / 'bearing_candidates.log'
@@ -54,6 +79,25 @@ class TestBearingCsvParsers:
         assert 'skipping malformed row 4' in err
         assert 'skipping malformed row 5' in err and '4 of 8 fields' in err
         assert 'skipping malformed row 6' in err and "'yes'" in err
+
+    def test_trailing_sighting_columns_are_optional(self, tmp_path):
+        # Protocol v3 appended n_sighted_slices/confirmed; April logs lack them.
+        results = tmp_path / 'bearing_result.log'
+        results.write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed\n'
+            '3,45.0,0.9,8,12.0,38.1,-122.2,2,1\n'
+            '4,60.0,0.7,8,11.0,38.1,-122.2\n')
+        parsed = parse_bearing_log(str(results))
+        assert (parsed[0].n_sighted_slices, parsed[0].confirmed) == (2, True)
+        assert (parsed[1].n_sighted_slices, parsed[1].confirmed) == (None, None)
+
+        candidates = tmp_path / 'bearing_candidates.log'
+        candidates.write_text(
+            'tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected,n_sighted_slices\n'
+            '2,0,45,0.9,8,35.9,1,0,1\n'
+            '2,1,134.25,0.4,8,36.0,0,0\n')
+        parsed = parse_bearing_candidates_log(str(candidates))
+        assert [c.n_sighted_slices for c in parsed] == [1, None]
 
 
 def _jsonl(path: Path, entries):
@@ -405,6 +449,37 @@ class TestPersistentRotationSession:
         assert '| 1 | 1 | 10.0 |' in rows['180°']
         # Locked measurements have no threshold; not a near-threshold anomaly.
         assert 'close to threshold' not in md
+
+    def test_revisit_dir_keeps_its_own_row(self, tmp_path):
+        # A confirmation revisit landing on an already-flown heading is logged
+        # to heading-045-s09. Both slices must survive as separate rows, and
+        # neither may swallow the other's records.
+        startup = _detector_entries(3, 0, 0.0)[0]
+
+        def measured(cycle, heading, snr):
+            return {'type': 'detection', 'cycle': cycle, 'freq_hz': 0.0,
+                    'snr_db': snr, 'score_ratio': 0.0, 'noise_psd': 1e-6,
+                    'proc_ms': 50.0, 'confidence': 'LOCKED', 'hyp_label': '',
+                    'detection_status': 2, 'heading_deg': float(heading)}
+        first = tmp_path / 'heading-045'
+        first.mkdir()
+        _jsonl(first / 'detector_3.jsonl', [startup, measured(1, 45, 30.0)])
+        revisit = tmp_path / 'heading-045-s09'
+        revisit.mkdir()
+        _jsonl(revisit / 'detector_3.jsonl', [
+            startup, measured(2, 45, 12.0),
+            {'type': 'session_end', 'cycles': 2, 'detections': 2, 'elapsed_s': 20.0}])
+        (tmp_path / 'session.json').write_text('{"detection_mode": "python"}')
+        (tmp_path / 'bearing_result.log').write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,'
+            'latitude,longitude\n3,45.0,0.9,2,30.0,38.1,-122.2\n')
+        md = generate_report(str(tmp_path))
+        rows = [line for line in md.splitlines()
+                if line.startswith('| ') and '°' in line and '| 3 |' in line]
+        assert len(rows) == 2
+        assert any('| 045° |' in r and '| 1 | 1 | 30.0 |' in r for r in rows)
+        assert any('045° (revisit, slice 9)' in r and '| 1 | 1 | 12.0 |' in r for r in rows)
+        assert '## Detector: Tag 3 @ heading 045° (revisit, slice 9)' in md
 
     def test_nan_bearing_distinguishes_no_detections_from_floor(self, tmp_path):
         (tmp_path / 'bearing_result.log').write_text(

@@ -9,7 +9,9 @@
 #include "formatString.h"
 #include "LogFileManager.h"
 
+#include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -44,8 +46,19 @@ int main(int argc, char** argv)
     std::optional<double> simulatorTxBearingDegArg;   // explicit --sim-tx-bearing-deg; wins over a preset's default
     double      simulatorTxBearingDeg = 0.0;
     double      simulatorInterfererSnrDb = std::numeric_limits<double>::quiet_NaN();
+    std::string simulatorAntenna = "ra2a";
+    double      simulatorPriPpm = 43.0;      // bench RA-2A collar; 0 = ideal crystal
 	std::string simulatorTelemetryEndpoint = "tcp://127.0.0.1:6001";
     bool        debugDetector = false;
+
+    // Whole-string finite numeric parse: atof would turn a typo into 0.0 and
+    // silently change the scenario; nan/inf would poison the simulated geometry.
+    auto parseDouble = [](const char* text, double& out) {
+        char* end = nullptr;
+        errno = 0;
+        out = strtod(text, &end);
+        return *text != '\0' && end != text && *end == '\0' && errno == 0 && std::isfinite(out);
+    };
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--simulator") == 0) {
@@ -83,9 +96,32 @@ int main(int argc, char** argv)
             // Where the simulated transmitter sits relative to the first vehicle
             // pose. Off the first rotation heading, the lock happens partway
             // round and earlier headings are filled in retrospectively.
-            if (i + 1 < argc) {
-                simulatorTxBearingDegArg = atof(argv[++i]);
+            double value = 0.0;
+            if (i + 1 >= argc || !parseDouble(argv[i + 1], value)) {
+                logError() << "--sim-tx-bearing-deg requires a numeric value, got" << (i + 1 < argc ? argv[i + 1] : "<none>");
+                return 2;
             }
+            ++i;
+            simulatorTxBearingDegArg = value;
+        } else if (strcmp(argv[i], "--sim-antenna") == 0) {
+            // iq_simulator gain table for the simulated tag: ra2a or ra23k.
+            // Independent of StartCollection_t::antenna_id so a GCS/airframe
+            // mismatch can be reproduced.
+            if (i + 1 >= argc) {
+                logError() << "--sim-antenna requires a value (ra2a or ra23k)";
+                return 2;
+            }
+            simulatorAntenna = argv[++i];
+        } else if (strcmp(argv[i], "--sim-pri-ppm") == 0) {
+            // Collar crystal offset from the nominal TIP. Default is the bench
+            // collar's +43; pass 0 for a perfectly on-nominal collar.
+            double value = 0.0;
+            if (i + 1 >= argc || !parseDouble(argv[i + 1], value)) {
+                logError() << "--sim-pri-ppm requires a numeric value, got" << (i + 1 < argc ? argv[i + 1] : "<none>");
+                return 2;
+            }
+            ++i;
+            simulatorPriPpm = value;
 		} else if (strcmp(argv[i], "--sim-telemetry-endpoint") == 0) {
 			if (i + 1 < argc) {
 				simulatorTelemetryEndpoint = argv[++i];
@@ -99,6 +135,20 @@ int main(int argc, char** argv)
     }
 
     if (simulatorMode) {
+        // Both reach iq_simulator.py verbatim; a bad value would otherwise only
+        // surface as the simulator process dying at the first START_COLLECTION.
+        if (simulatorAntenna != "ra2a" && simulatorAntenna != "ra23k") {
+            logError() << "--sim-antenna must be ra2a or ra23k, got" << simulatorAntenna;
+            return 2;
+        }
+        if (!std::isfinite(simulatorPriPpm)) {
+            logError() << "--sim-pri-ppm must be finite, got" << simulatorPriPpm;
+            return 2;
+        }
+        if (1.0 + simulatorPriPpm * 1e-6 <= 0.0) {
+            logError() << "--sim-pri-ppm must be > -1000000 to keep TIP positive, got" << simulatorPriPpm;
+            return 2;
+        }
         if (simulatorTxBearingDegArg) {
             simulatorTxBearingDeg = *simulatorTxBearingDegArg;
         }
@@ -107,7 +157,8 @@ int main(int argc, char** argv)
         if (isLevelPreset) {
             logInfo() << "Simulator mode enabled (level:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB"
                       << " tx bearing:" << simulatorTxBearingDeg << "deg"
-                      << " interferer snr:" << simulatorInterfererSnrDb << "dB)";
+                      << " interferer snr:" << simulatorInterfererSnrDb << "dB"
+                      << " antenna:" << simulatorAntenna << " pri ppm:" << simulatorPriPpm << ")";
         } else {
             logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << ", used only when no tag is configured)";
         }
@@ -131,7 +182,7 @@ int main(int argc, char** argv)
     auto ftpServer 			= MavlinkFtpServer { mavlink };
     auto telemetryCache     = new TelemetryCache(mavlink);
     auto commandHandler 	= CommandHandler { mavlink, telemetryCache, simulatorMode, simulatorPreset, debugDetector, simulatorSnrDb,
-                                           simulatorTxBearingDeg, simulatorInterfererSnrDb };
+                                           simulatorTxBearingDeg, simulatorInterfererSnrDb, simulatorAntenna, simulatorPriPpm };
     auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), CommandHandler::kPulseUdpPort, &commandHandler };
 
 	globalMavlinkSystem		= mavlink;

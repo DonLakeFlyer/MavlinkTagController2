@@ -10,7 +10,7 @@ filtering around the empirical carrier and a collar-OFF control), and offline
 IQ replay confirmed the fixed-offset estimator recovers range-tracking
 amplitude the current metric compresses to floor.
 
-## Implementation status (2026-09-06)
+## Implementation status (2026-09-10)
 
 The detector/controller/TagTracker path now implements the core measurement
 changes described below:
@@ -20,92 +20,94 @@ changes described below:
   pulse, `(sum(power) - n*noise) / n_pulses`, so acquisition and locked
   reports share a scale regardless of K. `noise_psd` remains a separate
   diagnostic.
-- One detector process remains alive for the collection. A lock requires two
-  detections with `score_ratio >= 3`, no dominant single fold, frequency
-  agreement within 200 Hz, and phase agreement within one STFT step. The
-  second anchor refines the PRI used for the rest of the rotation. A single
-  candidate at or above 10x the lock ratio (30 with defaults) locks
-  immediately, without a confirmation cycle; strong signals therefore lock on
-  their first cycle.
-- A marginal first qualifying candidate holds the same heading for its
-  confirmation cycle. Once qualified, buffered earlier slices are remeasured
-  at that common frequency and phase, and later headings are measured without
-  a threshold.
-- Acquisition uses the tag's configured K (GCS default 5; `--k`); locked
-  measurements use `--measurement-k` (default 5, not currently set by the
-  controller; #133). The configured collar frequency gates the fold search to
-  +/-2 kHz (`ACQUISITION_SEARCH_HZ`) throughout the rotation; the +/-200 Hz
+- One detector process remains alive for the collection. The strongest
+  qualifying fold peak (`score_ratio >= 3`, no dominant single fold, inside
+  the +/-2 kHz gate) of the first cycle that has one becomes the provisional
+  lock at once. There is no same-heading confirmation cycle: confirmation is
+  retrospective. Every later sighting of the same candidate (frequency within
+  200 Hz, phase within the PRI-uncertainty-scaled tolerance) is counted, and
+  the controller treats a winner sighted on >= 2 headings as confirmed.
+- **Every heading is a full acquisition-length dwell.** There is a single
+  K (protocol v3 removed the separate post-lock `measurement_k` and the GCS
+  "Post-Lock K" setting). K=20
+  at every heading costs a fixed 320 s rotation but keeps the post-lock fold
+  search at full sensitivity (a real tag hidden behind a wrong provisional
+  lock is still admitted) and gives each heading's fixed-offset measurement
+  3 dB less scatter than K=5 (precision scales as sqrt(K)). #136 is moot.
+- **Whole-rotation PRI fit.** Collar crystals sit tens of ppm off the
+  configured rate (a bench Lotek RA-2A collar measured +43 ppm, stable to
+  <25 ppm over 12.7 min) and differ unit to unit and with temperature. Over
+  160 pulses, 43 ppm is 12.7 ms of projected-pulse drift, more than one STFT
+  step, so the far headings would be measured off the pulse. After every
+  cycle `fit_lock_timing` refits each candidate's PRI over all buffered
+  slices (grid nominal +/-300 ppm, 2 ppm steps, on-pulse energy maximised;
+  anchor left alone since the two-window footprint absorbs a sub-step anchor
+  error) and re-measures every slice if it moved. The plateau half-width is
+  carried as `pri_ppm_uncertainty` and widens the sighting phase tolerance
+  with elapsed time.
+- **End-of-rotation revisit.** On `FINISH_COLLECTION`, if the winning
+  candidate was sighted by the fold search on only one heading, the
+  controller keeps the collection open and sends
+  `COLLECTION_STATUS_REVISIT_REQUESTED` with the fitted bearing; the GCS
+  flies one more slice there and finishes again (worst case 360 s). This is
+  the only independent test that works when the lobe is a single heading:
+  one bump plus seven near-zero measurements looks the same for a tag and
+  for a noise fold-peak, so the pattern fit cannot separate them. Max one
+  revisit per collection; `BearingResult_t::confirmed` reports the outcome.
+- **Antenna selection.** `StartCollection_t::antenna_id` picks the pattern
+  table (`controller/AntennaPattern.cpp`: RA-2A/RA-2AHS, RA-23K) and its
+  confidence floor; the simulator takes `--antenna` to match.
+- The configured collar frequency gates the fold search to +/-2 kHz
+  (`ACQUISITION_SEARCH_HZ`) throughout the rotation; the +/-200 Hz
   `LOCKED_SEARCH_HZ` is the agreement tolerance between two sightings of the
-  same candidate, not a post-lock search band. EVT thresholds and their
-  cache keys use the gated frequency-bin count and the fold count (separate
-  caches for K and `measurement_k`). The default false-alarm probability
+  same candidate. EVT thresholds and their cache keys use the gated
+  frequency-bin count and the fold count. The default false-alarm probability
   remains 0.05.
 - The controller upserts retrospective results by `(tag_id, candidate_id,
   slice_id)` for any armed slice of the current collection, including
   no-detection headings, and fits the antenna pattern in linear absolute
-  power. No-detection headings enter the fit as censored observations, so a
-  bearing is produced from as little as one detection. The `r_squared` field
-  carries a 0..1 confidence (fit quality x how tightly the data pin the
-  bearing x observation surplus).
-- Retrospective lock selection (issue #134, 2026-09-06). The detector no
-  longer commits to a single candidate. Every cycle's qualifying peaks (up to
-  `MAX_LOCK_CANDIDATES = 4`, strongest first, sidelobe-merged) are offered to
-  a candidate bank; before the lock a second sighting that passes
-  `locks_agree` merges into its entry and confirms it. The first confirmed
-  (or immediate) candidate becomes the *provisional* lock and is moved to
-  bank index 0. The fold search keeps running after the lock, on the
-  `measurement_k` segments and over the full acquisition band, so a tag that
-  only becomes detectable later in the rotation is still admitted; once
-  locked the bank is append-only (reported ids never change). Every slice's
-  spectrogram is retained for the rotation (bounded by
-  `MAX_BUFFERED_SLICES`), and each buffered cycle is reported once per
-  candidate (a slice held for lock confirmation yields two cycles; the
-  controller upserts per slice), so a
-  late candidate is measured on every earlier heading too. Reports carry a
-  `candidate_id` (new uint8 in the detector UDP `PulsePayload`; 0 =
-  provisional lock). Cycle pacing is unchanged: acquisition K before the
-  lock, `measurement_k` after, so rotation time is the same as before; the
-  post-lock search is correspondingly less sensitive than acquisition
-  (fewer pulses folded).
-  Selection happens controller-side at `FinishCollection`:
-  `BearingCalculator::solveCandidates()` fits each `(tag, candidate)` using
-  that candidate's powers plus the tag's shared no-detection headings, and
-  `solve()` reports the candidate with the highest confidence. The GCS live
-  view follows one candidate per tag: the provisional lock at first, but the
-  controller re-fits all candidates on every stored slice and switches the
-  live candidate when another one's confidence exceeds the current one by
-  `kLiveCandidateSwitchMargin` (0.15) with at least 3 detected slices,
-  replaying that candidate's per-slice values so headings already flown are
-  redrawn. If the final pick still differs from the live candidate, it is
-  replayed once more ahead of the bearing result (TagTracker keeps the
-  latest confirmed value per tag per slice). All candidates' fits are logged
-  (`Bearing candidate:` lines and `bearing_candidates.log`).
-- Rejection floor. A rotation whose best candidate scores below
-  `BearingCalculator::kDefaultConfidenceFloor` (0.2, provisional) reports
-  `bearing_deg = NaN` with the confidence and slice count of the best
-  candidate; TagTracker treats a non-finite bearing as invalid. The floor
-  applies to single-candidate rotations too, so a lone detection with no
-  censored headings no longer yields a bearing. The value was chosen from
-  the modelled separation below (false-lock composite confidence ~0.15-0.2,
-  true lock on eight headings ~0.7+) and is to be tuned by Monte-Carlo
-  (#137). It is specific to the RA-2AK pattern table in
-  `BearingCalculator::kPatternDb`.
+  power. No-detection headings enter the fit as censored observations. The
+  `r_squared` field carries a 0..1 confidence (fit quality x how tightly the
+  data pin the bearing x observation surplus).
+- Retrospective lock selection (issue #134). Every cycle's qualifying peaks
+  (up to `MAX_LOCK_CANDIDATES = 4`, strongest first, sidelobe-merged) are
+  offered to a candidate bank; once locked the bank is append-only (reported
+  ids never change). Every slice's spectrogram is retained for the rotation
+  (bounded by `MAX_BUFFERED_SLICES`) and each buffered cycle is reported once
+  per candidate, so a late candidate is measured on every earlier heading
+  too. Reports carry a `candidate_id` (0 = provisional lock); locked
+  measurements carry the sighting's fold score in `score_ratio` (0 when the
+  slice was only measured). Selection happens controller-side at
+  `FinishCollection`: `BearingCalculator::solveCandidates()` fits each
+  `(tag, candidate)` and `solve()` reports the candidate with the highest
+  confidence. The GCS live view follows one candidate per tag, switching
+  when another's confidence exceeds the current one by
+  `kLiveCandidateSwitchMargin` (0.15) with at least 3 detected slices. All
+  candidates' fits are logged (`Bearing candidate:` lines and
+  `bearing_candidates.log`, now with a `n_sighted_slices` column).
+- Rejection floor. A rotation whose best candidate scores below the
+  antenna's `confidenceFloor` (0.2 for both tables) reports `bearing_deg =
+  NaN`. `controller/tools/confidence_floor_montecarlo` models true-lock,
+  noise-false-lock and flat-interferer confidence at K=20 per antenna; the
+  false-lock search covers all 116 half-bin frequencies of the acquisition
+  gate (Wf spans ±1920 Hz, inside the ±2 kHz gate) × 265 PRI offsets. At
+  1500 trials (`--seed 1`): a true lock at 3 dB scores 0.53/0.76/0.90
+  (p5/p50/p95) on the RA-2A and 0.40/0.72/0.87 on the RA-23K; a noise false
+  lock or flat interferer scores 0 at the median but both have a long tail
+  (p95 ~0.62-0.77), so a floor that rejected 95% of them (~0.71) would also
+  drop a third (RA-2A) to two fifths (RA-23K) of the 3 dB true locks. The
+  floor therefore stays at 0.2 as a gross-shape filter and single-heading
+  false locks are handled by the revisit, not the floor.
 
 TagTracker (GCS) rotation ordering is described in that repository.
 
 ### Follow-ups
 
-- #136 — post-lock candidate discovery folds only the current 5-pulse segment
-  (~6 dB less sensitive than K=20 acquisition). Proposed: fold a rolling
-  acquisition-length window of the continuous IQ stream (already retained by
-  `IqStream`) with the cached acquisition threshold; rotation time unchanged.
-- #137 — the antenna pattern is hard-coded in three places (controller
-  `kPatternDb`, TagTracker `RotationInfo`, simulator `_ANTENNA_GAIN_DB`) and
-  the confidence floor is therefore RA-2AK-specific. Proposed: pattern as a
-  configuration input carried over the tunnel, and a pattern-vs-flat
-  likelihood ratio for candidate selection/rejection with per-antenna
-  Monte-Carlo tuning.
-- #133 — `measurement_k` configurable from the GCS.
+- #137 — the antenna pattern is selected by id from a controller-side
+  registry; a measured installed pattern still needs a controller release.
+  Proposed: pattern table carried over the tunnel, and a pattern-vs-flat
+  likelihood ratio for candidate selection/rejection in place of the
+  composite floor.
 - A longer acquisition K is still a manually configured option rather than an
   automatic search-plan-driven escalation over an existing buffer.
 
@@ -113,14 +115,20 @@ TagTracker (GCS) rotation ordering is described in that repository.
 
 `MavlinkTagController2 --simulator competing`: tag at bearing 135 with the
 antenna pattern applied, weak enough to be below threshold on the first
-headings, plus a flat interferer 1 kHz away that takes the provisional lock.
-Expected in the logs: `LOCKED freq=+99x Hz` on the first heading;
-`CANDIDATE 1 admitted after lock` a few headings later with `retro(cycle N)`
-measurements of the earlier slices in `py_detector_<tag>.log`; `Live
-candidate switch: 0 -> 1` in `MavlinkTagController.log` once candidate 1 has
-three slices; `Bearing candidate:` lines for both with candidate 1 selected
-near 135 deg. Any level combined with `--sim-tx-bearing-deg` off the first
-heading exercises the retro fill-in without an interferer.
+headings, plus a flat interferer 1 kHz away that takes the provisional lock,
+on a collar running 43 ppm slow (the simulator default; `--sim-pri-ppm 0`
+for an ideal crystal). Expected in the
+logs: `LOCKED freq=+99x Hz` on the first heading; `CANDIDATE 1 admitted
+after lock` a few headings later with `retro(cycle N)` measurements of the
+earlier slices in `py_detector_<tag>.log`; `[CANDIDATE 1] PRI fit +4x ppm`
+lines tightening as slices accumulate; `Live candidate switch: 0 -> 1` in
+`MavlinkTagController.log` once candidate 1 has three slices; `Bearing
+candidate:` lines for both with candidate 1 selected near 135 deg and
+`sighted: >= 2`. `--simulator marginal --sim-tx-bearing-deg 90` with the
+rotation started away from 90 exercises the single-heading path: `requesting
+revisit at 9x deg` in the controller log, then a `confirmed: 1` bearing
+result after the GCS flies the extra slice. Add `--sim-antenna ra23k` (and
+select RA-23K on the GCS) to run either case on the 3-element table.
 
 ---
 
@@ -428,20 +436,44 @@ becomes a separate curve worth plotting on its own: structure in N(θ) is an
 RFI-direction diagnostic, flat N(θ) validates the simpler ratio treatment
 retrospectively.
 
-### 7. Lock at K=20, measure at K=5
+### 7. Lock at K=20, measure at K=5 — superseded: K=20 everywhere
 
-Measurement has no threshold to clear, so only the lock heading needs the full
-40 s dwell. The other seven need ~10 s. Rotation time drops from ~5.3 minutes to
-~2 (40 + 7 × 10 = 110 s), and bearings improve at the same time.
+**As originally proposed:** measurement has no threshold to clear, so only
+the lock heading needs the full 40 s dwell; the other seven need ~10 s.
+Rotation time drops from ~5.3 minutes to ~2 (40 + 7 × 10 = 110 s).
 
-First rotation: dwell K=20 per heading only until a candidate passes tests 1–3,
-then drop to K=5. From the second rotation on, lock on the previous bearing.
+**Why it was not adopted.** The shorter dwell is a time optimisation that
+gives up two things the range case cannot spare:
 
-**Large K as escalation, not default.** The integration window is K × PRI, and
-"no detection" cannot be declared before the window closes — the whole premise of
-a large-K fold is that the signal is invisible in shorter ones, so there is no
-early exit on absence (a strong signal *can* fire early via a shorter sub-fold).
-At the 2 s collar:
+- *Post-lock discovery sensitivity.* The fold search that admits late
+  candidates runs on the measurement segments. At K=5 it is ~5.4 dB less
+  sensitive than K=20 acquisition (Pd=0.9 needs 8.0 vs 2.6 dB per pulse from
+  the table above). If the provisional lock is wrong — noise, or an
+  interferer inside the ±2 kHz gate — a real tag in that 5.4 dB gap is lost
+  for the rest of the rotation. No rolling-window scheme recovers it fully:
+  folding across headings mixes off-boresight pulses in, landing ~2 dB
+  better than K=5 but ~3 dB short of a K=20 dwell on boresight.
+- *Per-heading measurement precision.* The fixed-offset estimate
+  Σp − K·N has mean K·S and standard deviation √K·(S+N), so its precision
+  scales as √K: K=20 is 3 dB less scatter on every heading than K=5, i.e.
+  ±45% vs ±90% per heading at 0 dB per-pulse SNR going into the pattern
+  fit.
+
+Against that, the cost is rotation *count*: ~320 s per rotation instead of
+~110 s once locked, so ~3–4 rotations per flight instead of ~8–10. The
+no-detection rotation is 8 × 40 s either way. For a range-first system on
+resting animals the trade was made for K=20 everywhere; the separate
+post-lock `measurement_k` no longer exists.
+
+**Consequences that had to be handled** (see the implementation status
+above): the collar's true PRI must be fitted from the rotation, because 160
+pulses at tens of ppm off nominal drift more than one STFT step; and the
+same-heading confirmation hold is gone, replaced by an end-of-rotation
+revisit when the winner was sighted on only one heading.
+
+**Large K as escalation, not default — still true for acquisition.** The
+integration window is K × PRI, and "no detection" cannot be declared before
+the window closes. At the 2 s collar:
 
 | K | min window per look | 8-heading rotation (windows only) |
 |---|---|---|
@@ -450,14 +482,10 @@ At the 2 s collar:
 | 20 | 40 s | ~320 s |
 | 40 | 80 s | ~640 s (~11 min) |
 
-A blanket K=40 lock therefore multiplies the "move on, tag's not here" verdict
-time by 4–8×, which dominates aerial search cost. Instead, escalate: run K=10
-continuously
-(20 s verdicts); only when K=10 is negative *and* the search plan says the tag
-may be near max range, extend the fold over the already-buffered samples to
-K=20/K=40 — extending is more folding on a longer buffer, not a restart. K=40 is
-an acquisition-range play (~+1–2 km); it never enters the rotation loop, because
-per-heading measurement uses the fixed-offset readout at small K regardless.
+A blanket K=40 would multiply the "move on, tag's not here" verdict time by
+another 2×. K=40 remains an acquisition-range play (~+1–2 km) for a
+search-plan-driven escalation over the already-buffered stream, not a
+rotation default.
 
 ### 8. On pf — leave it at 0.05, narrow the search instead
 
@@ -506,11 +534,18 @@ where nothing else can recover it.
 
 ### 9. Start the rotation on the prior bearing
 
+**Superseded for timing by the K=20-everywhere decision in change 7:** every
+heading is now a 40 s dwell regardless of when the lock happens, so ordering
+no longer changes rotation time. Starting on the prior bearing is still
+harmless and gives a sanity check (the first heading should return the
+highest amplitude), and the prior is what the confirmation revisit points
+at. The analysis below is kept for the record.
+
 **Depends on change 2. Do not change the rotation order before it lands** —
 with a fresh detector per heading every stop is a cold K=20 dwell regardless of
 order, so reordering buys nothing.
 
-Once change 7 is in effect (K=20 to lock, K=5 to measure), the rotation's
+Under the original change 7 (K=20 to lock, K=5 to measure), the rotation's
 duration is set by how many headings are visited *before* the lock. Two facts
 bound what ordering can do:
 
@@ -605,7 +640,7 @@ direct path — see the multipath question in `FLIGHT_DATA_ANALYSIS.md`.
 - The per-cycle max over frequency bins was modelled by order statistics over
   116 independent bins. Adjacent sub-bins are correlated through the W matrix, so
   this slightly overstates the threshold.
-- Antenna patterns used the `kPatternDb` table, which is eyeballed from a
+- Antenna patterns used the RA-2A table (now `controller/AntennaPattern.cpp`), which is eyeballed from a
   free-space Telonics plot. The installed pattern with the airframe will differ,
   especially in the side nulls. Measuring it is the highest-value field task
   regardless of which changes are made.

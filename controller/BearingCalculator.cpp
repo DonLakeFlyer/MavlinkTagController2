@@ -6,25 +6,32 @@
 #include <map>
 #include <utility>
 
-// RA-2AK measured antenna pattern in dB, normalized to 0 dB at boresight.
-// Eyeballed from the Telonics RA-2A reception radiation pattern polar plot.
-// 10° steps from 0° (front) to 180° (back). Pattern is symmetric so we mirror for 180-360°.
-const double BearingCalculator::kPatternDb[BearingCalculator::kPatternSize] = {
-    //  0°     10°     20°     30°     40°     50°     60°     70°     80°     90°
-     0.0,    0.0,   -0.5,   -1.0,   -2.5,   -5.0,  -10.5,  -14.5,  -20.5,  -27.5,
-    // 100°   110°   120°   130°   140°   150°   160°   170°   180°
-   -20.0,  -17.5,  -14.5,  -12.5,  -13.5,  -10.5,  -10.5,  -10.0,  -10.0
-};
+BearingCalculator::BearingCalculator(const AntennaPattern& pattern)
+    : _pattern(pattern)
+    , _confidenceFloor(pattern.confidenceFloor)
+{
+}
+
+std::optional<float> BearingCalculator::revisitHeadingFor(const std::vector<Result>& results)
+{
+    for (const auto& result : results) {
+        if (!result.rejected && std::isfinite(result.bearing_deg)
+            && result.n_sighted_slices == 1) {
+            return result.bearing_deg;
+        }
+    }
+    return std::nullopt;
+}
 
 void BearingCalculator::addSlice(float heading_deg, double signal_power, uint32_t tag_id,
-                                 double snr_db, uint8_t candidate_id)
+                                 double snr_db, uint8_t candidate_id, bool sighted)
 {
-    _slices.push_back({heading_deg, signal_power, tag_id, snr_db, true, candidate_id});
+    _slices.push_back({heading_deg, signal_power, tag_id, snr_db, true, candidate_id, sighted});
 }
 
 void BearingCalculator::addNoDetection(float heading_deg, uint32_t tag_id)
 {
-    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false, 0});
+    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false, 0, false});
 }
 
 void BearingCalculator::reset()
@@ -32,9 +39,9 @@ void BearingCalculator::reset()
     _slices.clear();
 }
 
-// Interpolate the measured pattern at an arbitrary angle offset from boresight (degrees).
+// Interpolate the pattern table at an arbitrary angle offset from boresight (degrees).
 // Returns the pattern value in linear (power) scale, normalized so boresight = 1.0.
-double BearingCalculator::patternLinear(double offsetDeg)
+double BearingCalculator::patternLinear(const AntennaPattern& pattern, double offsetDeg)
 {
     // Normalize to 0-360 then fold to 0-180 (symmetric)
     double angle = std::fmod(offsetDeg, 360.0);
@@ -44,10 +51,10 @@ double BearingCalculator::patternLinear(double offsetDeg)
     // Interpolate in the 10° step table
     const double indexF = angle / 10.0;
     const int idx0 = static_cast<int>(indexF);
-    const int idx1 = std::min(idx0 + 1, kPatternSize - 1);
+    const int idx1 = std::min(idx0 + 1, AntennaPattern::kSize - 1);
     const double frac = indexF - idx0;
 
-    const double db = kPatternDb[idx0] * (1.0 - frac) + kPatternDb[idx1] * frac;
+    const double db = pattern.patternDb[idx0] * (1.0 - frac) + pattern.patternDb[idx1] * frac;
     return std::pow(10.0, db / 10.0);
 }
 
@@ -164,6 +171,7 @@ BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const
     double bestPower = -std::numeric_limits<double>::infinity();
     double minPositivePower = std::numeric_limits<double>::infinity();
     float bestHeading = 0;
+    uint32_t nSighted = 0;
     for (const auto& s : slices) {
         if (!s.detected) {
             censHeadings.push_back(s.heading_deg);
@@ -172,6 +180,7 @@ BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const
         detHeadings.push_back(s.heading_deg);
         detPowers.push_back(s.signal_power);
         bestSnr = std::max(bestSnr, s.snr_db);
+        if (s.sighted) ++nSighted;
         if (s.signal_power > bestPower) {
             bestPower = s.signal_power;
             bestHeading = s.heading_deg;
@@ -184,6 +193,7 @@ BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const
     const int nDet  = static_cast<int>(detHeadings.size());
     const int nCens = static_cast<int>(censHeadings.size());
     result.n_valid_slices = static_cast<uint32_t>(nDet);
+    result.n_sighted_slices = nSighted;
     result.best_snr = static_cast<float>(nDet > 0 ? bestSnr : 0.0);
 
     if (nDet == 0 || bestPower <= 0.0) {
