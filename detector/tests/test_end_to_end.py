@@ -26,15 +26,19 @@ from pulse_detector import (
     lock_snr_db,
     compute_segment_samples,
     compute_stft_power,
+    fit_lock_timing,
     fold_detect,
-    lock_immediately,
     locks_agree,
     measure_at_lock,
+    predict_next_pulse_seconds,
+    slice_noise_power,
     measure_at_lock_psd,
+    pri_refit_moves_pulses,
     PulseLock,
+    promote_to_lock,
     pulse_indices_at_known_phase,
 )
-from iq_simulator import SimConfig, TagSignal, generate_packet
+from iq_simulator import SimConfig, TagSignal, apply_pri_offset, generate_packet
 
 # ---------------------------------------------------------------------------
 # Physical constants
@@ -57,6 +61,37 @@ N_MOVE = int(np.floor(N_EXACT_MOVE))      # integer PRI (moving rate)
 # Spectral weighting matrix (computed once for all tests)
 W, Wf = build_weighting_matrix(N_W, FS)
 NFFT = W.shape[1]
+
+
+def test_simulator_pri_offset_scales_every_tag_and_keeps_rate_switch_disabled():
+    tags = [
+        TagSignal(tip=2.0, tip_secondary=1.333, switch_time=34.0),
+        TagSignal(tip=3.0, tip_secondary=0.0),
+    ]
+
+    apply_pri_offset(tags, 43.0)
+
+    scale = 1.0 + 43e-6
+    assert tags[0].tip == pytest.approx(2.0 * scale)
+    assert tags[0].tip_secondary == pytest.approx(1.333 * scale)
+    assert tags[1].tip == pytest.approx(3.0 * scale)
+    # 0.0 means "no rate switch" and must stay exactly 0.0.
+    assert tags[1].tip_secondary == 0.0
+
+    # 0 ppm is the ideal crystal: a no-op.
+    ideal = [TagSignal(tip=2.0)]
+    apply_pri_offset(ideal, 0.0)
+    assert ideal[0].tip == 2.0
+
+
+@pytest.mark.parametrize('ppm', [float('nan'), float('inf'), float('-inf')])
+def test_simulator_pri_offset_rejects_non_finite_ppm(ppm):
+    # nan/inf are truthy, so a bare `if not ppm` guard would let them scale
+    # the TIP to nan/inf and silently mute the tag.
+    tags = [TagSignal(tip=2.0)]
+    with pytest.raises(ValueError):
+        apply_pri_offset(tags, ppm)
+    assert tags[0].tip == 2.0
 
 
 def test_known_pulse_amplitude_subtracts_noise_without_clamping():
@@ -115,6 +150,46 @@ def test_measure_at_lock_uses_fixed_frequency_and_phase():
     assert n_windows == 6
     # Pulse footprint is two half-overlapped windows: idx and idx+1.
     assert signal_power == (20.0 + 30.0 + 40.0) + (3 * 15.0) - 6 * 1.0
+
+
+def test_measure_at_lock_uses_supplied_noise_power():
+    power = np.ones((3, 50), dtype=float)
+    power[1, [0, 20, 40]] = [21.0, 21.0, 21.0]
+    cached = np.array([1.0, 2.0, 1.0])
+
+    signal_power, noise_power, _, n_windows = measure_at_lock(
+        power, np.array([-10.0, 0.0, 10.0]), 0.0, 104.0, 100.0, 2.0,
+        n_ws=10, fs=100.0, max_pulses=3, noise_power=cached)
+
+    assert noise_power == 2.0
+    assert signal_power == 3 * 21.0 + 3 * 1.0 - n_windows * 2.0
+
+
+def test_pri_refit_moves_pulses_compares_projected_windows():
+    # Anchor at t=0; eight 40 s slices, the farthest ending ~320 s later.
+    n_time = int(40.0 * FS / N_WS)
+    slices = [{'segment_start_s': 40.0 * i, 'k': 20,
+               'power': np.zeros((1, n_time))} for i in range(8)]
+    old = PulseLock(0.0, 0.0, 2.0, 5.0)
+
+    def indices(lock):
+        return [pulse_indices_at_known_phase(
+            s['segment_start_s'], n_time, lock.anchor_seconds,
+            lock.pri_seconds, N_WS, FS, s['k']) for s in slices]
+
+    assert not pri_refit_moves_pulses(old, old, slices, N_WS, FS)
+    # 20 ppm over 160 PRIs = 6.4 ms: crosses into the next window somewhere.
+    assert pri_refit_moves_pulses(
+        old, old._replace(pri_seconds=2.0 * (1 + 20e-6)), slices, N_WS, FS)
+    # 0.01 ppm over 160 PRIs = 3 us: no projected index can move.
+    tiny = old._replace(pri_seconds=2.0 * (1 + 1e-8))
+    assert not pri_refit_moves_pulses(old, tiny, slices, N_WS, FS)
+    # The verdict must track the actual index arrays, not a distance threshold.
+    for ppm in (0.5, 1.0, 2.0, 5.0):
+        new = old._replace(pri_seconds=2.0 * (1 + ppm * 1e-6))
+        moved = any(not np.array_equal(a, b)
+                    for a, b in zip(indices(old), indices(new)))
+        assert pri_refit_moves_pulses(old, new, slices, N_WS, FS) == moved
 
 
 def test_measure_at_lock_clips_footprint_at_segment_end():
@@ -207,14 +282,296 @@ def test_agreeing_locks_refine_pri():
     assert combined.anchor_seconds == 10.0
 
 
-def test_unambiguous_candidate_locks_without_confirmation_cycle():
-    # A candidate far above the lock threshold is not a false alarm; spending
-    # a second K-group at the same heading to confirm it doubles time-to-lock
-    # for nothing. Only marginal candidates need the confirmation cycle.
-    assert lock_immediately(score_ratio=30.0, lock_score_ratio=3.0)
-    assert lock_immediately(score_ratio=267524.0, lock_score_ratio=3.0)
-    assert not lock_immediately(score_ratio=29.9, lock_score_ratio=3.0)
-    assert not lock_immediately(score_ratio=3.0, lock_score_ratio=3.0)
+def test_lock_phase_tolerance_widens_with_pri_uncertainty():
+    # 100 ppm of PRI uncertainty over 300 s is 30 ms of phase slop; a
+    # sighting 20 ms off the projection is the same train. At 1 ppm it isn't.
+    loose = PulseLock(100.0, 10.0, 2.0, 4.0, pri_ppm_uncertainty=100.0)
+    tight = PulseLock(100.0, 10.0, 2.0, 4.0, pri_ppm_uncertainty=1.0)
+    later = PulseLock(100.0, 310.020, 2.0, 3.5)
+    tol = dict(frequency_tolerance_hz=200.0, pri_tolerance_seconds=0.01,
+               phase_tolerance_seconds=0.0075)
+
+    assert locks_agree(loose, later, **tol)
+    assert not locks_agree(tight, later, **tol)
+
+
+# Real geometry: 3840 S/s, 15 ms pulse, 50% overlap -> 7.55 ms STFT step.
+_FIT_N_WS = 29
+_FIT_FS = 3840.0
+_FIT_K = 20
+
+
+def _rotation_slices(true_pri, n_slices=8, anchor=1.0, pulse_power=10.0):
+    """n_slices consecutive K-pulse spectrograms of a train at true_pri."""
+    n_time = int(np.ceil(_FIT_K * true_pri * _FIT_FS / _FIT_N_WS))
+    seg_len_s = n_time * _FIT_N_WS / _FIT_FS
+    slices = []
+    for s in range(n_slices):
+        seg_start = s * seg_len_s
+        power = np.ones((3, n_time), dtype=np.float32)
+        first = int(np.ceil((seg_start - anchor) / true_pri))
+        for n in range(first, first + _FIT_K + 2):
+            t = anchor + n * true_pri
+            idx = int(np.rint((t - seg_start) * _FIT_FS / _FIT_N_WS))
+            if 0 <= idx < n_time:
+                power[1, idx] = pulse_power
+                if idx + 1 < n_time:
+                    power[1, idx + 1] = pulse_power
+        slices.append({'power': power, 'segment_start_s': seg_start,
+                       'k': _FIT_K, 'slice_id': s + 1})
+    return slices
+
+
+_FIT_FREQ_AXIS = np.array([-10.0, 0.0, 10.0])
+
+
+@pytest.mark.parametrize('true_ppm', [43.0, 150.0, -80.0])
+def test_fit_lock_timing_recovers_collar_pri_offset(true_ppm):
+    true_pri = 2.0 * (1.0 + true_ppm * 1e-6)
+    slices = _rotation_slices(true_pri)
+    nominal = PulseLock(0.0, 1.0, 2.0, 5.0, nominal_pri_seconds=2.0)
+
+    fitted = fit_lock_timing(slices, _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
+
+    fitted_ppm = (fitted.pri_seconds / 2.0 - 1.0) * 1e6
+    assert fitted_ppm == pytest.approx(true_ppm, abs=10.0)
+    assert fitted.pri_ppm_uncertainty <= 15.0
+    assert fitted.anchor_seconds == nominal.anchor_seconds
+    assert fitted.freq_hz == nominal.freq_hz
+
+
+def test_fit_lock_timing_recovers_far_heading_amplitude():
+    # 43 ppm over 160 pulses is ~13 ms of drift, nearly two STFT steps: the
+    # last heading measured at the nominal PRI reads near zero.
+    true_pri = 2.0 * (1.0 + 43e-6)
+    slices = _rotation_slices(true_pri)
+    nominal = PulseLock(0.0, 1.0, 2.0, 5.0, nominal_pri_seconds=2.0)
+    last = slices[-1]
+
+    def amplitude(lock):
+        signal, _, _, _ = measure_at_lock(
+            last['power'], _FIT_FREQ_AXIS, lock.freq_hz, last['segment_start_s'],
+            lock.anchor_seconds, lock.pri_seconds, _FIT_N_WS, _FIT_FS, last['k'])
+        return signal
+
+    full = _FIT_K * 2 * (10.0 - 1.0)
+    assert amplitude(nominal) < 0.5 * full
+
+    fitted = fit_lock_timing(slices, _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
+    assert amplitude(fitted) > 0.9 * full
+
+
+def test_fit_lock_timing_uncertainty_shrinks_with_rotation_length():
+    true_pri = 2.0 * (1.0 + 43e-6)
+    nominal = PulseLock(0.0, 1.0, 2.0, 5.0, nominal_pri_seconds=2.0)
+
+    one = fit_lock_timing(_rotation_slices(true_pri, n_slices=1),
+                          _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
+    eight = fit_lock_timing(_rotation_slices(true_pri, n_slices=8),
+                            _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
+
+    # A PRI error grows with distance from the anchor, so eight dwells pin
+    # it tighter than one.
+    assert eight.pri_ppm_uncertainty < one.pri_ppm_uncertainty
+
+
+def test_fit_lock_timing_stays_centred_on_nominal_pri():
+    # The grid is anchored to the collar's nominal PRI, not the last estimate,
+    # so a noise-driven refit cannot random-walk out of the search window.
+    slices = _rotation_slices(2.0 * (1.0 + 43e-6))
+    drifted = PulseLock(0.0, 1.0, 2.0 * (1.0 + 250e-6), 5.0,
+                        nominal_pri_seconds=2.0)
+
+    fitted = fit_lock_timing(slices, _FIT_FREQ_AXIS, drifted, _FIT_N_WS, _FIT_FS)
+
+    assert (fitted.pri_seconds / 2.0 - 1.0) * 1e6 == pytest.approx(43.0, abs=10.0)
+    assert fitted.nominal_pri_seconds == 2.0
+
+
+def test_fit_lock_timing_rejects_lock_without_nominal_pri():
+    slices = _rotation_slices(2.0)
+    with pytest.raises(ValueError, match='nominal_pri_seconds'):
+        fit_lock_timing(slices, _FIT_FREQ_AXIS, PulseLock(0.0, 1.0, 2.0, 5.0),
+                        _FIT_N_WS, _FIT_FS)
+
+
+def _zero_fill(slice_, start, end):
+    """Emulate a dropped-packet hole covering STFT windows start..end."""
+    slice_['power'][:, start:end + 1] = 0.0
+    slice_['had_gap'] = True
+    slice_['gap_windows'] = [(start, end)]
+
+
+def test_fit_lock_timing_ignores_zero_filled_windows():
+    # A hole in the last (most PRI-sensitive) slice swallows a run of pulses.
+    # Zero power minus noise on the projected footprint would be counted as
+    # evidence against whichever PRI lands there; masked, the fit matches the
+    # clean rotation exactly.
+    true_pri = 2.0 * (1.0 + 43e-6)
+    nominal = PulseLock(0.0, 1.0, 2.0, 5.0, nominal_pri_seconds=2.0)
+    clean = fit_lock_timing(_rotation_slices(true_pri), _FIT_FREQ_AXIS, nominal,
+                            _FIT_N_WS, _FIT_FS)
+
+    gapped = _rotation_slices(true_pri)
+    n_time = gapped[-1]['power'].shape[1]
+    _zero_fill(gapped[-1], n_time // 4, (3 * n_time) // 4)
+    masked = fit_lock_timing(gapped, _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
+
+    assert masked.pri_seconds == pytest.approx(clean.pri_seconds, abs=1e-9)
+    assert masked.pri_ppm_uncertainty == clean.pri_ppm_uncertainty
+
+
+def test_fit_lock_timing_all_gap_slice_is_inert():
+    true_pri = 2.0 * (1.0 + 43e-6)
+    nominal = PulseLock(0.0, 1.0, 2.0, 5.0, nominal_pri_seconds=2.0)
+    slices = _rotation_slices(true_pri)
+    without = fit_lock_timing(slices[:-1], _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
+
+    n_time = slices[-1]['power'].shape[1]
+    _zero_fill(slices[-1], 0, n_time - 1)
+    with_gap = fit_lock_timing(slices, _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
+
+    assert with_gap == without
+
+
+def test_fit_lock_timing_returns_lock_when_everything_is_gap():
+    nominal = PulseLock(0.0, 1.0, 2.0, 5.0, nominal_pri_seconds=2.0)
+    slices = _rotation_slices(2.0, n_slices=2)
+    for s in slices:
+        _zero_fill(s, 0, s['power'].shape[1] - 1)
+
+    assert fit_lock_timing(slices, _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS) == nominal
+
+
+def test_fit_lock_timing_hypothesis_with_no_data_cannot_win():
+    # Pure noise slightly above the cached estimate, so every hypothesis that
+    # touches data scores negative. Gap out exactly the windows the +40 ppm
+    # hypothesis projects onto in every slice: it (and its window-sharing
+    # neighbours) would score 0 and "win" despite having no evidence at all.
+    nominal = PulseLock(0.0, 1.0, 2.0, 5.0, nominal_pri_seconds=2.0)
+    slices = _rotation_slices(2.0, pulse_power=1.0)
+    for s in slices:
+        s['power'][:] = 1.0
+        s['noise_power'] = np.full(3, 1.1)
+        n_time = s['power'].shape[1]
+        idx = pulse_indices_at_known_phase(
+            s['segment_start_s'], n_time, 1.0, 2.0 * (1 + 40e-6),
+            _FIT_N_WS, _FIT_FS, s['k'])
+        s['had_gap'] = True
+        s['gap_windows'] = [(int(i), int(i) + 1) for i in idx]
+
+    fitted = fit_lock_timing(slices, _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
+
+    # Whatever the noise-only fit settles on, it must not be the data-free
+    # band presented as a tight estimate.
+    fitted_ppm = (fitted.pri_seconds / 2.0 - 1.0) * 1e6
+    assert abs(fitted_ppm - 40.0) > fitted.pri_ppm_uncertainty
+
+
+def test_slice_noise_power_ignores_zero_filled_columns():
+    rng = np.random.default_rng(0)
+    power = rng.exponential(1.0, size=(3, 400)).astype(np.float32)
+    clean = slice_noise_power(power, [])
+
+    gapped = power.copy()
+    gapped[:, 100:300] = 0.0
+    masked = slice_noise_power(gapped, [(100, 299)])
+    unmasked = slice_noise_power(gapped, [])
+
+    assert unmasked[1] < 0.9 * clean[1]           # zeros drag the estimate down
+    assert masked == pytest.approx(clean, rel=0.15)  # same population, half the samples
+    # All gap: fall back to the full array rather than an empty one.
+    assert slice_noise_power(gapped, [(0, 399)]).shape == (3,)
+
+
+def test_fit_lock_timing_flags_clipped_plateau_and_keeps_prior():
+    # A collar 400 ppm off sits outside the ±300 ppm grid: the energy maximum
+    # is pinned to the edge. The prior must survive with a widened
+    # uncertainty rather than the edge value posing as a converged fit.
+    slices = _rotation_slices(2.0 * (1.0 + 400e-6))
+    prior = PulseLock(0.0, 1.0, 2.0 * (1.0 + 43e-6), 5.0,
+                      nominal_pri_seconds=2.0, pri_ppm_uncertainty=20.0)
+
+    fitted = fit_lock_timing(slices, _FIT_FREQ_AXIS, prior, _FIT_N_WS, _FIT_FS)
+
+    assert fitted.pri_fit_clipped
+    assert fitted.pri_seconds == prior.pri_seconds
+    assert fitted.pri_ppm_uncertainty == 300.0
+
+    # An in-range collar is not flagged.
+    good = fit_lock_timing(_rotation_slices(2.0 * (1.0 + 43e-6)), _FIT_FREQ_AXIS,
+                           prior, _FIT_N_WS, _FIT_FS)
+    assert not good.pri_fit_clipped
+
+
+def test_predict_next_pulse_follows_train_through_dropped_pulses():
+    # 2 s PRI is ~265 STFT steps; the third pulse was dropped by a gap.
+    seg_start, n_ws, fs, pri = 1000.0, 29, 3840.0, 2.0
+    step = pri * fs / n_ws
+    full = np.rint(10 + step * np.arange(4)).astype(np.int64)
+    sparse = full[[0, 1, 3]]
+    n_time = int(full[-1] + 20)
+
+    expected = seg_start + full[-1] * n_ws / fs + pri
+    assert predict_next_pulse_seconds(seg_start, full, n_time, n_ws, fs, pri) == pytest.approx(expected, abs=1e-3)
+    assert predict_next_pulse_seconds(seg_start, sparse, n_time, n_ws, fs, pri) == pytest.approx(expected, abs=1e-3)
+    # The old first + count * PRI form lands a whole PRI short on the sparse train.
+    old = seg_start + sparse[0] * n_ws / fs + sparse.size * pri
+    assert old == pytest.approx(expected - pri, abs=n_ws / fs)
+
+
+def test_predict_next_pulse_clears_segment_when_trailing_pulses_gapped():
+    # Last two pulses fell in a gap: advancing one PRI from the last kept
+    # pulse would still be inside the completed segment.
+    seg_start, n_ws, fs, pri = 1000.0, 29, 3840.0, 2.0
+    step = pri * fs / n_ws
+    full = np.rint(10 + step * np.arange(4)).astype(np.int64)
+    kept = full[:2]
+    n_time = int(full[-1] + 20)
+    seg_end = seg_start + n_time * n_ws / fs
+
+    predicted = predict_next_pulse_seconds(seg_start, kept, n_time, n_ws, fs, pri)
+    assert predicted >= seg_end
+    # ...and it is still on the train: a whole number of PRIs from the last kept pulse.
+    cycles = (predicted - (seg_start + kept[-1] * n_ws / fs)) / pri
+    assert cycles == pytest.approx(round(cycles), abs=1e-9)
+    assert predicted == pytest.approx(seg_start + full[-1] * n_ws / fs + pri, abs=n_ws / fs)
+
+
+def test_measure_at_lock_drops_pulses_touching_gap_windows():
+    true_pri = 2.0
+    lock = PulseLock(0.0, 1.0, true_pri, 5.0, nominal_pri_seconds=2.0)
+    clean = _rotation_slices(true_pri, n_slices=1)[0]
+    n_time = clean['power'].shape[1]
+    # Fixed noise so the comparison isolates the footprint selection.
+    noise = np.ones(3)
+    full_signal, _, full_idx, full_windows = measure_at_lock(
+        clean['power'], _FIT_FREQ_AXIS, lock.freq_hz, clean['segment_start_s'],
+        lock.anchor_seconds, lock.pri_seconds, _FIT_N_WS, _FIT_FS, clean['k'],
+        noise_power=noise)
+    per_pulse = full_signal / full_idx.size
+
+    gapped = _rotation_slices(true_pri, n_slices=1)[0]
+    _zero_fill(gapped, n_time // 3, n_time // 2)
+
+    # Unmasked: zeroed footprints subtract noise and still count as pulses.
+    biased, _, biased_idx, _ = measure_at_lock(
+        gapped['power'], _FIT_FREQ_AXIS, lock.freq_hz, gapped['segment_start_s'],
+        lock.anchor_seconds, lock.pri_seconds, _FIT_N_WS, _FIT_FS, gapped['k'],
+        noise_power=noise)
+    assert biased_idx.size == full_idx.size
+    assert biased / biased_idx.size < 0.9 * per_pulse
+
+    # Masked: fewer pulses, same per-pulse power, no footprint in the hole.
+    signal, _, idx, n_windows = measure_at_lock(
+        gapped['power'], _FIT_FREQ_AXIS, lock.freq_hz, gapped['segment_start_s'],
+        lock.anchor_seconds, lock.pri_seconds, _FIT_N_WS, _FIT_FS, gapped['k'],
+        noise_power=noise, gap_windows=gapped['gap_windows'])
+    assert 0 < idx.size < full_idx.size
+    assert n_windows == 2 * idx.size
+    assert signal / idx.size == pytest.approx(per_pulse, rel=1e-6)
+    lo, hi = gapped['gap_windows'][0]
+    assert not np.any((idx + 1 >= lo) & (idx <= hi))
 
 
 _BANK_TOL = dict(frequency_tolerance_hz=200.0, pri_tolerance_seconds=0.01,
@@ -262,6 +619,41 @@ def test_candidate_bank_is_frozen_once_locked():
                                 max_candidates=3, locked=True,
                                 **_BANK_TOL) == (None, 'dropped')
     assert len(bank) == 3
+
+
+def test_candidate_bank_keeps_sightings_in_lockstep():
+    # The bank owns the per-candidate sighting record so the two can never
+    # diverge: every event that touches an entry touches its sightings.
+    bank, sightings = [], []
+    admit_lock_candidate(bank, PulseLock(100.0, 10.0, 2.0, 4.0),
+                         sightings=sightings, slice_id=1, **_BANK_TOL)
+    admit_lock_candidate(bank, PulseLock(900.0, 10.0, 2.0, 3.5),
+                         sightings=sightings, slice_id=1, **_BANK_TOL)
+    assert sightings == [{1: 4.0}, {1: 3.5}]
+
+    # Second sighting of entry 0 on another slice keeps the stronger score per slice.
+    admit_lock_candidate(bank, PulseLock(110.0, 14.001, 2.0, 5.0),
+                         sightings=sightings, slice_id=2, **_BANK_TOL)
+    admit_lock_candidate(bank, PulseLock(110.0, 14.001, 2.0, 4.5),
+                         sightings=sightings, slice_id=2, **_BANK_TOL)
+    assert sightings[0] == {1: 4.0, 2: 5.0}
+
+    # Eviction of the weakest resets its record.
+    admit_lock_candidate(bank, PulseLock(-900.0, 10.0, 2.0, 6.0),
+                         sightings=sightings, slice_id=3, max_candidates=2, **_BANK_TOL)
+    assert bank[1].freq_hz == -900.0
+    assert sightings[1] == {3: 6.0}
+
+    # A post-lock 'seen' records the sighting without touching the lock.
+    admit_lock_candidate(bank, PulseLock(-900.0, 16.0, 2.0, 7.0),
+                         sightings=sightings, slice_id=4, locked=True, **_BANK_TOL)
+    assert sightings[1] == {3: 6.0, 4: 7.0}
+    assert len(bank) == len(sightings) == 2
+
+    # Promotion reorders both lists together.
+    promote_to_lock(bank, sightings, 1)
+    assert bank[0].freq_hz == -900.0
+    assert sightings[0] == {3: 6.0, 4: 7.0}
 
 
 def _detection_with_windows(hyp_label, windows):

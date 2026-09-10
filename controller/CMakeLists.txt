@@ -28,6 +28,7 @@ add_executable(MavlinkTagController2
     timeHelpers.cpp timeHelpers.h
     LogFileManager.cpp LogFileManager.h
     MavlinkFtpServer.cpp MavlinkFtpServer.h
+    AntennaPattern.cpp AntennaPattern.h
     BearingCalculator.cpp BearingCalculator.h
     SimulatorTelemetryPublisher.cpp SimulatorTelemetryPublisher.h
 )
@@ -48,6 +49,15 @@ target_link_libraries(MavlinkTagController2
 )
 
 if(BUILD_TESTING)
+    # Offline tuning aid for AntennaPattern::confidenceFloor; not part of the tests.
+    add_executable(confidence_floor_montecarlo
+        tools/confidence_floor_montecarlo.cpp
+        AntennaPattern.cpp AntennaPattern.h
+        BearingCalculator.cpp BearingCalculator.h
+    )
+    target_include_directories(confidence_floor_montecarlo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(confidence_floor_montecarlo PRIVATE tunnel_protocol)
+
     add_executable(test_collection_protocol
         tests/test_collection_protocol.cpp
     )
@@ -74,9 +84,11 @@ if(BUILD_TESTING)
 
     add_executable(test_bearing_calculator
         tests/test_bearing_calculator.cpp
+        AntennaPattern.cpp AntennaPattern.h
         BearingCalculator.cpp BearingCalculator.h
     )
     target_include_directories(test_bearing_calculator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_bearing_calculator PRIVATE tunnel_protocol)
     add_test(NAME test_bearing_calculator COMMAND test_bearing_calculator)
 
     add_executable(test_python_pulse_mapper

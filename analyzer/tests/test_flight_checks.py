@@ -97,7 +97,7 @@ def test_parse_session_json_matches_config_shape(tmp_path):
       "detection_mode": "python", "detector_sample_rate_sps": 3840,
       "tags": [{"id": 6, "frequency_hz": 146170000, "pulse_width_msecs": 15,
                 "intra_pulse1_msecs": 1333, "intra_pulse2_msecs": 2000,
-                "k_requested": 0, "k": 5, "false_alarm_probability": 0.05,
+                "k": 5, "false_alarm_probability": 0.05,
                 "ip1_mu": null}]
     }""")
     cfgs = parse_session_json(path)

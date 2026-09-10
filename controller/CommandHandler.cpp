@@ -44,7 +44,8 @@ extern char **environ;
 using namespace TunnelProtocol;
 
 CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode, const std::string& simulatorPreset, bool debugDetector, double simulatorSnrDb,
-                               double simulatorTxBearingDeg, double simulatorInterfererSnrDb)
+                               double simulatorTxBearingDeg, double simulatorInterfererSnrDb,
+                               const std::string& simulatorAntenna, double simulatorPriPpm)
     : _mavlink          (mavlink)
     , _telemetryCache   (telemetryCache)
     , _homePath         (homeDir().c_str())
@@ -53,6 +54,8 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetry
     , _simulatorSnrDb   (simulatorSnrDb)
     , _simulatorTxBearingDeg (simulatorTxBearingDeg)
     , _simulatorInterfererSnrDb (simulatorInterfererSnrDb)
+    , _simulatorAntenna (simulatorAntenna)
+    , _simulatorPriPpm  (simulatorPriPpm)
     , _debugDetector    (debugDetector)
 {
     if (isRunningOnRPi()) {
@@ -131,6 +134,10 @@ bool CommandHandler::_handleTag(const mavlink_tunnel_t& tunnel)
         logError() << "CommandHandler::_handleTagCommand: invalid tag id of 0/1";
         return false;
     }
+    if (tagInfo.k < 2) {
+        logError() << "CommandHandler::_handleTagCommand: tag" << tagInfo.id << "k must be >= 2, got" << tagInfo.k;
+        return false;
+    }
 
     logDebug() << "CommandHandler::handleTagCommand: id:freq:intra_pulse1_msecs "
                 << tagInfo.id
@@ -187,17 +194,6 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     double  tp                          = tagInfo.pulse_width_msecs / 1000.0;
     double  centerFreqMhz              = double(tagInfo.channelizer_channel_center_frequency_hz) / 1000000.0;
 
-    // Validate K (fold count): must be >= 2 for meaningful integration.
-    // Default to 5 if the GCS sends 0 or 1 (unset or invalid).
-    uint32_t k = tagInfo.k >= 2 ? tagInfo.k : 5;
-    if (tagInfo.k < 2) {
-        logWarn() << "Tag " << tagId << " has invalid k=" << tagInfo.k << ", defaulting to 5";
-    }
-    uint32_t measurementK = tagInfo.measurement_k >= 2 ? tagInfo.measurement_k : 5;
-    if (tagInfo.measurement_k < 2) {
-        logWarn() << "Tag " << tagId << " has invalid measurement_k=" << tagInfo.measurement_k << ", defaulting to 5";
-    }
-
     std::string repoDir     = formatString("%s/repos/MavlinkTagController2", _homePath);
     std::string venvPython  = formatString("%s/.venv/bin/python3", repoDir.c_str());
     std::string pythonCmd   = (access(venvPython.c_str(), X_OK) == 0) ? venvPython : std::string("python3");
@@ -209,7 +205,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                            " --center-freq %f --pf %f"
                                            " --detection-margin %f --confidence-ratio %f"
                                            " --threshold-cache-dir \"%s\""
-                                           " --k %u --measurement-k %u",
+                                           " --k %u",
                                 pythonCmd.c_str(),
                                 repoDir.c_str(),
                                 tp, tip, sampleRate, portData,
@@ -217,7 +213,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                 centerFreqMhz, tagInfo.false_alarm_probability,
                                 detectionMargin, confidenceRatio,
                                 cacheDir.c_str(),
-                                k, measurementK);
+                                tagInfo.k);   // validated in _handleTag
     if (_debugDetector || debugDetector) {
         commandStr += " --debug";
     }
@@ -303,8 +299,6 @@ bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetectio
 
     bool first = true;
     for (const TagInfo_t& tag : _tagDatabase) {
-        const uint32_t kEffective = tag.k >= 2 ? tag.k : 5; // mirrors _startPythonDetector
-        const uint32_t measurementKEffective = tag.measurement_k >= 2 ? tag.measurement_k : 5;
         fprintf(fp, "%s    {\n", first ? "" : ",\n");
         first = false;
         fprintf(fp, "      \"id\": %u,\n", tag.id);
@@ -314,10 +308,7 @@ bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetectio
         fprintf(fp, "      \"intra_pulse2_msecs\": %u,\n", tag.intra_pulse2_msecs);
         fprintf(fp, "      \"intra_pulse_uncertainty_msecs\": %u,\n", tag.intra_pulse_uncertainty_msecs);
         fprintf(fp, "      \"intra_pulse_jitter_msecs\": %u,\n", tag.intra_pulse_jitter_msecs);
-        fprintf(fp, "      \"k_requested\": %u,\n", tag.k);
-        fprintf(fp, "      \"k\": %u,\n", kEffective);
-        fprintf(fp, "      \"measurement_k_requested\": %u,\n", tag.measurement_k);
-        fprintf(fp, "      \"measurement_k\": %u,\n", measurementKEffective);
+        fprintf(fp, "      \"k\": %u,\n", tag.k);
         fprintf(fp, "      \"false_alarm_probability\": %s,\n", jsonNumber(tag.false_alarm_probability).c_str());
         fprintf(fp, "      \"channelizer_channel_number\": %u,\n", tag.channelizer_channel_number);
         fprintf(fp, "      \"channelizer_channel_center_frequency_hz\": %u,\n", tag.channelizer_channel_center_frequency_hz);
@@ -905,6 +896,10 @@ void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header
             slice.candidate_id      = candidateId;
             slice.heading_deg       = headingIt->second;
             slice.detected          = pulseInfo.detection_status != kNoPulseDetectionStatus;
+            // Locked measurements carry the fold score of an independent
+            // sighting of this candidate on this slice, 0 if only measured.
+            slice.sighted           = pulseInfo.detection_status == kConfirmedDetectionStatus
+                                      && pulseInfo.score_ratio > 0.0;
             slice.snr_db            = pulseInfo.snr;
             slice.signal_power      = pulseInfo.signal_psd;
             slice.noise_psd         = pulseInfo.noise_psd;
@@ -937,7 +932,8 @@ void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header
                           << " heading:" << slice.heading_deg
                           << " snr:" << slice.snr_db
                           << " signal_power:" << slice.signal_power
-                          << " confirmed:" << slice.confirmed_status;
+                          << " confirmed:" << slice.confirmed_status
+                          << " sighted:" << slice.sighted;
                 if (pulseInfo.detection_status == kConfirmedDetectionStatus) {
                     replay = _updateLiveCandidate(slice.tag_id);
                 }
@@ -959,21 +955,30 @@ uint8_t CommandHandler::_liveCandidateFor(uint32_t tagId) const
     return it == _liveCandidate.end() ? 0 : it->second;
 }
 
-std::vector<TunnelProtocol::PythonPulseInfo_t> CommandHandler::_updateLiveCandidate(uint32_t tagId)
+BearingCalculator CommandHandler::_bearingCalculatorFor(const std::vector<RotationSlice>& slices) const
 {
-    BearingCalculator calculator;
-    uint32_t nCandidates = 0;
-    for (const auto& slice : _rotationSlices) {
-        if (slice.tag_id != tagId) {
-            continue;
-        }
+    BearingCalculator calculator(AntennaPatterns::byId(_antennaId));
+    for (const auto& slice : slices) {
         if (slice.detected) {
             calculator.addSlice(slice.heading_deg, slice.signal_power, slice.tag_id, slice.snr_db,
-                                slice.candidate_id);
+                                slice.candidate_id, slice.sighted);
         } else {
             calculator.addNoDetection(slice.heading_deg, slice.tag_id);
         }
     }
+    return calculator;
+}
+
+std::vector<TunnelProtocol::PythonPulseInfo_t> CommandHandler::_updateLiveCandidate(uint32_t tagId)
+{
+    std::vector<RotationSlice> tagSlices;
+    for (const auto& slice : _rotationSlices) {
+        if (slice.tag_id == tagId) {
+            tagSlices.push_back(slice);
+        }
+    }
+    BearingCalculator calculator = _bearingCalculatorFor(tagSlices);
+    uint32_t nCandidates = 0;
     const uint8_t live = _liveCandidateFor(tagId);
     const BearingCalculator::Result* liveResult = nullptr;
     const BearingCalculator::Result* best = nullptr;
@@ -1180,6 +1185,9 @@ std::string CommandHandler::_handleStartCollection(const mavlink_tunnel_t& tunne
         || !std::isfinite(collectionInfo.confidence_ratio)) {
         return "Detection thresholds must be finite";
     }
+    if (!AntennaPatterns::isKnown(collectionInfo.antenna_id)) {
+        return formatString("Unknown antenna_id %u", collectionInfo.antenna_id);
+    }
 
     std::vector<uint32_t> tagIds;
     for (const TagInfo_t& tagInfo : _tagDatabase) {
@@ -1193,6 +1201,11 @@ std::string CommandHandler::_handleStartCollection(const mavlink_tunnel_t& tunne
         if (result == CollectionCoordinator::Result::Conflict) {
             return "Another collection is active";
         }
+        if (result == CollectionCoordinator::Result::Duplicate && collectionInfo.antenna_id != _antennaId) {
+            // A retry re-sends the same payload; a different antenna is a new
+            // configuration the running collection would silently ignore.
+            return formatString("Collection already active with antenna_id %u", _antennaId);
+        }
         if (result != CollectionCoordinator::Result::Duplicate) {
             if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
                 _collectionCoordinator.cancel(collectionInfo.collection_id);
@@ -1203,6 +1216,9 @@ std::string CommandHandler::_handleStartCollection(const mavlink_tunnel_t& tunne
                 _detectorControlPorts[tagIds[index]] = kDetectorControlPortBase + static_cast<int>(index);
             }
             _inRotation = true;
+            _antennaId = collectionInfo.antenna_id;
+            _revisitRequested = false;
+            _pendingRevisitHeadingDeg.reset();
             _currentHeadingDeg = 0;
             _rotationSliceHeadings.clear();
             _rotationSliceTelemetry.clear();
@@ -1276,7 +1292,8 @@ std::string CommandHandler::_handleStartCollection(const mavlink_tunnel_t& tunne
     }
 
     logInfo() << "Collection ready: id:" << collectionInfo.collection_id
-              << "detectors:" << tagIds.size() << "slices:" << collectionInfo.n_slices;
+              << "detectors:" << tagIds.size() << "slices:" << collectionInfo.n_slices
+              << "antenna:" << AntennaPatterns::byId(collectionInfo.antenna_id).name;
     return "";
 }
 
@@ -1315,7 +1332,8 @@ bool CommandHandler::_sendDetectorControl(
 
 void CommandHandler::_sendCollectionStatus(
     uint32_t collectionId, uint32_t sliceId, uint32_t status, uint32_t errorCode,
-    std::optional<uint32_t> expectedDetectors, std::optional<uint32_t> completedDetectors)
+    std::optional<uint32_t> expectedDetectors, std::optional<uint32_t> completedDetectors,
+    float revisitHeadingDeg)
 {
     CollectionStatus_t message {};
     message.header.command = COMMAND_ID_COLLECTION_STATUS;
@@ -1323,6 +1341,7 @@ void CommandHandler::_sendCollectionStatus(
     message.slice_id = sliceId;
     message.status = status;
     message.error_code = errorCode;
+    message.revisit_heading_deg = revisitHeadingDeg;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
         message.expected_detectors = expectedDetectors.value_or(
@@ -1365,6 +1384,18 @@ std::string CommandHandler::_handleStartCollectionSlice(const mavlink_tunnel_t& 
             _rotationSliceHeadings[sliceInfo.slice_id] = sliceInfo.heading_deg;
             // A duplicate ARM is a GCS retry; keep the pose from the first one.
             _rotationSliceTelemetry.try_emplace(sliceInfo.slice_id, _telemetryCache->telemetryForTime(secondsSinceEpoch()));
+            // Only a slice flown at the requested heading is the confirmation
+            // dwell; any other slice leaves the revisit outstanding so the
+            // next FINISH asks again instead of finalizing unconfirmed.
+            if (_pendingRevisitHeadingDeg) {
+                const float delta = std::fabs(std::remainder(sliceInfo.heading_deg - *_pendingRevisitHeadingDeg, 360.0f));
+                if (delta <= kRevisitHeadingToleranceDeg) {
+                    _pendingRevisitHeadingDeg.reset();
+                } else {
+                    logWarn() << formatString("Collection %u: slice %u armed at %.1f deg while revisit at %.1f deg is outstanding; revisit still pending",
+                                              sliceInfo.collection_id, sliceInfo.slice_id, sliceInfo.heading_deg, *_pendingRevisitHeadingDeg);
+                }
+            }
         }
     }
     if (replayComplete) {
@@ -1407,6 +1438,45 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
         return "Invalid finish disposition";
     }
 
+    // Before tearing the detectors down (their locks and buffered slices
+    // live in the detector processes), see whether the rotation needs one
+    // confirmation dwell. If so the collection stays open and the GCS flies
+    // that heading as an extra slice, then finishes again. A FINISH retry
+    // (lost ack or status) before that slice is armed gets the same request
+    // again rather than finalizing without the confirmation.
+    if (finalize) {
+        std::optional<float> revisitHeading;
+        bool replayed = false;
+        {
+            std::lock_guard<std::mutex> lock(_rotationMutex);
+            if (_collectionCoordinator.collectionId() == finishInfo.collection_id
+                && _collectionCoordinator.state() == CollectionCoordinator::State::Ready) {
+                if (_pendingRevisitHeadingDeg) {
+                    revisitHeading = _pendingRevisitHeadingDeg;
+                    replayed = true;
+                } else if (!_revisitRequested) {
+                    revisitHeading = BearingCalculator::revisitHeadingFor(_bearingCalculatorFor(_rotationSlices).solve());
+                    if (revisitHeading) {
+                        _revisitRequested = true;
+                        _pendingRevisitHeadingDeg = revisitHeading;
+                    }
+                }
+            }
+        }
+        if (revisitHeading) {
+            if (replayed) {
+                logInfo() << formatString("Collection %u: FINISH retried before the revisit slice was armed; re-sending revisit at %.1f deg",
+                                          finishInfo.collection_id, *revisitHeading);
+            } else {
+                logInfo() << formatString("Collection %u: winning lock sighted on one heading only; requesting revisit at %.1f deg",
+                                          finishInfo.collection_id, *revisitHeading);
+            }
+            _sendCollectionStatus(finishInfo.collection_id, 0, COLLECTION_STATUS_REVISIT_REQUESTED, 0,
+                                  std::nullopt, std::nullopt, *revisitHeading);
+            return "";
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
         const auto result = finalize
@@ -1443,6 +1513,7 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
         _rotationSliceHeadings.clear();
         _rotationSliceTelemetry.clear();
         _detectorControlPorts.clear();
+        _pendingRevisitHeadingDeg.reset();
         _inRotation = false;
     }
     _mavlink->setVehicleTimeFrozen(false);
@@ -1459,15 +1530,9 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
 
     // Compute bearing per tag: every detector lock candidate is fitted, the
     // best-fitting one is reported, or none if it falls below the floor.
-    BearingCalculator calculator;
-    for (const auto& slice : slicesCopy) {
-        if (slice.detected) {
-            calculator.addSlice(slice.heading_deg, slice.signal_power, slice.tag_id, slice.snr_db,
-                                slice.candidate_id);
-        } else {
-            calculator.addNoDetection(slice.heading_deg, slice.tag_id);
-        }
-    }
+    BearingCalculator calculator = _bearingCalculatorFor(slicesCopy);
+    logInfo() << "Bearing fit antenna:" << calculator.antenna().name
+              << "confidence floor:" << calculator.confidenceFloor();
 
     const auto candidateResults = calculator.solveCandidates();
     auto results = calculator.solve();
@@ -1479,12 +1544,12 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
         std::string logPath = logFileManager->filename(LogFileManager::ROTATION, "bearing_result", "log");
         bearingLog.open(logPath);
         if (bearingLog.is_open()) {
-            bearingLog << "tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude\n";
+            bearingLog << "tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed\n";
         }
         std::string candidatePath = logFileManager->filename(LogFileManager::ROTATION, "bearing_candidates", "log");
         candidateLog.open(candidatePath);
         if (candidateLog.is_open()) {
-            candidateLog << "tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected\n";
+            candidateLog << "tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected,n_sighted_slices\n";
         }
     }
 
@@ -1498,10 +1563,10 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
             });
         const bool selected = selectedIt != results.end();
         const bool rejected = selected && selectedIt->rejected;
-        logInfo() << formatString("Bearing candidate: tag_id: %u  candidate: %u/%u  bearing: %.1f  confidence: %.3f  slices: %u  best_snr: %.1f%s%s",
+        logInfo() << formatString("Bearing candidate: tag_id: %u  candidate: %u/%u  bearing: %.1f  confidence: %.3f  slices: %u  sighted: %u  best_snr: %.1f%s%s",
                                   candidate.tag_id, candidate.candidate_id, candidate.n_candidates,
                                   candidate.bearing_deg, candidate.r_squared,
-                                  candidate.n_valid_slices, candidate.best_snr,
+                                  candidate.n_valid_slices, candidate.n_sighted_slices, candidate.best_snr,
                                   selected ? "  [selected]" : "",
                                   rejected ? "  [rejected: below confidence floor]" : "");
         if (candidateLog.is_open()) {
@@ -1512,7 +1577,8 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
                          << candidate.n_valid_slices << ","
                          << candidate.best_snr << ","
                          << (selected ? 1 : 0) << ","
-                         << (rejected ? 1 : 0) << "\n";
+                         << (rejected ? 1 : 0) << ","
+                         << candidate.n_sighted_slices << "\n";
         }
     }
     candidateLog.close();
@@ -1570,12 +1636,14 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
         bearingResult.r_squared         = result.r_squared;
         bearingResult.n_valid_slices    = result.n_valid_slices;
         bearingResult.best_snr          = result.best_snr;
+        const bool confirmed = !result.rejected && result.n_sighted_slices >= kConfirmedSightings;
+        bearingResult.confirmed         = confirmed ? 1 : 0;
 
         _mavlink->sendTunnelMessage(&bearingResult, sizeof(bearingResult));
 
-        logInfo() << formatString("Bearing result: tag_id: %u  bearing: %.1f  R²: %.3f  slices: %u  best_snr: %.1f  candidate: %u/%u%s",
+        logInfo() << formatString("Bearing result: tag_id: %u  bearing: %.1f  R²: %.3f  slices: %u  sighted: %u  confirmed: %u  best_snr: %.1f  candidate: %u/%u%s",
                                   result.tag_id, result.bearing_deg, result.r_squared,
-                                  result.n_valid_slices, result.best_snr,
+                                  result.n_valid_slices, result.n_sighted_slices, confirmed ? 1u : 0u, result.best_snr,
                                   result.candidate_id, result.n_candidates,
                                   result.rejected ? "  NO BEARING (below confidence floor)" : "");
 
@@ -1592,7 +1660,10 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
                        << result.n_valid_slices << ","
                        << result.best_snr << ","
                        << std::fixed << std::setprecision(8)
-                       << lat << "," << lon << "\n";
+                       << lat << "," << lon << ","
+                       << std::defaultfloat
+                       << result.n_sighted_slices << ","
+                       << (confirmed ? 1 : 0) << "\n";
         }
     }
 
@@ -1971,9 +2042,11 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
     }
 
     const double txBearingRad = _simulatorTxBearingDeg * M_PI / 180.0;
-    std::string txArgs = formatString(" --tx-offset-north-m %f --tx-offset-east-m %f",
+    std::string txArgs = formatString(" --tx-offset-north-m %f --tx-offset-east-m %f --antenna %s --pri-ppm %f",
                                       kSimulatorTxRangeM * std::cos(txBearingRad),
-                                      kSimulatorTxRangeM * std::sin(txBearingRad));
+                                      kSimulatorTxRangeM * std::sin(txBearingRad),
+                                      _simulatorAntenna.c_str(),
+                                      _simulatorPriPpm);
 
     // If no tags configured, use the preset
     if (_tagDatabase.size() == 0) {
@@ -2019,7 +2092,7 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
 
         if (tagInfo.intra_pulse2_msecs != 0) {
             double tipB = tagInfo.intra_pulse2_msecs / 1000.0;
-            uint32_t k = tagInfo.k >= 2 ? tagInfo.k : 5;
+            const uint32_t k = tagInfo.k;   // validated in _handleTag
 
             switch (phase) {
             case 0: // Clean A

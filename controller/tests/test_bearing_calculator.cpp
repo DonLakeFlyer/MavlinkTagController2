@@ -1,12 +1,20 @@
+#include "AntennaPattern.h"
 #include "BearingCalculator.h"
+#include "TunnelProtocol.h"
 #include "test_check.h"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 static constexpr float kBearingToleranceDeg = 5.0f;
+
+static double ra2aPattern(double offsetDeg) {
+    return BearingCalculator::patternLinear(AntennaPatterns::ra2a(), offsetDeg);
+}
 
 static void assertNear(float actual, float expected, float tolerance, const char* label) {
     // Handle wraparound for bearing
@@ -23,13 +31,14 @@ static void assertNear(float actual, float expected, float tolerance, const char
 // Uses the real RA-2AK antenna pattern via BearingCalculator::patternLinear().
 // Model: SNR_i = amplitude * patternLinear(heading_i - trueBearing) + noiseFloor
 static std::vector<std::pair<float, double>> generateSlices(
-    float trueBearing, double amplitude, double noiseFloor, int nSlices)
+    float trueBearing, double amplitude, double noiseFloor, int nSlices,
+    const AntennaPattern& pattern = AntennaPatterns::ra2a())
 {
     std::vector<std::pair<float, double>> slices;
     float step = 360.0f / nSlices;
     for (int i = 0; i < nSlices; ++i) {
         float heading = std::fmod(i * step, 360.0f);
-        double snr = amplitude * BearingCalculator::patternLinear(heading - trueBearing) + noiseFloor;
+        double snr = amplitude * BearingCalculator::patternLinear(pattern, heading - trueBearing) + noiseFloor;
         slices.push_back({heading, snr});
     }
     return slices;
@@ -404,21 +413,125 @@ static void testNoisyData() {
 // ── Test: pattern symmetry — front and back lobes ───────────────────
 static void testPatternSymmetry() {
     // RA-2AK pattern should be symmetric: pattern(+30°) == pattern(-30°)
-    CHECK(std::fabs(BearingCalculator::patternLinear(30.0) - BearingCalculator::patternLinear(-30.0)) < 1e-10);
+    CHECK(std::fabs(ra2aPattern(30.0) - ra2aPattern(-30.0)) < 1e-10);
 
     // Boresight should be 1.0 (0 dB)
-    double p0 = BearingCalculator::patternLinear(0.0);
+    double p0 = ra2aPattern(0.0);
     CHECK(std::fabs(p0 - 1.0) < 1e-10);
 
     // Back lobe at 180° should be ~0.1 (-10 dB)
-    double p180 = BearingCalculator::patternLinear(180.0);
+    double p180 = ra2aPattern(180.0);
     CHECK(std::fabs(p180 - 0.1) < 0.001);
 
     // Deep null near 90° should be very low
-    double p90 = BearingCalculator::patternLinear(90.0);
+    double p90 = ra2aPattern(90.0);
     CHECK(p90 < 0.01);  // -27.5 dB ≈ 0.00178
 
     std::printf("PASS: testPatternSymmetry (0°=%.4f, 90°=%.5f, 180°=%.4f)\n", p0, p90, p180);
+}
+
+// ── Test: antenna registry ─────────────────────────────────────────────────
+static void testAntennaRegistry() {
+    const AntennaPattern& ra2a  = AntennaPatterns::byId(ANTENNA_ID_RA2A);
+    const AntennaPattern& ra23k = AntennaPatterns::byId(ANTENNA_ID_RA23K);
+    CHECK(ra2a.id == ANTENNA_ID_RA2A);
+    CHECK(ra23k.id == ANTENNA_ID_RA23K);
+    CHECK(&ra2a != &ra23k);
+    CHECK(AntennaPatterns::isKnown(ANTENNA_ID_RA2A));
+    CHECK(AntennaPatterns::isKnown(ANTENNA_ID_RA23K));
+    CHECK(!AntennaPatterns::isKnown(999));
+    bool threw = false;
+    try {
+        AntennaPatterns::byId(999);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // Both tables are boresight-normalised and symmetric.
+    for (const AntennaPattern* p : {&ra2a, &ra23k}) {
+        CHECK(std::fabs(BearingCalculator::patternLinear(*p, 0.0) - 1.0) < 1e-10);
+        CHECK(std::fabs(BearingCalculator::patternLinear(*p, 60.0)
+                        - BearingCalculator::patternLinear(*p, 300.0)) < 1e-10);
+        CHECK(p->confidenceFloor > 0.0f && p->confidenceFloor < 1.0f);
+    }
+    // The 3-element has a shallower side null than the 2-element.
+    CHECK(BearingCalculator::patternLinear(ra23k, 90.0) > BearingCalculator::patternLinear(ra2a, 90.0));
+
+    // The calculator fits with the pattern it was built with.
+    BearingCalculator calc(ra23k);
+    CHECK(calc.confidenceFloor() == ra23k.confidenceFloor);
+    for (const auto& [hdg, snr] : generateSlices(135.0f, 30.0, 5.0, 8, ra23k)) {
+        calc.addSlice(hdg, snr, 7, 0.0);
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    assertNear(results[0].bearing_deg, 135.0f, kBearingToleranceDeg, "RA-23K bearing at 135°");
+    CHECK(results[0].r_squared > 0.9f);
+    std::printf("PASS: testAntennaRegistry (RA-23K bearing=%.1f, R²=%.3f)\n",
+                results[0].bearing_deg, results[0].r_squared);
+}
+
+// ── Test: sighted slices are counted per candidate ─────────────────────
+static void testSightedSliceCount() {
+    BearingCalculator calc;
+    calc.setConfidenceFloor(0.0f);
+    auto slices = generateSlices(45.0f, 30.0, 0.0, 8);
+    for (size_t i = 0; i < slices.size(); ++i) {
+        // Fold search found candidate 0 on the two front-lobe headings only;
+        // the rest are fixed-offset measurements at that lock.
+        const bool sighted = slices[i].first == 45.0f || slices[i].first == 90.0f;
+        calc.addSlice(slices[i].first, slices[i].second, 2, 0.0, 0, sighted);
+    }
+    // A competing candidate measured everywhere but sighted once.
+    for (size_t i = 0; i < slices.size(); ++i) {
+        calc.addSlice(slices[i].first, 0.1 * slices[i].second, 2, 0.0, 1, slices[i].first == 0.0f);
+    }
+    auto results = calc.solveCandidates();
+    CHECK(results.size() == 2);
+    for (const auto& r : results) {
+        CHECK(r.n_valid_slices == 8);
+        CHECK(r.n_sighted_slices == (r.candidate_id == 0 ? 2u : 1u));
+    }
+    // No-detection headings never count as sightings.
+    BearingCalculator lone;
+    lone.setConfidenceFloor(0.0f);
+    lone.addSlice(45.0f, 30.0, 3, 0.0, 0, true);
+    lone.addNoDetection(225.0f, 3);
+    auto loneResults = lone.solve();
+    CHECK(loneResults.size() == 1);
+    CHECK(loneResults[0].n_sighted_slices == 1);
+    std::printf("PASS: testSightedSliceCount\n");
+}
+
+// ── Test: revisit is requested only for an accepted single-sighting winner ─
+static void testRevisitHeadingFor() {
+    auto result = [](uint32_t tag, float bearing, uint32_t sighted, bool rejected) {
+        BearingCalculator::Result r {};
+        r.tag_id = tag;
+        r.bearing_deg = bearing;
+        r.r_squared = 0.9f;
+        r.n_valid_slices = 8;
+        r.n_sighted_slices = sighted;
+        r.rejected = rejected;
+        return r;
+    };
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+
+    CHECK(!BearingCalculator::revisitHeadingFor({}).has_value());
+    CHECK(!BearingCalculator::revisitHeadingFor({result(2, 45.0f, 1, true)}).has_value());
+    CHECK(!BearingCalculator::revisitHeadingFor({result(2, nan, 1, false)}).has_value());
+    CHECK(!BearingCalculator::revisitHeadingFor({result(2, 45.0f, 2, false)}).has_value());
+    CHECK(!BearingCalculator::revisitHeadingFor({result(2, 45.0f, 0, false)}).has_value());
+
+    auto one = BearingCalculator::revisitHeadingFor({result(2, 45.0f, 1, false)});
+    CHECK(one.has_value() && *one == 45.0f);
+
+    // Confirmed first tag, unconfirmed second: the second one drives the revisit.
+    auto second = BearingCalculator::revisitHeadingFor(
+        {result(2, 45.0f, 3, false), result(3, 270.0f, 1, false)});
+    CHECK(second.has_value() && *second == 270.0f);
+    std::printf("PASS: testRevisitHeadingFor\n");
 }
 
 // ── Test: 16-slice rotation ─────────────────────────────────────────
@@ -452,6 +565,9 @@ int main() {
     testAllCandidatesRejected();
     testSingleCandidateDefaults();
     testPatternSymmetry();
+    testAntennaRegistry();
+    testSightedSliceCount();
+    testRevisitHeadingFor();
     testBearingAtZero_8slices();
     testBearingAt90_8slices();
     testBearingAt225_8slices();

@@ -111,7 +111,7 @@ endif()
 CPMAddPackage(
     NAME         TunnelProtocol
     GITHUB_REPOSITORY DonLakeFlyer/TagTrackerTunnelProtocol
-    GIT_TAG      f4da01e9fb3d8e517a80b4b923f2efb8292da6e5
+    GIT_TAG      18ff675c2e8941bd51a11b8a4cc2d646bdbc7fea
     DOWNLOAD_ONLY YES
 )
 if(TunnelProtocol_ADDED)

@@ -31,7 +31,7 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List
 
 import numpy as np
@@ -136,6 +136,10 @@ class SimConfig:
     telemetry_topic: str = "vehicle_pose"
     tx_offset_north_m: float = 4000.0
     tx_offset_east_m: float = 0.0
+    antenna: str = "ra2a"             # Gain table applied to the first tag (see ANTENNA_GAIN_DB)
+    # Collar crystal offset, applied to every TIP by run(). Bench-measured
+    # RA-2A collar: +43 ppm; 0 = ideal crystal.
+    pri_ppm: float = 43.0
 
 
 @dataclass
@@ -239,35 +243,45 @@ def _initial_bearing_deg(lat1_deg: float, lon1_deg: float, lat2_deg: float, lon2
     return (bearing + 360.0) % 360.0
 
 
-# Measured H-plane gain pattern for Telonics RA-2A antenna
-# (off-boresight degrees → dB). Symmetric about boresight; 0° = pointing at transmitter.
+# Measured H-plane gain patterns (off-boresight degrees -> dBd), symmetric
+# about boresight; 0 deg = pointing at the transmitter. Same 10-degree tables
+# as controller/AntennaPattern.cpp, before boresight normalisation.
 _ANTENNA_GAIN_ANGLES = np.array([
     0, 10, 20, 30, 40, 50, 60, 70, 80, 90,
     100, 110, 120, 130, 140, 150, 160, 170, 180,
 ], dtype=np.float64)
 
-_ANTENNA_GAIN_DB = np.array([
-    2.5, 2.5, 2.0, 1.5, 0.0, -2.5, -8.0, -12.0, -18.0, -25.0,
-    -17.5, -15.0, -12.0, -10.0, -11.0, -8.0, -8.0, -7.5, -7.5,
-], dtype=np.float64)
+ANTENNA_GAIN_DB = {
+    # Telonics RA-2A / RA-2AHS 2-element
+    "ra2a": np.array([
+        2.5, 2.5, 2.0, 1.5, 0.0, -2.5, -8.0, -12.0, -18.0, -25.0,
+        -17.5, -15.0, -12.0, -10.0, -11.0, -8.0, -8.0, -7.5, -7.5,
+    ], dtype=np.float64),
+    # Telonics RA-23K 3-element (Antennas/RA-23K.jpg), 4 dBd assumed at boresight
+    "ra23k": np.array([
+        4.0, 3.5, 3.0, 2.0, 1.0, -1.0, -4.0, -6.5, -12.0, -14.0,
+        -13.5, -12.0, -10.0, -9.5, -7.5, -6.5, -6.0, -5.5, -6.0,
+    ], dtype=np.float64),
+}
 
-assert len(_ANTENNA_GAIN_ANGLES) == len(_ANTENNA_GAIN_DB), "Antenna gain table arrays must have matching lengths"
+for _name, _table in ANTENNA_GAIN_DB.items():
+    assert len(_ANTENNA_GAIN_ANGLES) == len(_table), f"{_name}: antenna gain table length mismatch"
 assert all(_ANTENNA_GAIN_ANGLES[i] < _ANTENNA_GAIN_ANGLES[i + 1] for i in range(len(_ANTENNA_GAIN_ANGLES) - 1)), "Antenna gain angles must be monotonically increasing"
 assert _ANTENNA_GAIN_ANGLES[0] == 0.0, "Antenna gain table must start at 0° (boresight)"
 assert _ANTENNA_GAIN_ANGLES[-1] == 180.0, "Antenna gain table must end at 180°"
 
-# Pre-compute gain relative to boresight so 0° = 0 dB attenuation.
-_ANTENNA_ATTEN_DB = _ANTENNA_GAIN_DB - _ANTENNA_GAIN_DB[0]
 
-
-def _antenna_attenuation_db(off_boresight_deg: float) -> float:
-    """Measured antenna attenuation in dB (interpolated from gain table).
+def _antenna_attenuation_db(off_boresight_deg: float, antenna: str = "ra2a") -> float:
+    """Antenna attenuation in dB relative to boresight (interpolated).
 
     Returns 0 dB at boresight, non-positive values elsewhere.
     Pattern is symmetric: only |off-boresight| is used.
     """
+    gain_db = ANTENNA_GAIN_DB.get(antenna)
+    if gain_db is None:
+        raise ValueError(f"unknown antenna {antenna!r}; expected one of {sorted(ANTENNA_GAIN_DB)}")
     off = min(180.0, abs(_normalize_angle_deg(off_boresight_deg)))
-    return float(np.interp(off, _ANTENNA_GAIN_ANGLES, _ANTENNA_ATTEN_DB))
+    return float(np.interp(off, _ANTENNA_GAIN_ANGLES, gain_db - gain_db[0]))
 
 
 def _start_telemetry_subscriber(cfg: SimConfig, telem_state: DirectionalTelemetryState) -> tuple[threading.Event, threading.Thread] | tuple[None, None]:
@@ -336,6 +350,21 @@ def _start_telemetry_subscriber(cfg: SimConfig, telem_state: DirectionalTelemetr
     th = threading.Thread(target=_run, daemon=True)
     th.start()
     return stop_event, th
+
+
+def apply_pri_offset(tags: List[TagSignal], ppm: float) -> None:
+    """Scale every tag's TIP(s) by (1 + ppm*1e-6); a disabled tip_secondary (0) stays 0."""
+    if not math.isfinite(ppm):
+        raise ValueError(f"pri ppm must be finite, got {ppm!r}")
+    if ppm == 0.0:
+        return
+    scale = 1.0 + ppm * 1e-6
+    if scale <= 0.0:
+        raise ValueError(f"pri ppm must be > -1000000 to keep TIP positive, got {ppm!r}")
+    for tag in tags:
+        tag.tip *= scale
+        if tag.tip_secondary > 0.0:
+            tag.tip_secondary *= scale
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +470,7 @@ def generate_packet(
                     tx_lon_deg,
                 )
                 off_boresight = _normalize_angle_deg(bearing_to_tx - vehicle_yaw_deg)
-                attenuation_db = _antenna_attenuation_db(off_boresight)
+                attenuation_db = _antenna_attenuation_db(off_boresight, cfg.antenna)
                 effective_snr_db = snr_at_distance(
                     tag.snr_db,
                     max(1.0, distance_m),
@@ -480,6 +509,15 @@ def _signal_handler(signum, frame):
 
 def run(cfg: SimConfig) -> None:
     global _running
+    if cfg.antenna not in ANTENNA_GAIN_DB:
+        raise ValueError(f"unknown antenna {cfg.antenna!r}; expected one of {sorted(ANTENNA_GAIN_DB)}")
+    # The PRI offset scales the TIPs in place; work on a copy so the caller's
+    # config is unchanged and a second run() does not scale them again.
+    cfg = replace(cfg, tags=[replace(tag) for tag in cfg.tags])
+    apply_pri_offset(cfg.tags, cfg.pri_ppm)
+    if cfg.pri_ppm != 0.0:
+        print(f"iq_simulator: PRI offset {cfg.pri_ppm:+.0f} ppm applied to {len(cfg.tags)} tag(s)",
+              file=sys.stderr)
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
@@ -713,12 +751,21 @@ Examples:
     p.add_argument("--tx-offset-east-m", type=float, default=0.0,
                     help="Fixed transmitter offset east of first vehicle pose (default: 0m). "
                          "Together with --tx-offset-north-m this sets the true bearing.")
+    p.add_argument("--antenna", choices=sorted(ANTENNA_GAIN_DB), default="ra2a",
+                    help="Receive antenna gain pattern applied to the first tag (default: ra2a)")
+    p.add_argument("--pri-ppm", type=float, default=SimConfig.pri_ppm,
+                    help="Collar crystal offset in ppm; scales every tag's TIP by (1 + ppm*1e-6). "
+                         f"Default is a bench-measured RA-2A collar ({SimConfig.pri_ppm:+.0f}); 0 = ideal crystal.")
 
 
     args = p.parse_args()
 
     if not (0.0 <= args.drop_probability <= 1.0):
         p.error("--drop-probability must be between 0.0 and 1.0")
+    if not math.isfinite(args.pri_ppm):
+        p.error(f"--pri-ppm must be finite, got {args.pri_ppm}")
+    if 1.0 + args.pri_ppm * 1e-6 <= 0.0:
+        p.error(f"--pri-ppm must be > -1000000 to keep TIP positive, got {args.pri_ppm}")
 
     # Start from preset or defaults
     if args.preset:
@@ -764,6 +811,8 @@ Examples:
     cfg.telemetry_topic = args.telemetry_topic
     cfg.tx_offset_north_m = args.tx_offset_north_m
     cfg.tx_offset_east_m = args.tx_offset_east_m
+    cfg.antenna = args.antenna
+    cfg.pri_ppm = args.pri_ppm
 
     # Build tags from CLI if --freq-offset-hz was given
     if args.freq_offset_hz is not None:
