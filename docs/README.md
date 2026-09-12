@@ -33,6 +33,7 @@ it* — see the contract below.
 | [2026-04_MINI_VS_HF_COMPARISON.md](analysis/2026-04_MINI_VS_HF_COMPARISON.md) | Airspy Mini vs HF+ at 3 km: SNR, noise floor, frequency stability |
 | [2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md) | Why the max-search SNR compresses front/back contrast; the fixed-offset amplitude estimator; the retrospective-lock design that was then implemented |
 | [2026-09_MULTIPATH_ANALYSIS_REVIEW.md](analysis/2026-09_MULTIPATH_ANALYSIS_REVIEW.md) | Re-analysis of the Apr-11 failures: noise detections, not multipath; corrected two-ray geometry |
+| [2026-09_SIMULATOR_E2E_SESSION.md](analysis/2026-09_SIMULATOR_E2E_SESSION.md) | Simulator end-to-end runs of the 8-heading implementation: results, fixes they prompted, how the rotation logs were read, open items — hand-off note |
 
 ## proposals/
 
@@ -50,6 +51,7 @@ See [proposals/README.md](proposals/README.md) for the status table.
 | Doc | Why archived |
 | --- | --- |
 | [MULTIPATH_ANALYSIS.md](archive/MULTIPATH_ANALYSIS.md) | Path-difference model wrong for a ground-level transmitter; superseded by the 2026-09 review |
+| [END_TO_END_8x20_SYSTEM.md](archive/END_TO_END_8x20_SYSTEM.md) | 8-heading listening-post design hand-off; implemented 2026-09-12, current behaviour is in `design/` |
 | [MIGRATION_FROM_MULTIREPO.md](archive/MIGRATION_FROM_MULTIREPO.md) | Historical note on the repos this monorepo replaced |
 
 ---

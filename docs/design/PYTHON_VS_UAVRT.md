@@ -78,24 +78,24 @@ Nearly identical algorithm:
 
 **Difference:** uavrt_detection builds a signal-exclusion mask in `findpulse` that removes detected pulse regions from the noise estimate. Python does not — strong pulses may slightly bias noise upward.
 
-## EVT Threshold
+## Detection threshold
 
 | Aspect | Python | uavrt_detection (`threshold.m`) |
 |--------|--------|----------------------------------|
-| Monte Carlo trials | 100 | 100 |
-| Noise generation | Unit-variance complex Gaussian | `wgn(nSamps, trials, P, 'linear', 'complex')` at 1W/bin |
-| Pipeline | Full STFT → W^H → power → fold → max per trial | Full STFT → `abs(W' * S)² * IR * Wq` → max per trial |
+| Null samples | `--null-permutations` (40) window permutations of the slice's own spectrogram | 100 Monte Carlo trials |
+| Noise model | The received noise itself (level, colour, tail shape, direction) | `wgn(nSamps, trials, P, 'linear', 'complex')` at 1W/bin |
+| Pipeline | Identical fold search re-run on permuted windows, max per permutation | Full STFT → `abs(W' * S)² * IR * Wq` → max per trial |
 | Distribution | `gumbel_r.fit(max_scores)` → `gumbel_r.ppf(1-pf)` | `evfit(-scores)` → `fzero(1 - exp(-exp(...)) - pf)` |
 | Per-bin scaling | `threshold[f] = base_threshold × noise_power[f]` | `interp1(powGrid, threshGrid, freqBinPow)` |
-| Cache key | `N-Nb-H-K-Trials` | `N-M-J-K-Trials` |
-| Recompute trigger | `n_freq` or `n_time` change | `N`, `M`, `J`, or `K` change |
-| Detection margin | `base_threshold *= 0.90` (configurable) | None — raw EVT threshold used |
+| Tag self-inflation | Windows of a detected train are redrawn and the null re-derived | n/a (synthetic noise) |
+| Cache | None — recomputed every cycle | Keyed on `N-M-J-K-Trials` |
+| Detection margin | `base_threshold *= detection_margin` (default 1.0) | None — raw EVT threshold used |
 
-Both fit Gumbel distributions to Monte Carlo max-scores. Python normalises each trial by its own median noise, then multiplies by per-bin noise at runtime. uavrt_detection generates at a known power and interpolates linearly.
+Both fit a Gumbel to a set of maxima. uavrt_detection generates synthetic Gaussian noise at a known power and interpolates; Python's null comes from the dwell being tested, so it tracks non-Gaussian and directional field noise that a Gaussian model cannot.
 
-The Python detector applies a `detection_margin` (default 0.90) multiplier to lower the threshold by 10%, increasing sensitivity at the cost of more marginal detections. uavrt_detection has no equivalent.
+The Python detector's `detection_margin` (default 1.0) is a plain multiplier kept for experiments; below 1.0 it admits more marginal detections at a higher false-alarm rate. uavrt_detection has no equivalent.
 
-Python includes the multi-hypothesis bank in EVT calibration when `--tip-secondary` is active, correctly accounting for the expanded search space.
+Python re-runs the full multi-hypothesis bank inside the null when `--tip-secondary` is active, so the expanded search space is accounted for.
 
 ## Detection Decision
 
@@ -105,7 +105,7 @@ Python includes the multi-hypothesis bank in EVT calibration when `--tip-seconda
 | Sidelobe suppression | Proximity merge: `max(15, nfft//4)` bins | Full peeling: slope analysis, time-correlation, sideband masking, iterative removal |
 | Max detections per cycle | 1 (top score) | All peaks found by peeling, ranked by `selectpeakindex` |
 | Detection status values | 0=sub, 1=super, 2=confirmed, 3=no-detection | `det_dec` (bool), `con_dec` (bool) |
-| Detection margin | 0.90× applied to threshold (configurable) | None |
+| Detection margin | `detection_margin`× applied to threshold (default 1.0) | None |
 | No-detection reports | Sent with `detection_status=3` + noise PSD | **Not sent** — silence when nothing found |
 
 **Key difference:** uavrt_detection's peeling algorithm can resolve multiple overlapping frequencies in a single cycle. Python reports only the single best detection and merges nearby peaks.
@@ -147,7 +147,7 @@ Python has no equivalent — every cycle is a full discovery search. This means 
 
 With two independent single-rate processes, neither can align all K pulses during the segment in which the tag switches rates. Each process folds at its own fixed PRI, so pulses that arrived at the *other* rate land on noise windows instead of signal. The fold score's signal component drops from $K \cdot P_\text{signal}$ to $c \cdot P_\text{signal}$ (or $(K-c) \cdot P_\text{signal}$), where $c$ is the number of gaps at that process's rate.
 
-The EVT threshold is calibrated for the full K-fold noise distribution and does not change, so the effective SNR loss relative to a steady-rate segment is:
+The detection threshold is calibrated for the full K-fold noise distribution and does not change, so the effective SNR loss relative to a steady-rate segment is:
 
 $$\Delta\text{SNR} = 10\log_{10}\!\bigl(c / K\bigr) \quad \text{dB}$$
 
@@ -219,7 +219,7 @@ Python resets more aggressively on gaps (30 ms vs 1.0 s for zero-fill threshold)
 | `--port` | 10000 | HF: 10000, Mini: 20000+ |
 | `--k` | 5 | `tagInfo.k` (validated ≥ 2) |
 | `--pf` | 0.05 | `false_alarm_probability` |
-| `--detection-margin` | 0.90 | `startDetection.detection_margin` |
+| `--detection-margin` | 1.0 | `startDetection.detection_margin` |
 | `--confidence-ratio` | 1.3 | `startDetection.confidence_ratio` |
 | `--tip-secondary` | None | `intra_pulse2_msecs / 1000` (if ≠ 0) |
 | `--tag-id` | 0 | `tagInfo.id` |
@@ -253,7 +253,7 @@ Python resets more aggressively on gaps (30 ms vs 1.0 s for zero-fill threshold)
 
 5. **Multi-frequency:** uavrt's peeling algorithm resolves overlapping frequencies. Python reports only the top-1 detection per cycle.
 
-6. **Detection margin:** Python applies 0.90× threshold reduction. uavrt uses raw EVT threshold.
+6. **Threshold null:** Python derives the threshold from each dwell's own permuted spectrogram, so it tracks real field noise; uavrt uses a synthetic-Gaussian EVT threshold. Python's `detection_margin` (default 1.0) is a plain multiplier on top.
 
 7. **No-detection reports:** Python sends `detection_status=3` every cycle with noise floor. uavrt is silent when nothing is detected. This gives operators better situational awareness with the Python detector.
 

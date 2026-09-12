@@ -483,9 +483,11 @@ class TestPersistentRotationSession:
 
     def test_nan_bearing_distinguishes_no_detections_from_floor(self, tmp_path):
         (tmp_path / 'bearing_result.log').write_text(
-            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude\n'
-            '3,nan,0.000,0,-1000000000.0,0,0\n'   # detector never saw a pulse
-            '4,nan,0.050,1,9.0,0,0\n')            # one detection, fit below floor
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed,heard\n'
+            '3,nan,0.000,0,-1000000000.0,0,0\n'   # detector never saw a pulse (old 7-column row)
+            '4,nan,0.050,1,9.0,0,0,1,0,1\n'       # one sighting, fit below floor
+            '5,nan,0,3,20.7,0,0,0,0,1\n')         # no lock; sub-lock hits agree in frequency
         md = generate_report(str(tmp_path))
-        assert '| 3 | none (no detections) |' in md
-        assert '| 4 | none (below confidence floor) |' in md
+        assert '| 3 | none (nothing heard) |' in md
+        assert '| 4 | none (heard, below confidence floor) |' in md
+        assert '| 5 | none (heard, no lock) |' in md

@@ -12,8 +12,8 @@ The detector uses a layered threshold system. Each layer serves a distinct role:
 
 | Layer | Parameter | Default | Purpose |
 |-------|-----------|---------|---------|
-| 1 | `false_alarm_prob` (pf) | 0.05 | Sets the fundamental noise-floor threshold via EVT |
-| 2 | `detection_margin` | 0.90 | Lowers the threshold to increase sensitivity |
+| 1 | `false_alarm_prob` (pf) | 0.05 | Sets the noise-floor threshold from a per-dwell permutation null |
+| 2 | `detection_margin` | 1.00 | Optional multiplier on that threshold (< 1 trades false alarms for range) |
 | 3 | `confidence_ratio` | 1.30 | Classifies detections as HIGH or LOW confidence |
 | 3 | `DOMINANT_FOLD_THRESHOLD` | 0.80 | Downgrades to LOW when one fold carries most of the score |
 
@@ -23,11 +23,12 @@ The detector uses a layered threshold system. Each layer serves a distinct role:
                false_alarm_prob
                      │
             ┌────────▼────────┐
-            │  EVT threshold  │  Gumbel quantile from Monte Carlo
+            │ Permutation null│  Gumbel quantile of this dwell's own
+            │   threshold     │  window-permuted fold maxima
             └────────┬────────┘
                      │
             ┌────────▼────────┐
-            │ × detection_    │  0.90 → lower threshold by 10%
+            │ × detection_    │  1.0 by default (no change)
             │   margin        │
             └────────┬────────┘
                      │
@@ -53,18 +54,19 @@ The detector uses a layered threshold system. Each layer serves a distinct role:
 
 ---
 
-## Layer 1: EVT threshold from `false_alarm_prob`
+## Layer 1: threshold from `false_alarm_prob`
 
-The detector generates a per-frequency-bin detection threshold using Extreme Value
-Theory (EVT). This calibrates the threshold to the noise statistics of the actual
-STFT pipeline rather than relying on analytic assumptions.
+The detector derives a per-frequency-bin detection threshold from each dwell's
+own spectrogram (see [DETECTOR_PIPELINE.md §6](DETECTOR_PIPELINE.md)). This
+calibrates the threshold to the noise actually present on that heading —
+level, colour, tail shape and directional interference — rather than to a
+Gaussian model.
 
 **How it works:**
 
-1. Run 100 Monte Carlo trials of pure complex Gaussian noise through the full
-   STFT detection pipeline (same window size, overlap, fold structure, and
-   Toeplitz W matrix as real data).
-2. Collect the maximum detection score from each trial.
+1. Randomly permute the STFT time windows of the slice and re-run the identical
+   fold search; repeat `--null-permutations` (40) times.
+2. Collect the maximum normalised fold score from each permutation.
 3. Fit a Gumbel distribution (extreme value Type I) to these maxima.
 4. Set the threshold at the `(1 - pf)` quantile:
 
@@ -72,6 +74,10 @@ STFT pipeline rather than relying on analytic assumptions.
 loc, scale = gumbel_r.fit(max_scores)
 threshold = gumbel_r.ppf(1.0 - pf, loc=loc, scale=scale)
 ```
+
+If a real pulse train clears this first threshold, its windows are redrawn
+from the rest of the slice and the null is re-derived so the tag does not
+inflate the threshold it is scored against.
 
 **Effect of `pf`:**
 
@@ -81,31 +87,25 @@ threshold = gumbel_r.ppf(1.0 - pf, loc=loc, scale=scale)
 | 0.01 | 99th     | Moderate  | Moderate    | Moderate         |
 | 0.001 | 99.9th  | Higher    | Lower       | Lower            |
 
-The EVT threshold is computed once at startup and cached. It depends on `K`,
-`n_w`, `n_ol`, `nfft`, and the fold structure — but NOT on incoming signal data.
+The threshold is recomputed every cycle and never cached; it depends on the
+incoming data as well as on `K`, `n_w`, `n_ol`, `nfft` and the fold structure.
 
 ---
 
-## Layer 2: `detection_margin` lowers the threshold
+## Layer 2: `detection_margin` scales the threshold
 
-After the EVT threshold is computed, `detection_margin` scales it down:
+After the threshold is computed, `detection_margin` multiplies it:
 
 ```python
-base_threshold *= detection_margin   # e.g., 0.90
+base_threshold *= detection_margin   # 1.0 by default
 ```
 
-A margin of 0.90 drops the threshold by 10%. This deliberately allows more
-detections through — including marginal ones near the noise floor that would
-otherwise be missed. The rationale:
-
-- At long range, real tag signals may only barely exceed the EVT threshold.
-- Lowering the threshold captures these weak detections.
-- The two-tier confidence system (Layer 3) then sorts marginal detections
-  from confident ones.
-
-**Without `detection_margin`**, a score_ratio of 1.0 means the signal exactly
-matched the noise-calibrated threshold. With `margin=0.90`, signals that would
-have scored 0.90–1.00 now score above 1.0 and appear as detections.
+Because the null is derived from the dwell's own noise, `score_ratio = 1.0`
+already means "at the `pf` false-alarm point", so the default margin is 1.0.
+A margin below 1.0 deliberately admits more marginal detections near the
+floor at a correspondingly higher false-alarm rate; the two-tier confidence
+system (Layer 3) then sorts marginal detections from confident ones. The
+setting is kept for experiments, not tuned against any one site's noise.
 
 ---
 

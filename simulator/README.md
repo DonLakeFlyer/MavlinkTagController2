@@ -54,23 +54,34 @@ configured** from the GCS.
 When the controller runs `--simulator <level>` **and a tag is configured**, the
 tag's own frequency, `tp`, `tip` (and secondary rate) come from the GCS and the
 level only sets its SNR. SNR is specified at the 768 kHz simulator output; the
-200× decimator adds ~23 dB of processing gain before the detector. Levels are
-calibrated against the detector's default `--lock-score-ratio` of 3.0
-(`detector/pulse_detector.py`) at K=20; the level SNRs themselves are set in
-`controller/main.cpp`:
+200× decimator adds ~23 dB of processing gain before the detector. The level
+SNRs are set in `controller/main.cpp` and were chosen around the detector's
+`--lock-score-ratio` of 3.0 at K=20; the per-dwell permutation-null threshold
+(see [DETECTOR_PIPELINE.md](../docs/design/DETECTOR_PIPELINE.md)) moves the
+exact `score_ratio` each level produces, so treat the behaviours below as the
+intent to verify, not a guarantee.
 
-| Level | Simulator SNR | ≈ Detector SNR | Tag bearing | Interferer | Expected behaviour |
-|---|---|---|---|---|---|
-| `strong` (default) | 20 dB | 43 dB | `--sim-tx-bearing-deg` (0) | — | Locks on the first cycle |
-| `marginal` | −21 dB | 2 dB | 0 | — | Locks, but is sighted on one heading only, so `FinishCollection` requests a revisit slice |
-| `below-marginal` | −33 dB | −10 dB | 0 | — | Never locks; every heading reports no-detection |
-| `competing` | −18 dB | 5 dB | 135 | flat −18 dB tone at tag +1 kHz (`kSimulatorInterfererOffsetHz`, heading-independent) | Interferer takes the provisional lock on heading 0; the tag is below threshold there and is admitted near 135° as an alternate candidate; earlier headings are retro-measured and the candidate selection at finish must pick the tag |
+The simulated transmitter sits at bearing 135° by default for every level
+(`--sim-tx-bearing-deg` overrides). With TagTracker's clockwise sweep from 0°
+that is the fourth heading, so the first three headings are always measured
+retrospectively once a lock exists.
+
+| Level | Simulator SNR | ≈ Detector SNR | Interferer | Expected outcome |
+|---|---|---|---|---|
+| `strong` (default) | 20 dB | 43 dB | — | Locks on the first heading that sees the tag (0° is 45° off-axis, still tens of dB up); sighted on every heading → **confirmed**, sector 3, bearing ≈ 135°. Bench level: the tag is 50–70 dB over noise, so its spectral sidelobe images are admitted as extra candidates (issue #148) |
+| `moderate` | −8 dB | 15 dB | — | Long-range realistic level: sighted on every heading (deepest pattern null still ≈ 20 dB over noise) → **confirmed**, bearing ≈ 135°, with a single candidate and no sidelobe images |
+| `marginal` | −27 dB | −4 dB | — | Sighted on one heading only (135°, `score_ratio` ≈ 5 against the lock ratio 3; ±45° ≈ 2, below it); `FINISH_COLLECTION` gets `COLLECTION_STATUS_REVISIT_REQUESTED`, the GCS flies that heading again, then **confirmed** if the revisit sights it, otherwise **unconfirmed**. (−21 dB gave three sightings and a confirm without a revisit) |
+| `below-marginal` | −33 dB | −10 dB | — | Never locks (best `score_ratio` ≈ 1.6 at 135°, under the lock ratio 3) but the tag's bin clears the `pf` threshold on the two or three headings nearest 135°. No bearing is fitted from such hits; because they agree in frequency the result is **heard, no bearing** (`bearing_deg` NaN, `n_valid_slices` > 0) |
+| `silent` | no tag | — | — | Runs the `noise-only` preset whatever tags are configured. Expect no lock, `mu` ≈ 68 with `refined: false` on every heading, at most a few scattered `pf` hits (≈ 0.4 per rotation), and **nothing heard** (`bearing_deg` NaN, `n_valid_slices` 0). Two noise hits in one bin would wrongly read as *heard*; that is ~1e-3 per rotation |
+| `competing` | −18 dB | 5 dB | flat −18 dB tone at tag +1 kHz (`kSimulatorInterfererOffsetHz`, heading-independent) | Interferer takes the provisional lock (candidate 0) on the first heading; the tag is admitted as an alternate near 135°; every buffered heading is measured at both; the finish-time fit must select the tag (pattern-shaped) over the interferer (flat) |
 
 Any other word after `--simulator` is treated as a preset name. `strong` is
 both a level (20 dB) and a preset (25 dB); which applies depends on whether a
 tag is configured. `--sim-tx-bearing-deg`, `--sim-antenna` and `--sim-pri-ppm`
 modify the configured tag under any level (see
-[controller/README.md](../controller/README.md#usage)).
+[controller/README.md](../controller/README.md#usage)). Lock mechanics
+(candidate bank, sightings, revisit) are described in
+[COLLECTION_FLOW.md](../docs/design/COLLECTION_FLOW.md).
 
 ## Simulator options
 

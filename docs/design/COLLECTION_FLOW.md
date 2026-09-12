@@ -41,11 +41,13 @@ stateDiagram-v2
     Starting --> Ready : every detector READY (30 s timeout, else COLLECTION_STATUS_FAILED)
 
     state "Per heading" as Heading {
-        [*] --> Yawing : GCS yaws aircraft to heading N
+        [*] --> Yawing : GCS yaws aircraft to heading N (clockwise sweep, 45° steps at 8 slices)
         Yawing --> Arming : GCS START_COLLECTION_SLICE(slice N, heading_deg)
         Arming --> Dwelling : controller sends ARM(heading) to every detector, all reply ARMED
-        Dwelling --> Folding : K·PRI of IQ accumulated (about 40 s at K=20, tip 2 s)
-        Folding --> Reporting : full-K fold search, up to 4 frequency-separated peaks
+        Dwelling --> Blanking : K·PRI of IQ accumulated (about 40 s at K=20, tip 2 s)
+        Blanking --> Folding : optional impulse blanking (--impulse-blank-factor), then STFT
+        Folding --> Thresholding : full-K fold search over the acquisition band
+        Thresholding --> Reporting : permutation null of this dwell's own windows gives the threshold at pf, re-derived without a detected train's windows. Up to 4 frequency-separated peaks
         state Reporting {
             [*] --> Acq : pulse_lock is None
             [*] --> Locked : pulse_lock set
@@ -66,13 +68,17 @@ stateDiagram-v2
             New and bank < 4 → admitted, retro-measured on all earlier headings.
             New and bank full → dropped. Below 3.0 → not reported after lock.
         end note
+        note right of Thresholding
+            No cache: threshold is per dwell, per heading.
+            cycle_threshold record: mu, sigma, n_perm, refined, blanked_fraction, null_ms.
+        end note
     }
 
     Ready --> Heading : next heading
     Heading --> Ready : controller stores (tag, candidate, slice) results, refits, may switch live candidate and replay its slices
     Ready --> Finishing : GCS FINISH_COLLECTION
     Finishing --> Heading : winner sighted on one heading only → COLLECTION_STATUS_REVISIT_REQUESTED(revisit_heading_deg), at most once
-    Finishing --> [*] : fit antenna pattern to every candidate, BEARING_RESULT per tag (NaN if below confidenceFloor), detectors torn down
+    Finishing --> [*] : weighted pattern fit of every candidate, w = (median noise_psd / noise_psd)². BEARING_RESULT per tag, NaN if below confidenceFloor, confirmed = sighted on ≥ 2 headings. GCS shows confirmed / unconfirmed / nothing heard + sector. Detectors torn down
     Ready --> [*] : GCS cancel → COLLECTION_STATUS_STOPPED
 ```
 
@@ -91,8 +97,10 @@ still found. Constants:
 | Symbol | Value | Meaning |
 | --- | --- | --- |
 | `--k` | per tag, from the GCS (`tagInfo.k`; TagTracker default 20) | Folds per cycle; one cycle ≈ K × PRI |
-| `ACQUISITION_SEARCH_HZ` | 2000 | Fold search is masked to ±2 kHz around the entered tag offset (`args.freq − center_freq`) |
-| `--detection-margin` | 0.90 | Multiplies the EVT threshold down |
+| `USABLE_BAND_FRACTION` | 0.9 | Fold search never enters the decimator's transition band: bins beyond 0.9 × fs/2 (±1728 Hz) are masked out |
+| `ACQUISITION_SEARCH_HZ` | 2000 | Fold search is further masked to ±2 kHz around the entered tag offset (`args.freq − center_freq`) |
+| `--detection-margin` | 1.0 | Multiplies the per-dwell permutation-null threshold (DETECTOR_PIPELINE.md §6); 1.0 = the threshold is `pf` |
+| `--null-permutations` | 40 | Window permutations per cycle for the null |
 | `--confidence-ratio` | 1.3 | `score_ratio` at or above → HIGH (`detection_status` 1), else LOW (0); subject to the dominant-fold gate below |
 | `DOMINANT_FOLD_THRESHOLD` | 0.8 | `max_fold_fraction` above → LOW, and ineligible for lock |
 | `max_detections` | `MAX_LOCK_CANDIDATES` during a collection, else 1 | Extra peaks feed the candidate bank only; the acquisition report is always the single strongest |
@@ -133,12 +141,16 @@ After the fold search, every peak that satisfies all of
 is offered to the candidate bank (`admit_lock_candidate`), strongest first.
 Two candidates are *the same* (`locks_agree`) when frequency is within
 `LOCKED_SEARCH_HZ` = 200 Hz, PRI within one STFT step (`n_ws / fs`), and phase
-within `max(n_ws / fs, pri_ppm_uncertainty × |Δt|)` modulo the PRI.
+within `max(LOCK_PHASE_TOLERANCE_STEPS × n_ws / fs, pri_ppm_uncertainty × |Δt|)`
+modulo the PRI. The floor is two steps: a fresh fold anchor is a window index
+(rounded, and up to one window early from local-max pooling) while the banked
+anchor has been refit to a fraction of a step, so the same train can differ
+by ~1.5 steps.
 
 | Bank state | Agreeing entry exists | No agreeing entry, bank not full | Bank full |
 | --- | --- | --- | --- |
 | Before lock | `merged` (entry replaced by the combined lock, PRI refined from elapsed cycles) | `admitted` | `replaced` — weakest evicted if the newcomer is stronger, else `dropped` |
-| After lock | `seen` (sighting recorded; entry untouched) | `admitted` (append) | `dropped` |
+| After lock | `seen` (sighting recorded; entry untouched) | `reanchored` if an entry has the same frequency and PRI but its projected phase missed (entry's anchor moved to this sighting, sighting recorded, every buffered slice re-measured at it); otherwise `admitted` (append) | `dropped` |
 
 `MAX_LOCK_CANDIDATES` = 4. **The first cycle that has any qualifying candidate
 locks immediately**: the strongest is moved to index 0 (`promote_to_lock`) and
@@ -152,6 +164,7 @@ candidate) are kept in lockstep with the bank.
 | Strongest fold peak on a later heading | Outcome |
 | --- | --- |
 | Agrees with a banked candidate (±200 Hz, same PRI, phase within tolerance) | Recorded as a *sighting* of that candidate; the heading is measured at the candidate's coordinates and reported with `score_ratio` = this peak's fold score ratio |
+| Same frequency and PRI as a banked candidate but phase outside tolerance | `reanchored`: one emitter cannot occupy one bin at one PRI twice, so the candidate's anchor is moved to this peak, the sighting is recorded against it, and every buffered heading is re-measured at the new timing (the next PRI refit starts from the new anchor). Seen on the 2026-09-12 `moderate` run when a two-dwell PRI fit was ~90 ppm off and the tag was re-admitted as a duplicate |
 | Different coordinates, `score_ratio ≥ 3.0`, no dominant fold, bank < 4 | `admitted` as candidate 1–3; measured on this **and every earlier** heading in the same cycle; competes at `FinishCollection` |
 | Different coordinates, `score_ratio ≥ 3.0`, bank already 4 | `dropped` — a `LOCK_CANDIDATE dropped` `.jsonl` entry only |
 | Different coordinates, `1.0 ≤ score_ratio < 3.0` (would have been a status 0/1 report before lock) | **Not reported.** Only the lock-coordinate measurement of that heading goes out. The peak is still in the `.jsonl` `DETECTION`/`FOLDS` entries for post-flight analysis |
@@ -176,8 +189,21 @@ Once `pulse_lock` is set, each cycle does, in order:
    existing ones get sightings.
 2. **PRI refit per candidate** — `fit_lock_timing` re-fits each candidate's
    PRI over *all* buffered slices, searching ±`PRI_FIT_SPAN_PPM` = 300 ppm in
-   `PRI_FIT_STEP_PPM` = 2 ppm steps around the nominal, and returns the plateau
-   centre with a `pri_ppm_uncertainty` half-width. If the refit would move any
+   `PRI_FIT_STEP_PPM` = 2 ppm steps around the nominal, jointly with the
+   anchor's offset over ±one STFT step (the anchor comes from a fold window
+   index, so it is quantised and may sit a window early; held fixed it would
+   tilt the PRI by hundreds of ppm over one dwell). It sums on-pulse
+   power over the four windows a pulse touches at 50 % overlap (half, full,
+   full, half) — wider than the two-window measurement footprint, because a
+   two-window sum over that symmetric response scores a whole-step alias of
+   the PRI as well as the truth. It returns the plateau centre with a
+   `pri_ppm_uncertainty` half-width that is never below what the fitted span
+   can resolve, `one STFT step / longest lever arm from the anchor` (≈ 250 ppm
+   after one dwell, ≈ 100 after two, ≈ 25 after eight); `locks_agree` scales
+   its phase tolerance by this, so a candidate is not re-admitted as a
+   duplicate because an early, loosely constrained fit was trusted too far. Hypotheses
+   that kept fewer than half the windows of the best-covered one (gaps,
+   segment edges) cannot win. If the refit would move any
    pulse onto a different STFT window on any buffered slice
    (`pri_refit_moves_pulses`), that candidate's id is removed from every
    slice's `measured` set so they are all re-measured and re-sent. A fit that
@@ -261,24 +287,60 @@ down on its own — the GCS decides whether to cancel.
    one more slice and finishes again. At most one revisit per collection
    (`_revisitRequested`); a FINISH retry before the slice is armed gets the
    same request again.
-2. **Fit** every candidate of every tag (`solveCandidates`): least squares of
-   `power(θ) = A·pattern(θ − φ) + B` in **linear power** (`group_snr`) against
-   the antenna table (`AntennaPatterns::byId`, 19 points 0–180° at 10°,
-   linearly interpolated, folded about 180°). `r_squared` is a composite
-   confidence (fit × angular span × degrees-of-freedom factors).
-3. **Select** per tag the candidate with the highest `r_squared`, tie-break on
-   `n_valid_slices`; it is `rejected` if `r_squared < confidenceFloor` (0.2
+2. **Fit** every candidate of every tag (`solveCandidates`): weighted least
+   squares of `power(θ) = A·pattern(θ − φ) + B` in **linear power**
+   (`signal_psd`) against the antenna table (`AntennaPatterns::byId`, 19 points
+   0–180° at 10°, linearly interpolated, folded about 180°). Each detected
+   heading is weighted by the inverse variance of its measurement, which for a
+   K-pulse noise-subtracted mean scales as `1 / noise_psd_i²`; weights are
+   expressed relative to the median heading, `w_i = (median noise_psd /
+   noise_psd_i)²`, so a heading with an invalid `noise_psd` gets weight 1 and K
+   (common to all slices) cancels. Headings near the floor therefore
+   inform the fit without dominating it. `r_squared` is a composite confidence
+   (weighted fit × angular span × degrees-of-freedom factors). Per-heading
+   residuals are kept on the result for diagnostics.
+3. **Select** per tag the candidate with the highest `r_squared`. Candidates
+   within `kCandidateConfidenceTolerance` = 0.05 of each other are not
+   separated by the fit (two candidates measuring the same pulses — a
+   duplicate lock, a sidelobe image — differ by well under 0.01 from noise
+   alone, a flat interferer against a pattern-shaped tag by tenths); among
+   those the one with more *sighted* slices wins, then more detected slices,
+   then higher `best_snr`. The selected candidate is `rejected` if
+   `r_squared < confidenceFloor` (0.2
    for both RA-2A and RA-23K).
-4. **Report** `BEARING_RESULT` per tag: `bearing_deg` (NaN if rejected or never
-   locked), `r_squared`, `n_valid_slices`, `best_snr`, `confirmed = !rejected
-   && n_sighted_slices ≥ kConfirmedSightings (2)`. If the selected candidate is
-   not the one the GCS was following live, its CONFIRMED slice reports are
-   replayed first.
+4. **Report** `BEARING_RESULT` per tag. Three outcomes share the existing
+   fields:
+   - *Bearing*: finite `bearing_deg`, `r_squared`, `n_valid_slices`,
+     `best_snr`, `confirmed = n_sighted_slices ≥ kConfirmedSightings (2)`.
+   - *Heard, no bearing*: `bearing_deg` NaN, `r_squared` 0, `n_valid_slices`
+     > 0. Either the selected lock fell below the confidence floor, or the
+     tag **never locked** and its acquisition hits (`score_ratio` 1–3,
+     `detection_status` 0/1) agree in frequency: at least
+     `kHeardMinAgreeingHits` = 2 within `kHeardFrequencyToleranceHz` = 200 Hz
+     of one another. Acquisition hits alone never produce a bearing: each is
+     inside the per-heading false-alarm rate and three of them near threshold
+     do not constrain the pattern fit (2026-09-12 `below-marginal` run: 117°
+     for a tag at 135°). Two in one bin on different headings is ~1e-3 per
+     rotation from noise, so agreement in frequency is what separates "heard"
+     from "nothing".
+   - *Nothing heard*: `bearing_deg` NaN, `n_valid_slices` 0, `best_snr` 0 —
+     no detections, or scattered acquisition hits that do not agree.
+   If the selected candidate is not the one the GCS was following live, its
+   CONFIRMED slice reports are replayed first.
 5. **Log** `bearing_result.log`
-   (`tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed`)
+   (`tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed,heard`)
    and `bearing_candidates.log`
-   (`tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected,n_sighted_slices`)
+   (`tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected,n_sighted_slices,residuals`;
+   `residuals` is `;`-separated `heading:residual:weight` per detected heading,
+   residual = `measured − fitted` power)
    in the rotation directory.
+
+On the GCS the finite/NaN bearing, `n_valid_slices` and `confirmed` flag
+become one of four operator-facing states — *confirmed*, *unconfirmed* (lock
+seen on one heading only), *heard, no bearing* (NaN with `n_valid_slices` > 0),
+*nothing heard* (NaN with `n_valid_slices` = 0) — plus the 45° rose sector the
+bearing falls in; the sector is derived from `bearing_deg` and the flown slice
+count, nothing extra is carried on the wire.
 
 ## Log artifacts per collection
 
@@ -297,7 +359,7 @@ file is open when the detector exits.
 
 ## Related
 
-- [DETECTOR_PIPELINE.md](DETECTOR_PIPELINE.md) — the per-cycle STFT / fold / EVT processing
+- [DETECTOR_PIPELINE.md](DETECTOR_PIPELINE.md) — the per-cycle STFT / fold / threshold processing
 - [CONFIDENCE_PIPELINE.md](CONFIDENCE_PIPELINE.md) — HIGH/LOW classification
 - [shared/README.md](../../shared/README.md#ttdp-detector-protocol) — TTDP message layout
 - [2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](../analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md) — why the fixed-offset amplitude and retrospective lock exist

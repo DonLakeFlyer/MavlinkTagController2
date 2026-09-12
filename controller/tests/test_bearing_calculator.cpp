@@ -549,6 +549,197 @@ static void testBearing_16slices() {
                 results[0].bearing_deg, results[0].r_squared);
 }
 
+// ── Test: weights are inverse-variance in noise_psd, 1 when unknown ─────
+static void testSliceWeights() {
+    using S = BearingCalculator::SliceData;
+    // No usable noise anywhere: unweighted.
+    std::vector<S> none = {
+        {0.0f, 1.0, 1, 0.0, true, 0, false, 0.0},
+        {45.0f, 1.0, 1, 0.0, true, 0, false, std::numeric_limits<double>::quiet_NaN()},
+    };
+    for (double w : BearingCalculator::sliceWeights(none)) CHECK(w == 1.0);
+
+    // Reference is the median noise; a heading with 10x the noise gets 1/100
+    // of the weight, an unknown one gets 1.
+    std::vector<S> mixed = {
+        {0.0f, 1.0, 1, 0.0, true, 0, false, 1e-9},
+        {45.0f, 1.0, 1, 0.0, true, 0, false, 1e-9},
+        {90.0f, 1.0, 1, 0.0, true, 0, false, 1e-8},
+        {135.0f, 0.0, 1, 0.0, false, 0, false, 0.0},
+    };
+    auto w = BearingCalculator::sliceWeights(mixed);
+    CHECK(w.size() == 4);
+    CHECK(std::fabs(w[0] - 1.0) < 1e-12);
+    CHECK(std::fabs(w[1] - 1.0) < 1e-12);
+    CHECK(std::fabs(w[2] - 0.01) < 1e-12);
+    CHECK(w[3] == 1.0);
+    std::printf("PASS: testSliceWeights\n");
+}
+
+// ── Test: equal noise on every heading reproduces the unweighted fit ────
+static void testWeightedFitMatchesUnweightedForEqualNoise() {
+    for (const AntennaPattern* pattern : {&AntennaPatterns::ra2a(), &AntennaPatterns::ra23k()}) {
+        BearingCalculator plain(*pattern), weighted(*pattern);
+        auto slices = generateSlices(200.0f, 30.0, 5.0, 8, *pattern);
+        for (size_t i = 0; i < slices.size(); ++i) {
+            const double perturbed = slices[i].second * (i % 2 ? 1.1 : 0.9);
+            plain.addSlice(slices[i].first, perturbed, 4, 0.0);
+            weighted.addSlice(slices[i].first, perturbed, 4, 0.0, 0, false, 3.3e-9);
+        }
+        auto a = plain.solve();
+        auto b = weighted.solve();
+        CHECK(a.size() == 1 && b.size() == 1);
+        CHECK(std::fabs(a[0].bearing_deg - b[0].bearing_deg) < 1e-3f);
+        CHECK(std::fabs(a[0].r_squared - b[0].r_squared) < 1e-5f);
+        CHECK(b[0].residuals.size() == 8);
+        for (const auto& r : b[0].residuals) CHECK(std::fabs(r.weight - 1.0) < 1e-12);
+    }
+    std::printf("PASS: testWeightedFitMatchesUnweightedForEqualNoise\n");
+}
+
+// ── Test: a heading with a much higher noise floor cannot pull the bearing ─
+static void testNoisyHeadingIsDownWeighted() {
+    for (const AntennaPattern* pattern : {&AntennaPatterns::ra2a(), &AntennaPatterns::ra23k()}) {
+        const float trueBearing = 45.0f;
+        auto slices = generateSlices(trueBearing, 30.0, 0.0, 8, *pattern);
+        // Corrupt the back-lobe heading (225 deg) with a large positive error,
+        // as a directional noise source pointed at would produce, and flag
+        // that heading with 10x the noise.
+        BearingCalculator plain(*pattern), weighted(*pattern);
+        plain.setConfidenceFloor(0.0f);
+        weighted.setConfidenceFloor(0.0f);
+        for (const auto& [hdg, power] : slices) {
+            const bool noisy = hdg == 225.0f;
+            const double measured = noisy ? power + 15.0 : power;
+            plain.addSlice(hdg, measured, 5, 0.0);
+            weighted.addSlice(hdg, measured, 5, 0.0, 0, false, noisy ? 1e-8 : 1e-9);
+        }
+        auto a = plain.solve();
+        auto b = weighted.solve();
+        CHECK(a.size() == 1 && b.size() == 1);
+        assertNear(b[0].bearing_deg, trueBearing, kBearingToleranceDeg, "weighted bearing with one noisy heading");
+        // The weighted fit explains the trusted headings better.
+        CHECK(b[0].r_squared > a[0].r_squared);
+        // The noisy heading carries the large residual, at low weight.
+        const BearingCalculator::Residual* noisyRes = nullptr;
+        for (const auto& r : b[0].residuals) {
+            if (r.heading_deg == 225.0f) noisyRes = &r;
+        }
+        CHECK(noisyRes != nullptr);
+        CHECK(noisyRes->residual > 5.0);
+        CHECK(std::fabs(noisyRes->weight - 0.01) < 1e-12);
+        std::printf("PASS: testNoisyHeadingIsDownWeighted (%s: plain=%.1f R²=%.3f  weighted=%.1f R²=%.3f)\n",
+                    pattern->name, a[0].bearing_deg, a[0].r_squared, b[0].bearing_deg, b[0].r_squared);
+    }
+}
+
+// ── Test: residuals are reported per detected heading, in order, and sum ~0 for a perfect fit ─
+static void testResidualsPerDetectedHeading() {
+    BearingCalculator calc;
+    auto slices = generateSlices(90.0f, 30.0, 5.0, 8);
+    for (const auto& [hdg, power] : slices) {
+        calc.addSlice(hdg, power, 6, 0.0, 0, false, 2e-9);
+    }
+    calc.addNoDetection(270.0f, 6, 2e-9);   // censored: not in residuals
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(results[0].residuals.size() == 8);
+    for (size_t i = 0; i < 8; ++i) {
+        CHECK(results[0].residuals[i].heading_deg == slices[i].first);
+        CHECK(std::fabs(results[0].residuals[i].residual) < 1.0);
+    }
+    std::printf("PASS: testResidualsPerDetectedHeading\n");
+}
+
+// ── Test: the confirmed rule the controller applies to BearingResult_t ──
+// confirmed = !rejected && n_sighted_slices >= 2. A finite bearing with one
+// sighting is reported, but only as unconfirmed, and is the revisit case.
+static void testConfirmationRuleInputs() {
+    for (const AntennaPattern* pattern : {&AntennaPatterns::ra2a(), &AntennaPatterns::ra23k()}) {
+        BearingCalculator calc(*pattern);
+        auto slices = generateSlices(45.0f, 30.0, 5.0, 8, *pattern);
+        for (const auto& [hdg, power] : slices) {
+            calc.addSlice(hdg, power, 2, 0.0, 0, hdg == 45.0f, 1e-9);
+        }
+        auto results = calc.solve();
+        CHECK(results.size() == 1);
+        CHECK(!results[0].rejected && std::isfinite(results[0].bearing_deg));
+        CHECK(results[0].n_sighted_slices == 1);
+        auto revisit = BearingCalculator::revisitHeadingFor(results);
+        CHECK(revisit.has_value());
+        assertNear(*revisit, 45.0f, kBearingToleranceDeg, "revisit heading for a single sighting");
+
+        BearingCalculator twice(*pattern);
+        for (const auto& [hdg, power] : slices) {
+            twice.addSlice(hdg, power, 2, 0.0, 0, hdg == 45.0f || hdg == 90.0f, 1e-9);
+        }
+        auto confirmed = twice.solve();
+        CHECK(confirmed.size() == 1 && confirmed[0].n_sighted_slices == 2);
+        CHECK(!BearingCalculator::revisitHeadingFor(confirmed).has_value());
+    }
+    std::printf("PASS: testConfirmationRuleInputs\n");
+}
+
+// ── Test: a duplicate of the tag must not win on a hair of confidence ──
+// 2026-09-12 moderate run: the detector re-admitted the tag's own train as
+// candidate 1 after a phase miss. Both candidates measured the same pulses
+// (identical power ± measurement noise), so their confidences differed only
+// by noise, and the duplicate — sighted once — won on r² and triggered a
+// revisit. Confidences that close must be decided by sightings.
+static void testDuplicateCandidateLosesToSightings() {
+    BearingCalculator calc;
+    auto slices = generateSlices(135.0f, 30.0, 2.0, 8);
+    for (size_t i = 0; i < slices.size(); ++i) {
+        const auto& [hdg, power] = slices[i];
+        // Candidate 0: the tag, sighted on every heading.
+        calc.addSlice(hdg, power * (1.0 + ((i % 2) ? 0.01 : -0.01)), 2, 40.0, 0, true, 1e-9);
+        // Candidate 1: same pulses, slightly different noise realisation, one sighting.
+        calc.addSlice(hdg, power * (1.0 + ((i % 2) ? -0.01 : 0.01)), 2, 40.0, 1, hdg == 90.0f, 1e-9);
+    }
+    auto candidates = calc.solveCandidates();
+    CHECK(candidates.size() == 2);
+    CHECK(std::fabs(candidates[0].r_squared - candidates[1].r_squared) < 0.05f);
+
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(results[0].candidate_id == 0);
+    CHECK(results[0].n_sighted_slices == 8);
+    CHECK(!BearingCalculator::revisitHeadingFor(results).has_value());
+    std::printf("PASS: testDuplicateCandidateLosesToSightings\n");
+}
+
+// ── Test: a clearly better fit still wins regardless of sightings ──
+static void testClearlyBetterFitWinsOverSightings() {
+    BearingCalculator calc;
+    const double flat[8] = {3.1, 2.7, 3.4, 2.9, 3.3, 2.6, 3.0, 3.2};
+    auto slices = generateSlices(225.0f, 30.0, 2.0, 8);
+    for (size_t i = 0; i < slices.size(); ++i) {
+        const auto& [hdg, power] = slices[i];
+        calc.addSlice(hdg, flat[i], 2, 3.0, 0, true, 1e-9);     // interferer, sighted everywhere
+        calc.addSlice(hdg, power, 2, 9.0, 1, hdg == 225.0f, 1e-9); // tag, one sighting
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    CHECK(results[0].candidate_id == 1);
+    assertNear(results[0].bearing_deg, 225.0f, kBearingToleranceDeg, "pattern-shaped candidate");
+    std::printf("PASS: testClearlyBetterFitWinsOverSightings\n");
+}
+
+// ── Test: sub-lock hits count as "heard" only when they share a bin ──
+static void testLargestFrequencyCluster() {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(BearingCalculator::largestFrequencyCluster({}, 200.0) == 0);
+    CHECK(BearingCalculator::largestFrequencyCluster({0.0}, 200.0) == 1);
+    // 2026-09-12 below-marginal run: hits at 0, 0, +33 Hz on three headings.
+    CHECK(BearingCalculator::largestFrequencyCluster({0.0, 0.0, 33.1}, 200.0) == 3);
+    // Noise: scattered across the band.
+    CHECK(BearingCalculator::largestFrequencyCluster({-1200.0, 300.0, 1500.0}, 200.0) == 1);
+    // Two agree, one does not.
+    CHECK(BearingCalculator::largestFrequencyCluster({-993.0, -1000.0, 700.0}, 200.0) == 2);
+    CHECK(BearingCalculator::largestFrequencyCluster({nan, 0.0, 10.0}, 200.0) == 2);
+    std::printf("PASS: testLargestFrequencyCluster\n");
+}
+
 int main() {
     testEmpty();
     testSingleSlice();
@@ -568,6 +759,9 @@ int main() {
     testAntennaRegistry();
     testSightedSliceCount();
     testRevisitHeadingFor();
+    testDuplicateCandidateLosesToSightings();
+    testClearlyBetterFitWinsOverSightings();
+    testLargestFrequencyCluster();
     testBearingAtZero_8slices();
     testBearingAt90_8slices();
     testBearingAt225_8slices();
@@ -576,6 +770,11 @@ int main() {
     testMultipleTags();
     testNoisyData();
     testBearing_16slices();
+    testSliceWeights();
+    testWeightedFitMatchesUnweightedForEqualNoise();
+    testNoisyHeadingIsDownWeighted();
+    testResidualsPerDetectedHeading();
+    testConfirmationRuleInputs();
     std::printf("\nAll BearingCalculator tests passed.\n");
     return 0;
 }

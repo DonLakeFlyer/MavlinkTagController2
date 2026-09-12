@@ -302,7 +302,12 @@ _FIT_K = 20
 
 
 def _rotation_slices(true_pri, n_slices=8, anchor=1.0, pulse_power=10.0):
-    """n_slices consecutive K-pulse spectrograms of a train at true_pri."""
+    """n_slices consecutive K-pulse spectrograms of a train at true_pri.
+
+    Each pulse gets the STFT response of a pulse-length window at 50 %
+    overlap: the two windows it fills and half power in the one before and
+    the one after.
+    """
     n_time = int(np.ceil(_FIT_K * true_pri * _FIT_FS / _FIT_N_WS))
     seg_len_s = n_time * _FIT_N_WS / _FIT_FS
     slices = []
@@ -313,10 +318,9 @@ def _rotation_slices(true_pri, n_slices=8, anchor=1.0, pulse_power=10.0):
         for n in range(first, first + _FIT_K + 2):
             t = anchor + n * true_pri
             idx = int(np.rint((t - seg_start) * _FIT_FS / _FIT_N_WS))
-            if 0 <= idx < n_time:
-                power[1, idx] = pulse_power
-                if idx + 1 < n_time:
-                    power[1, idx + 1] = pulse_power
+            for offset, fraction in ((-1, 0.5), (0, 1.0), (1, 1.0), (2, 0.5)):
+                if 0 <= idx + offset < n_time:
+                    power[1, idx + offset] = 1.0 + (pulse_power - 1.0) * fraction
         slices.append({'power': power, 'segment_start_s': seg_start,
                        'k': _FIT_K, 'slice_id': s + 1})
     return slices
@@ -335,8 +339,10 @@ def test_fit_lock_timing_recovers_collar_pri_offset(true_ppm):
 
     fitted_ppm = (fitted.pri_seconds / 2.0 - 1.0) * 1e6
     assert fitted_ppm == pytest.approx(true_ppm, abs=10.0)
-    assert fitted.pri_ppm_uncertainty <= 15.0
-    assert fitted.anchor_seconds == nominal.anchor_seconds
+    # One STFT step (7.55 ms) over the ~320 s rotation is ~24 ppm.
+    assert fitted.pri_ppm_uncertainty <= 30.0
+    assert abs(fitted_ppm - true_ppm) <= fitted.pri_ppm_uncertainty
+    assert abs(fitted.anchor_seconds - nominal.anchor_seconds) <= _FIT_N_WS / _FIT_FS
     assert fitted.freq_hz == nominal.freq_hz
 
 
@@ -445,9 +451,10 @@ def test_fit_lock_timing_returns_lock_when_everything_is_gap():
 
 def test_fit_lock_timing_hypothesis_with_no_data_cannot_win():
     # Pure noise slightly above the cached estimate, so every hypothesis that
-    # touches data scores negative. Gap out exactly the windows the +40 ppm
-    # hypothesis projects onto in every slice: it (and its window-sharing
-    # neighbours) would score 0 and "win" despite having no evidence at all.
+    # touches data scores negative. Gap out exactly the four-window footprint
+    # the +40 ppm hypothesis projects onto in every slice: it (and its
+    # window-sharing neighbours) would score 0 and "win" despite having no
+    # evidence at all.
     nominal = PulseLock(0.0, 1.0, 2.0, 5.0, nominal_pri_seconds=2.0)
     slices = _rotation_slices(2.0, pulse_power=1.0)
     for s in slices:
@@ -458,7 +465,7 @@ def test_fit_lock_timing_hypothesis_with_no_data_cannot_win():
             s['segment_start_s'], n_time, 1.0, 2.0 * (1 + 40e-6),
             _FIT_N_WS, _FIT_FS, s['k'])
         s['had_gap'] = True
-        s['gap_windows'] = [(int(i), int(i) + 1) for i in idx]
+        s['gap_windows'] = [(max(0, int(i) - 1), int(i) + 2) for i in idx]
 
     fitted = fit_lock_timing(slices, _FIT_FREQ_AXIS, nominal, _FIT_N_WS, _FIT_FS)
 
@@ -621,6 +628,32 @@ def test_candidate_bank_is_frozen_once_locked():
     assert len(bank) == 3
 
 
+def test_candidate_bank_reanchors_same_bin_same_pri_after_lock():
+    # 2026-09-12 moderate run: the tag's own train, found again after its
+    # projected phase missed, was admitted as a duplicate candidate. Same
+    # bin and PRI means the same emitter: move the entry's anchor instead.
+    bank = [PulseLock(0.0, 10.0, 2.0, 3.0, nominal_pri_seconds=2.0,
+                      pri_ppm_uncertainty=100.0)]
+    sightings = [{1: 3.0}]
+    # Phase off by 0.3 s at the same bin and PRI: not 'seen'.
+    assert admit_lock_candidate(bank, PulseLock(20.0, 14.3, 2.0, 50.0),
+                                locked=True, sightings=sightings, slice_id=3,
+                                **_BANK_TOL) == (0, 'reanchored')
+    assert len(bank) == 1
+    assert bank[0].anchor_seconds == 14.3
+    assert bank[0].freq_hz == 0.0 and bank[0].pri_seconds == 2.0
+    assert bank[0].nominal_pri_seconds == 2.0
+    assert sightings == [{1: 3.0, 3: 50.0}]
+    # A different PRI at the same bin is still a distinct candidate.
+    assert admit_lock_candidate(bank, PulseLock(20.0, 14.3, 2.5, 50.0),
+                                locked=True, sightings=sightings, slice_id=3,
+                                **_BANK_TOL) == (1, 'admitted')
+    # Before lock the phase miss still admits (entries merge or append).
+    pre = [PulseLock(0.0, 10.0, 2.0, 3.0)]
+    assert admit_lock_candidate(pre, PulseLock(20.0, 14.3, 2.0, 50.0),
+                                **_BANK_TOL) == (1, 'admitted')
+
+
 def test_candidate_bank_keeps_sightings_in_lockstep():
     # The bank owns the per-candidate sighting record so the two can never
     # diverge: every event that touches an entry touches its sightings.
@@ -696,12 +729,6 @@ def test_weighting_matrix_labels_pure_tone(f0):
     scores = np.abs(W.conj().T @ S) ** 2
     assert abs(Wf[np.argmax(scores)] - f0) <= FS / NFFT
 
-# ---------------------------------------------------------------------------
-# Shared EVT cache pool — keyed by (K, N_B) so single-rate and dual-rate
-# configurations get independent EVT thresholds.
-# ---------------------------------------------------------------------------
-_evt_pool: dict[tuple, dict] = {}
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -735,7 +762,7 @@ def _generate_segment(K: int, snr_db: float, freq_offset_hz: float = 0.0,
 
 def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
                 tip: float = TIP_REST, seed: int = 42,
-                detection_margin: float = 0.90, frequency_mask=None,
+                detection_margin: float = 1.0, frequency_mask=None,
                 max_detections: int = 1, extra_tags=()):
     """Full pipeline: generate IQ → STFT → fold_detect. Returns fold_detect output."""
     old_K = pulse_detector.K
@@ -758,12 +785,9 @@ def _run_detect(K: int, snr_db: float, freq_offset_hz: float = 0.0,
 
         power, n_win = compute_stft_power(iq, N_W, N_OL, NFFT, W=W)
 
-        # Per-(K, N_B) EVT cache so different configurations get independent thresholds
-        cache = _evt_pool.setdefault((K, None), {})
-
         return fold_detect(
             power, N, PF, FS, NFFT, N_W, N_OL, samples_needed,
-            cache,
+            {},
             fold_offsets=fo,
             W=W, Wf=Wf,
             detection_margin=detection_margin,
@@ -808,29 +832,6 @@ def test_fold_detect_returns_extra_peaks_only_when_asked():
     assert any(abs(d.freq_hz - 1000.0) < 100.0 for d in multi[1:])
     assert all(multi[i].snr_db >= multi[i + 1].snr_db
                for i in range(len(multi) - 1))
-
-
-def test_evt_threshold_cache_invalidates_when_search_space_changes():
-    # The threshold is a max over the searched bins. A caller that keeps one
-    # cache dict but narrows the frequency mask must not reuse the wider
-    # threshold; fold_detect itself has to detect the change.
-    K = 5
-    cache = _evt_pool.setdefault((K, None), {})
-    _run_detect(K, snr_db=25.0)
-    full_key = cache['search_key']
-    full_threshold = cache['threshold']
-    assert full_key == (1, NFFT)
-
-    narrow_mask = np.abs(Wf) <= 200.0
-    _run_detect(K, snr_db=25.0, frequency_mask=narrow_mask)
-    assert cache['search_key'] == (1, int(np.count_nonzero(narrow_mask)))
-    # Regenerated for the narrow mask, not reused from the full search.
-    assert cache['threshold'] is not None
-    assert cache['threshold'] != full_threshold
-
-    # Restore the shared pool entry for later tests.
-    _run_detect(K, snr_db=25.0)
-    assert cache['search_key'] == full_key
 
 
 # ===================================================================
@@ -1057,7 +1058,7 @@ def _run_detect_rate_switch(K: int, snr_db: float, change_point: int,
                             direction: str = 'A_to_B',
                             freq_offset_hz: float = 0.0,
                             seed: int = 42,
-                            detection_margin: float = 0.90):
+                            detection_margin: float = 1.0):
     """Full pipeline with multi-hypothesis fold_detect."""
     old_K = pulse_detector.K
     pulse_detector.K = K
@@ -1069,11 +1070,10 @@ def _run_detect_rate_switch(K: int, snr_db: float, change_point: int,
         hyps = build_hypothesis_indices(N_EXACT, K, n_win, N_B=N_EXACT_MOVE)
 
         fo = _fold_offsets(K, TIP_REST)
-        cache = _evt_pool.setdefault((K, N_MOVE), {})
 
         return fold_detect(
             power, N, PF, FS, NFFT, N_W, N_OL, samples_needed,
-            cache,
+            {},
             fold_offsets=fo,
             W=W, Wf=Wf,
             detection_margin=detection_margin,

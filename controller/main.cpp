@@ -43,8 +43,10 @@ int main(int argc, char** argv)
     bool        simulatorMode = false;
     std::string simulatorPreset = "strong";
     double      simulatorSnrDb = 20.0;
-    std::optional<double> simulatorTxBearingDegArg;   // explicit --sim-tx-bearing-deg; wins over a preset's default
-    double      simulatorTxBearingDeg = 0.0;
+    std::optional<double> simulatorTxBearingDegArg;   // explicit --sim-tx-bearing-deg
+    // Off the first heading (0) for every level so the lock happens partway
+    // round and earlier headings are always filled in retrospectively.
+    double      simulatorTxBearingDeg = 135.0;
     double      simulatorInterfererSnrDb = std::numeric_limits<double>::quiet_NaN();
     std::string simulatorAntenna = "ra2a";
     double      simulatorPriPpm = 43.0;      // bench RA-2A collar; 0 = ideal crystal
@@ -67,35 +69,41 @@ int main(int argc, char** argv)
             // Signal levels are SNR at the 768 kHz simulator output. The 200x
             // decimator adds ~23 dB of processing gain before the detector, so
             // detector-side SNR is ~23 dB higher than the number here.
-            // Calibrated against the K=20 lock threshold of 3.0:
-            //   strong          20 dB (~43 dB at detector)  -> locks on first cycle
-            //   marginal       -21 dB (~2 dB at detector)   -> two-cycle confirmation path
-            //   below-marginal -33 dB (~-10 dB at detector) -> never locks
-            //   competing      -18 dB tag at bearing 135 + flat -18 dB interferer +1 kHz:
+            // Chosen around the K=20 lock ratio of 3.0 (see simulator/README.md):
+            //   strong          20 dB (~43 dB at detector)  -> sighted on every heading, confirmed;
+            //                  bench-level, strong enough that sidelobe images fill the bank (#148)
+            //   moderate        -8 dB (~15 dB at detector)  -> sighted on every heading, confirmed,
+            //                  no sidelobe images; long-range realistic level
+            //   marginal       -27 dB (~-4 dB at detector)  -> one sighting, revisit requested
+            //                  (-21 dB gave three sightings, ratios 21/8/8, on 2026-09-12)
+            //   below-marginal -33 dB (~-10 dB at detector) -> never locks; sub-lock hits at the tag
+            //                  frequency on 2-3 headings -> "heard, no bearing"
+            //   silent         no tag at all (iq_simulator noise-only preset) -> "nothing heard";
+            //                  checks that pf false alarms do not become "heard"
+            //   competing      -18 dB tag + flat -18 dB interferer +1 kHz:
             //                  the interferer takes the provisional lock on the first
-            //                  heading, the tag is below threshold there and is only
-            //                  admitted near 135 (post-lock), so earlier headings must
-            //                  be filled in retrospectively and the finish-time
-            //                  candidate selection must pick the tag.
+            //                  heading, the tag is only admitted as an alternate near
+            //                  its bearing, so earlier headings are filled in
+            //                  retrospectively and the finish-time candidate selection
+            //                  must pick the tag.
             // Any other word is an iq_simulator preset, used only when no tag is configured.
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 simulatorPreset = argv[++i];
                 if (simulatorPreset == "strong") {
                     simulatorSnrDb = 20.0;
+                } else if (simulatorPreset == "moderate") {
+                    simulatorSnrDb = -8.0;
                 } else if (simulatorPreset == "marginal") {
-                    simulatorSnrDb = -21.0;
+                    simulatorSnrDb = -27.0;
                 } else if (simulatorPreset == "below-marginal") {
                     simulatorSnrDb = -33.0;
                 } else if (simulatorPreset == "competing") {
                     simulatorSnrDb = -18.0;
                     simulatorInterfererSnrDb = -18.0;
-                    simulatorTxBearingDeg = 135.0;
                 }
             }
         } else if (strcmp(argv[i], "--sim-tx-bearing-deg") == 0) {
-            // Where the simulated transmitter sits relative to the first vehicle
-            // pose. Off the first rotation heading, the lock happens partway
-            // round and earlier headings are filled in retrospectively.
+            // Where the simulated transmitter sits relative to the first vehicle pose.
             double value = 0.0;
             if (i + 1 >= argc || !parseDouble(argv[i + 1], value)) {
                 logError() << "--sim-tx-bearing-deg requires a numeric value, got" << (i + 1 < argc ? argv[i + 1] : "<none>");
@@ -152,8 +160,9 @@ int main(int argc, char** argv)
         if (simulatorTxBearingDegArg) {
             simulatorTxBearingDeg = *simulatorTxBearingDegArg;
         }
-        const bool isLevelPreset = simulatorPreset == "strong" || simulatorPreset == "marginal" || simulatorPreset == "below-marginal"
-                                   || simulatorPreset == "competing";
+        const bool isLevelPreset = simulatorPreset == "strong" || simulatorPreset == "moderate" || simulatorPreset == "marginal"
+                                   || simulatorPreset == "below-marginal" || simulatorPreset == "competing"
+                                   || simulatorPreset == "silent";
         if (isLevelPreset) {
             logInfo() << "Simulator mode enabled (level:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB"
                       << " tx bearing:" << simulatorTxBearingDeg << "deg"

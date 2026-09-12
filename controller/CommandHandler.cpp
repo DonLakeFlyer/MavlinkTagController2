@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -197,14 +198,12 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
     std::string repoDir     = formatString("%s/repos/MavlinkTagController2", _homePath);
     std::string venvPython  = formatString("%s/.venv/bin/python3", repoDir.c_str());
     std::string pythonCmd   = (access(venvPython.c_str(), X_OK) == 0) ? venvPython : std::string("python3");
-    std::string cacheDir    = std::string(_homePath);
 
     std::string commandStr  = formatString("\"%s\" -u \"%s/detector/pulse_detector.py\""
                                            " --tp %f --tip %f --fs %d --port %d"
                                            " --tag-id %d --freq %u --pulse-port %d"
                                            " --center-freq %f --pf %f"
                                            " --detection-margin %f --confidence-ratio %f"
-                                           " --threshold-cache-dir \"%s\""
                                            " --k %u",
                                 pythonCmd.c_str(),
                                 repoDir.c_str(),
@@ -212,7 +211,6 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                 tagId, tagInfo.frequency_hz, kPulseUdpPort,
                                 centerFreqMhz, tagInfo.false_alarm_probability,
                                 detectionMargin, confidenceRatio,
-                                cacheDir.c_str(),
                                 tagInfo.k);   // validated in _handleTag
     if (_debugDetector || debugDetector) {
         commandStr += " --debug";
@@ -280,7 +278,7 @@ bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetectio
                     : deviceType == AirSpyDeviceType::MINI ? "airspy_mini"
                     : deviceType == AirSpyDeviceType::SIMULATOR ? "simulator" : "none";
     const int sampleRate = isHFMode ? 3840 : 3750;
-    const double detectionMargin = startDetection.detection_margin > 0 ? startDetection.detection_margin : 0.90;
+    const double detectionMargin = startDetection.detection_margin > 0 ? startDetection.detection_margin : kDefaultDetectionMargin;
     const double confidenceRatio = startDetection.confidence_ratio > 0 ? startDetection.confidence_ratio : 1.3;
 
     fprintf(fp, "{\n");
@@ -536,7 +534,7 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
 
         // Python detector thresholds — use defaults if not set (0 means use default)
-        double detectionMargin = startDetection.detection_margin > 0 ? startDetection.detection_margin : 0.90;
+        double detectionMargin = startDetection.detection_margin > 0 ? startDetection.detection_margin : kDefaultDetectionMargin;
         double confidenceRatio = startDetection.confidence_ratio > 0 ? startDetection.confidence_ratio : 1.3;
         if (startDetection.detection_margin < 0) {
             logError() << "Negative detection_margin (" << startDetection.detection_margin << "), using default:" << detectionMargin;
@@ -961,9 +959,9 @@ BearingCalculator CommandHandler::_bearingCalculatorFor(const std::vector<Rotati
     for (const auto& slice : slices) {
         if (slice.detected) {
             calculator.addSlice(slice.heading_deg, slice.signal_power, slice.tag_id, slice.snr_db,
-                                slice.candidate_id, slice.sighted);
+                                slice.candidate_id, slice.sighted, slice.noise_psd);
         } else {
-            calculator.addNoDetection(slice.heading_deg, slice.tag_id);
+            calculator.addNoDetection(slice.heading_deg, slice.tag_id, slice.noise_psd);
         }
     }
     return calculator;
@@ -1544,12 +1542,12 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
         std::string logPath = logFileManager->filename(LogFileManager::ROTATION, "bearing_result", "log");
         bearingLog.open(logPath);
         if (bearingLog.is_open()) {
-            bearingLog << "tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed\n";
+            bearingLog << "tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed,heard\n";
         }
         std::string candidatePath = logFileManager->filename(LogFileManager::ROTATION, "bearing_candidates", "log");
         candidateLog.open(candidatePath);
         if (candidateLog.is_open()) {
-            candidateLog << "tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected,n_sighted_slices\n";
+            candidateLog << "tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected,n_sighted_slices,residuals\n";
         }
     }
 
@@ -1570,6 +1568,12 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
                                   selected ? "  [selected]" : "",
                                   rejected ? "  [rejected: below confidence floor]" : "");
         if (candidateLog.is_open()) {
+            // heading:residual:weight per detected slice, ';' separated
+            std::string residuals;
+            for (const auto& r : candidate.residuals) {
+                residuals += formatString("%s%.1f:%.4e:%.3f", residuals.empty() ? "" : ";",
+                                          r.heading_deg, r.residual, r.weight);
+            }
             candidateLog << candidate.tag_id << ","
                          << static_cast<unsigned>(candidate.candidate_id) << ","
                          << candidate.bearing_deg << ","
@@ -1578,7 +1582,8 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
                          << candidate.best_snr << ","
                          << (selected ? 1 : 0) << ","
                          << (rejected ? 1 : 0) << ","
-                         << candidate.n_sighted_slices << "\n";
+                         << candidate.n_sighted_slices << ","
+                         << residuals << "\n";
         }
     }
     candidateLog.close();
@@ -1629,23 +1634,48 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
         bearingResult.header.command    = COMMAND_ID_BEARING_RESULT;
         bearingResult.collection_id     = finishInfo.collection_id;
         bearingResult.tag_id            = result.tag_id;
-        // Always send the result; r_squared carries the 0..1 confidence so
-        // the GCS decides how to present a weak one. bearing_deg is NaN when
-        // the tag had no detections or no lock candidate passed the floor.
-        bearingResult.bearing_deg       = result.bearing_deg;
-        bearingResult.r_squared         = result.r_squared;
-        bearingResult.n_valid_slices    = result.n_valid_slices;
-        bearingResult.best_snr          = result.best_snr;
-        const bool confirmed = !result.rejected && result.n_sighted_slices >= kConfirmedSightings;
+
+        // Three outcomes on the wire. Bearing: finite bearing_deg. Heard, no
+        // bearing: NaN with n_valid_slices > 0 (a lock that fell below the
+        // confidence floor, or no lock but frequency-consistent acquisition
+        // hits). Nothing heard: NaN with n_valid_slices = 0.
+        bool heard = result.n_valid_slices > 0;
+        bool noBearing = result.rejected;
+        const char* noBearingReason = result.rejected ? "below confidence floor" : "";
+        if (result.n_sighted_slices == 0 && result.n_valid_slices > 0) {
+            std::vector<double> hitFreqs;
+            for (const auto& slice : slicesCopy) {
+                if (slice.tag_id == result.tag_id && slice.detected) {
+                    hitFreqs.push_back(slice.pulse_info.frequency_hz);
+                }
+            }
+            const uint32_t agreeing = BearingCalculator::largestFrequencyCluster(hitFreqs, kHeardFrequencyToleranceHz);
+            heard = agreeing >= kHeardMinAgreeingHits;
+            noBearing = true;
+            noBearingReason = heard ? "no lock; acquisition hits agree in frequency"
+                                    : "no lock; acquisition hits do not agree in frequency";
+            logInfo() << formatString("Bearing withheld: tag_id: %u  no lock; %u of %zu acquisition hits within %.0f Hz of one another",
+                                      result.tag_id, agreeing, hitFreqs.size(), kHeardFrequencyToleranceHz);
+        }
+        const float reportedBearing = noBearing ? std::numeric_limits<float>::quiet_NaN() : result.bearing_deg;
+        const float reportedConfidence = noBearing ? 0.0f : result.r_squared;
+        const uint32_t reportedSlices = heard ? result.n_valid_slices : 0;
+        const float reportedSnr = heard ? result.best_snr : 0.0f;
+
+        bearingResult.bearing_deg       = reportedBearing;
+        bearingResult.r_squared         = reportedConfidence;
+        bearingResult.n_valid_slices    = reportedSlices;
+        bearingResult.best_snr          = reportedSnr;
+        const bool confirmed = !noBearing && result.n_sighted_slices >= kConfirmedSightings;
         bearingResult.confirmed         = confirmed ? 1 : 0;
 
         _mavlink->sendTunnelMessage(&bearingResult, sizeof(bearingResult));
 
-        logInfo() << formatString("Bearing result: tag_id: %u  bearing: %.1f  R²: %.3f  slices: %u  sighted: %u  confirmed: %u  best_snr: %.1f  candidate: %u/%u%s",
-                                  result.tag_id, result.bearing_deg, result.r_squared,
-                                  result.n_valid_slices, result.n_sighted_slices, confirmed ? 1u : 0u, result.best_snr,
+        logInfo() << formatString("Bearing result: tag_id: %u  bearing: %.1f  R²: %.3f  slices: %u  sighted: %u  confirmed: %u  heard: %u  best_snr: %.1f  candidate: %u/%u%s%s",
+                                  result.tag_id, reportedBearing, reportedConfidence,
+                                  reportedSlices, result.n_sighted_slices, confirmed ? 1u : 0u, heard ? 1u : 0u, reportedSnr,
                                   result.candidate_id, result.n_candidates,
-                                  result.rejected ? "  NO BEARING (below confidence floor)" : "");
+                                  noBearing ? "  NO BEARING: " : "", noBearingReason);
 
         if (bearingLog.is_open()) {
             double lat = 0.0, lon = 0.0;
@@ -1655,15 +1685,16 @@ std::string CommandHandler::_handleFinishCollection(const mavlink_tunnel_t& tunn
                 lon = tagLatLonSum[result.tag_id].second / it->second;
             }
             bearingLog << result.tag_id << ","
-                       << result.bearing_deg << ","
-                       << result.r_squared << ","
-                       << result.n_valid_slices << ","
-                       << result.best_snr << ","
+                       << reportedBearing << ","
+                       << reportedConfidence << ","
+                       << reportedSlices << ","
+                       << reportedSnr << ","
                        << std::fixed << std::setprecision(8)
                        << lat << "," << lon << ","
                        << std::defaultfloat
                        << result.n_sighted_slices << ","
-                       << (confirmed ? 1 : 0) << "\n";
+                       << (confirmed ? 1 : 0) << ","
+                       << (heard ? 1 : 0) << "\n";
         }
     }
 
@@ -2026,7 +2057,8 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
     //   --freq-offset-hz : tag frequency relative to radio center
     //   --tp             : pulse width (pulse_width_msecs / 1000)
     //   --tip            : inter-pulse interval (intra_pulse1_msecs / 1000)
-    //   --snr            : --simulator level (strong=20 dB, marginal=-21 dB, below-marginal=-33 dB at 768 kHz)
+    //   --snr            : --simulator level (strong=20 dB, moderate=-8 dB, marginal=-27 dB, below-marginal=-33 dB at 768 kHz)
+    //   silent           : no tag arguments at all; the noise-only preset is run instead
     //
     // The venv Python is preferred so numpy/pyzmq are available.
 
@@ -2048,11 +2080,17 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
                                       _simulatorAntenna.c_str(),
                                       _simulatorPriPpm);
 
+    // Noise only, whatever tags are configured: the "nothing heard" case.
+    if (_simulatorPreset == "silent") {
+        return formatString("%s -u %s --preset noise-only -P 5555%s",
+                            pythonCmd.c_str(), simScript.c_str(), txArgs.c_str());
+    }
+
     // If no tags configured, use the preset
     if (_tagDatabase.size() == 0) {
         // Signal-level names are not iq_simulator presets; fall back to a real one.
-        const bool isLevelName = _simulatorPreset == "marginal" || _simulatorPreset == "below-marginal"
-                                 || _simulatorPreset == "competing";
+        const bool isLevelName = _simulatorPreset == "moderate" || _simulatorPreset == "marginal"
+                                 || _simulatorPreset == "below-marginal" || _simulatorPreset == "competing";
         return formatString("%s -u %s --preset %s -P 5555%s",
                             pythonCmd.c_str(),
                             simScript.c_str(),

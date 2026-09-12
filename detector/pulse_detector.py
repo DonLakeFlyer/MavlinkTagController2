@@ -17,7 +17,7 @@ Algorithm (per cycle):
   1. Take the next samples_needed samples from the continuous stream
   2. Compute STFT with window matched to pulse width (50% overlap)
   3. Fold the power spectrogram at the exact PRI (no M/J expansion)
-  4. Threshold using Extreme Value Theory (Monte Carlo noise trials)
+  4. Threshold from a window-permutation null of this segment's own STFT
   5. Report detections, advance the cursor, repeat
 
 Examples:
@@ -52,8 +52,9 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared'))
 from log_schema import (StructuredLogger, STARTUP, DETECTION, NO_DETECTION,
                         FOLDS, TIMING, NOISE_STATS, NOISE_ELEVATED,
-                        GAP_EVENT, EVT_THRESHOLD, HYPOTHESIS, SESSION_END,
-                        STFT_DEBUG, LOCK_CANDIDATE, CANDIDATE_MEASUREMENT)
+                        GAP_EVENT, EVT_THRESHOLD, CYCLE_THRESHOLD, HYPOTHESIS,
+                        SESSION_END, STFT_DEBUG, LOCK_CANDIDATE,
+                        CANDIDATE_MEASUREMENT)
 
 import numpy as np
 from scipy.linalg import toeplitz as scipy_toeplitz
@@ -85,6 +86,17 @@ MAX_LOCK_CANDIDATES = 4
 # (acquisition) and around the locked frequency (measurement).
 ACQUISITION_SEARCH_HZ = 2000.0
 LOCKED_SEARCH_HZ = 200.0
+# Phase floor for matching a fresh fold peak to a banked candidate, in STFT
+# steps. A fold anchor is a window index: rounded to a step and, with
+# local-max pooling, up to one window early. The banked anchor has been
+# refit to a fraction of a step. Their difference is therefore up to ~1.5
+# steps for the same train; a one-step floor missed on the second or third
+# sighting in three of three simulator runs (2026-09-12).
+LOCK_PHASE_TOLERANCE_STEPS = 2.0
+# The decimator's last FIR stage has its cutoff at 0.45 x fs (decimator/src/main.cpp),
+# so bins beyond 0.9 x Nyquist are in its transition band: attenuated and
+# partly aliased. They are never searched.
+USABLE_BAND_FRACTION = 0.9
 
 # Detection status values (mirrors TunnelProtocol.h detection_status field)
 DETECTION_STATUS_SUBTHRESHOLD  = 0  # Subthreshold pulse
@@ -485,6 +497,19 @@ def fold_multi_hypothesis(power, hypotheses):
 
 
 
+def _pooled_power(power, local_radius):
+    """Per-window local max over [t-r, t+r] with edge clipping, as one array."""
+    if local_radius <= 0:
+        return power
+    n_time = power.shape[1]
+    padded = np.pad(power, ((0, 0), (local_radius, local_radius)), mode='edge')
+    pooled = power.copy()
+    for d in range(1, local_radius + 1):
+        np.maximum(pooled, padded[:, local_radius - d:local_radius - d + n_time], out=pooled)
+        np.maximum(pooled, padded[:, local_radius + d:local_radius + d + n_time], out=pooled)
+    return pooled
+
+
 def _compute_fold_scores(power, pulse_idx, local_radius=0):
     """Compute fold scores with optional local-max pooling per fold index.
 
@@ -497,6 +522,21 @@ def _compute_fold_scores(power, pulse_idx, local_radius=0):
         (n_freq, search_range) fold scores.
     """
     n_time = power.shape[1]
+    pulse_idx = np.asarray(pulse_idx, dtype=np.int64)
+    search_range = pulse_idx.shape[0]
+    # Every hypothesis from build_hypothesis_indices is t0 + offsets with t0
+    # consecutive: then each fold is a contiguous slice of the pooled array
+    # and the K gathers collapse to K shifted adds (5-10x faster, same result).
+    if search_range > 0:
+        offsets = pulse_idx[0]
+        if (offsets.min() >= 0 and offsets.max() + search_range - 1 < n_time
+                and np.array_equal(pulse_idx, offsets[None, :] + np.arange(search_range)[:, None])):
+            pooled = _pooled_power(power, local_radius)
+            scores = np.zeros((power.shape[0], search_range), dtype=power.dtype)
+            for off in offsets:
+                scores += pooled[:, off:off + search_range]
+            return scores
+
     idx0 = np.clip(pulse_idx, 0, n_time - 1)
     local_powers = power[:, idx0]
     if local_radius <= 0:
@@ -706,16 +746,33 @@ def lock_candidate_from_detection(detection, segment_start_seconds, n_ws, fs,
 
 def fit_lock_timing(buffered_slices, freq_axis, lock, n_ws, fs,
                     span_ppm=PRI_FIT_SPAN_PPM, step_ppm=PRI_FIT_STEP_PPM,
-                    footprint_windows=2):
-    """Refit a lock's PRI from every buffered slice of the rotation.
+                    footprint_offsets=(-1, 0, 1, 2), anchor_steps=11):
+    """Refit a lock's PRI and sub-step anchor from every buffered slice.
 
-    Sums on-pulse power at the lock's frequency and anchor across all
-    slices for each PRI on a ppm grid around the nominal rate and returns
-    the lock at the centre of the plateau within one noise sigma of the
-    maximum; pri_ppm_uncertainty is that plateau's half-width. The anchor is
-    left alone: a sub-step anchor error shifts every slice equally and the
-    two-window footprint already absorbs it, whereas a PRI error grows with
-    distance from the anchor.
+    Sums on-pulse power at the lock's frequency across all slices for each
+    (anchor offset, PRI) on a grid: ``anchor_steps`` offsets spanning ±one
+    STFT step around the current anchor, by ``step_ppm`` over ±``span_ppm``
+    around the nominal PRI. Returns the lock at the best anchor offset and
+    the centre of the PRI plateau within one noise sigma of the maximum.
+
+    The anchor comes from a fold window index, which is quantised to a step
+    and may sit a whole window early (local-max pooling); with the anchor
+    held fixed, the fit would tilt the PRI by up to a few hundred ppm over
+    one dwell just to re-centre the far pulses on their windows. Fitting the
+    offset jointly removes that bias.
+
+    The fit footprint is the four windows a pulse touches at 50 % overlap
+    (half, full, full, half around the projected start), wider than the
+    two-window measurement footprint: a two-window sum over that symmetric
+    response scores a whole-step alias of the PRI exactly as well as the
+    truth, and the fit then picks either.
+
+    pri_ppm_uncertainty is the plateau half-width, but never less than what
+    the fitted span can resolve: one STFT step over the longest lever arm
+    from the anchor (anchor offset and PRI tilt trade against each other, so
+    the drift across the span is only pinned to about a step). With a strong
+    tag the noise-sigma plateau collapses to the grid step, which says
+    nothing about how well two dwells 50 s apart can pin a 2 s PRI.
 
     Zero-filled windows (a slice's 'gap_windows', inclusive index ranges)
     are excluded: they hold no signal, so counting them would pull the fit
@@ -746,25 +803,41 @@ def fit_lock_timing(buffered_slices, freq_axis, lock, n_ws, fs,
     if not rows:
         return lock
 
-    footprint_offsets = np.arange(footprint_windows, dtype=np.int64)
-    energy = np.zeros(ppm_grid.size)
-    variance = np.zeros(ppm_grid.size)
-    n_used = np.zeros(ppm_grid.size, dtype=np.int64)
-    for i, ppm in enumerate(ppm_grid):
-        pri = nominal * (1.0 + ppm * 1e-6)
-        for row, noise, segment_start, n_time, max_pulses, valid in rows:
-            idx = pulse_indices_at_known_phase(
-                segment_start, n_time, lock.anchor_seconds, pri, n_ws, fs, max_pulses)
-            footprint = (idx[:, None] + footprint_offsets[None, :]).ravel()
-            footprint = footprint[footprint < n_time]
-            footprint = footprint[valid[footprint]]
-            n_used[i] += footprint.size
-            energy[i] += float(row[footprint].sum()) - footprint.size * noise
-            variance[i] += footprint.size * noise * noise
+    footprint_offsets = np.asarray(footprint_offsets, dtype=np.int64)
+    step_s = n_ws / fs
+    anchor_grid = np.linspace(-1.0, 1.0, anchor_steps) * step_s
 
-    # A hypothesis whose every footprint fell in a gap has no evidence; its
-    # zero must not outscore data-backed (possibly negative) hypotheses.
-    energy[n_used == 0] = -np.inf
+    def _scan(anchor_seconds):
+        energy = np.zeros(ppm_grid.size)
+        variance = np.zeros(ppm_grid.size)
+        n_used = np.zeros(ppm_grid.size, dtype=np.int64)
+        for i, ppm in enumerate(ppm_grid):
+            pri = nominal * (1.0 + ppm * 1e-6)
+            for row, noise, segment_start, n_time, max_pulses, valid in rows:
+                idx = pulse_indices_at_known_phase(
+                    segment_start, n_time, anchor_seconds, pri, n_ws, fs, max_pulses)
+                footprint = (idx[:, None] + footprint_offsets[None, :]).ravel()
+                footprint = footprint[(footprint >= 0) & (footprint < n_time)]
+                footprint = footprint[valid[footprint]]
+                n_used[i] += footprint.size
+                energy[i] += float(row[footprint].sum()) - footprint.size * noise
+                variance[i] += footprint.size * noise * noise
+        # A hypothesis whose every footprint fell in a gap has no evidence;
+        # its zero must not outscore data-backed (possibly negative) ones.
+        # Nor may one that kept only a sliver of its windows win on
+        # starvation alone.
+        if n_used.max() > 0:
+            energy[n_used < 0.5 * n_used.max()] = -np.inf
+        return energy, variance, n_used
+
+    best_anchor = lock.anchor_seconds
+    energy = variance = n_used = None
+    for offset in anchor_grid:
+        candidate_anchor = lock.anchor_seconds + float(offset)
+        e, v, n = _scan(candidate_anchor)
+        if energy is None or e.max() > energy.max():
+            best_anchor, energy, variance, n_used = candidate_anchor, e, v, n
+
     best = int(np.argmax(energy))
     if n_used[best] == 0:
         return lock   # nothing to fit anywhere on the grid
@@ -781,8 +854,14 @@ def fit_lock_timing(buffered_slices, freq_axis, lock, n_ws, fs,
             pri_ppm_uncertainty=max(lock.pri_ppm_uncertainty, float(span_ppm)),
             pri_fit_clipped=True)
     centre_ppm = 0.5 * (ppm_grid[lo] + ppm_grid[hi])
-    uncertainty = max(step_ppm, 0.5 * (ppm_grid[hi] - ppm_grid[lo]))
-    return lock._replace(pri_seconds=nominal * (1.0 + centre_ppm * 1e-6),
+    lever_s = max((max(abs(segment_start - best_anchor),
+                       abs(segment_start + n_time * step_s - best_anchor))
+                   for _, _, segment_start, n_time, _, valid in rows if valid.any()),
+                  default=0.0)
+    resolution_ppm = (step_s / lever_s * 1e6) if lever_s > 0 else span_ppm
+    uncertainty = max(step_ppm, 0.5 * (ppm_grid[hi] - ppm_grid[lo]), resolution_ppm)
+    return lock._replace(anchor_seconds=best_anchor,
+                         pri_seconds=nominal * (1.0 + centre_ppm * 1e-6),
                          nominal_pri_seconds=nominal,
                          pri_ppm_uncertainty=float(uncertainty),
                          pri_fit_clipped=False)
@@ -857,9 +936,15 @@ def admit_lock_candidate(bank, candidate, frequency_tolerance_hz,
       'replaced' bank was full; evicted the weakest entry (pre-lock only);
       'seen'     agreed with an existing entry but the bank is locked, so the
                  entry is left as reported (index of that entry);
+      'reanchored' locked bank; same frequency and PRI as an existing entry
+                 but the phase projected from that entry's timing missed.
+                 One emitter cannot occupy one bin at one PRI twice, so the
+                 entry's anchor is moved to this sighting and its PRI left
+                 for the next refit; the sighting is recorded against it.
+                 The caller must re-measure every buffered slice at it;
       'dropped'  no room (index None).
     Once `locked`, candidate ids have been reported to the controller, so
-    entries are never modified or evicted; new candidates only append.
+    entries are never renumbered or evicted; new candidates only append.
 
     `sightings`, when given, is the list parallel to `bank` of
     {slice_id: strongest score_ratio} per candidate; it is kept in lockstep
@@ -893,6 +978,13 @@ def admit_lock_candidate(bank, candidate, frequency_tolerance_hz,
             bank[index] = combine_agreeing_locks(existing, candidate)
             _record(index, reset=False)
             return index, 'merged'
+    if locked:
+        for index, existing in enumerate(bank):
+            if (abs(existing.freq_hz - candidate.freq_hz) <= frequency_tolerance_hz
+                    and abs(existing.pri_seconds - candidate.pri_seconds) <= pri_tolerance_seconds):
+                bank[index] = existing._replace(anchor_seconds=candidate.anchor_seconds)
+                _record(index, reset=False)
+                return index, 'reanchored'
     if len(bank) < max_candidates:
         bank.append(candidate)
         _record(len(bank) - 1, reset=True)
@@ -998,178 +1090,176 @@ def compute_stft_power(iq, n_w, n_ol, nfft, W=None, min_windows=1):
 
 
 # ---------------------------------------------------------------------------
-# EVT Threshold Generation
+# Impulse blanking
 # ---------------------------------------------------------------------------
 
-def generate_evt_threshold(n_w, n_ol, nfft, samples_needed, N, K, pf,
-                           fold_offsets=None, W=None, n_trials=100,
-                           debug=False, hypotheses=None, frequency_mask=None):
-    """Generate detection threshold via Extreme Value Theory.
+def blank_impulses(iq, factor, max_run):
+    """Zero short bursts whose magnitude exceeds ``factor`` x the segment median.
 
-    Runs Monte Carlo simulation with synthetic complex Gaussian noise through
-    the full STFT pipeline, matching uavrt_detection's approach.  This captures
-    correlations introduced by the STFT window and overlap that would be missed
-    by generating exponential power values directly.
+    Only above-threshold runs shorter than ``max_run`` samples are blanked, so
+    a collar pulse (n_w samples long) is never touched however strong it is,
+    while corona / switching impulses (a few samples after decimation) are.
 
-    When *hypotheses* is provided (from build_hypothesis_indices), the fold
-    search spans all hypotheses — matching the detection-time search space
-    so that the EVT threshold correctly controls the false alarm rate.
-
-    Args:
-        n_w:             STFT window length
-        n_ol:            STFT overlap
-        nfft:            FFT size
-        samples_needed:  IQ samples per segment
-        N:               PRI in STFT windows (used only when hypotheses is None)
-        K:               Number of pulse folds
-        pf:              False alarm probability
-        n_trials:        Number of Monte Carlo noise trials
-        hypotheses:      Optional list from build_hypothesis_indices().
-                         When None, falls back to single-rate fold using N.
-
-    Returns:
-        (threshold, mu, sigma) where:
-          threshold: Detection threshold (scalar, normalised to 1W/bin)
-          mu:        Gumbel location parameter (or None if fit failed)
-          sigma:     Gumbel scale parameter (or None if fit failed)
+    Returns ``(iq, blanked_fraction)``. ``factor <= 0`` disables blanking and
+    returns the input unchanged.
     """
-    max_scores = []
+    if factor <= 0 or iq.size == 0:
+        return iq, 0.0
+    mag = np.abs(iq)
+    median = float(np.median(mag))
+    if median <= 0:
+        return iq, 0.0
+    above = mag > factor * median
+    if not np.any(above):
+        return iq, 0.0
+    edges = np.flatnonzero(np.diff(above.astype(np.int8)))
+    starts = edges[above[edges + 1]] + 1
+    ends = edges[~above[edges + 1]] + 1
+    if above[0]:
+        starts = np.concatenate(([0], starts))
+    if above[-1]:
+        ends = np.concatenate((ends, [above.size]))
+    blank = np.zeros_like(above)
+    for start, end in zip(starts, ends):
+        if end - start < max_run:
+            blank[start:end] = True
+    if not np.any(blank):
+        return iq, 0.0
+    out = iq.copy()
+    out[blank] = 0
+    return out, float(np.count_nonzero(blank)) / float(iq.size)
 
-    for _ in range(n_trials):
-        # Unit-variance complex Gaussian noise (matching MATLAB's wgn)
-        noise_iq = (np.random.randn(samples_needed).astype(np.float32)
-                    + 1j * np.random.randn(samples_needed).astype(np.float32)) \
-                   * np.float32(1.0 / np.sqrt(2.0))
 
-        # Run through the exact same STFT pipeline as real data
-        power, n_time = compute_stft_power(noise_iq, n_w, n_ol, nfft, W=W,
-                                           min_windows=K)
-        if n_time == 0:
-            continue
+# ---------------------------------------------------------------------------
+# Data-derived detection threshold (window-permutation null)
+# ---------------------------------------------------------------------------
 
-        if hypotheses is not None and len(hypotheses) > 0:
-            # Multi-hypothesis fold: search all hypotheses
-            best_scores, _, _ = fold_multi_hypothesis(power, hypotheses)
+# Fewer maxima than this and the Gumbel fit is not trustworthy.
+NULL_MIN_PERMUTATIONS = 10
+# A fold counts as a pulse train (and is taken out of the null) only if at
+# least half its folds exceed this multiple of the bin noise.
+NULL_TRAIN_FOLD_SNR = 3.0
+
+
+def permutation_null_threshold(power, noise_power, pf, n_perm,
+                               hypotheses=None, pulse_idx=None,
+                               frequency_mask=None, rng=None,
+                               time_budget_s=None):
+    """Detection threshold from the slice's own spectrogram.
+
+    Randomly permutes the STFT time windows and re-runs the identical fold
+    search ``n_perm`` times. Permutation destroys periodicity at the PRI while
+    keeping each bin's level, colour and tail shape, so the maxima describe
+    "no tag" for this dwell, this heading, this site. Scores are normalised
+    per bin by ``noise_power`` (the same scaling the caller applies to the
+    returned base threshold) and the max is taken over the searched bins.
+
+    A tag's own pulses stay in the permuted data and inflate the null, so the
+    result errs conservative; ``fold_detect`` refines it once a train has
+    cleared this first pass (see ``resample_windows``).
+
+    Exactly one of ``hypotheses`` (multi-rate) or ``pulse_idx`` (single-rate)
+    must be given, matching the caller's search. When ``time_budget_s`` is
+    set, permutations stop once it is exceeded (never below
+    ``NULL_MIN_PERMUTATIONS``), keeping the per-cycle cost bounded on slow
+    hosts; the count actually used is returned.
+
+    Returns ``(threshold, mu, sigma, n_perm_used)``; ``mu``/``sigma`` are None
+    when the Gumbel fit failed and an empirical percentile was used.
+    Returns ``(inf, None, None, 0)`` when too few permutations are usable.
+    """
+    if (hypotheses is None) == (pulse_idx is None):
+        raise ValueError('give exactly one of hypotheses or pulse_idx')
+    rng = np.random.default_rng() if rng is None else rng
+    n_freq, n_time = power.shape
+
+    searched = (np.flatnonzero(frequency_mask) if frequency_mask is not None
+                else np.arange(n_freq))
+    sub_power = power[searched]
+    sub_norm = np.maximum(noise_power[searched], 1e-30)
+
+    maxima = []
+    started = time.monotonic()
+    for _ in range(int(n_perm)):
+        permuted = sub_power[:, rng.permutation(n_time)]
+        if hypotheses is not None:
+            scores, _, _ = fold_multi_hypothesis(permuted, hypotheses)
         else:
-            # Single-rate fold using precomputed offsets (handles fractional PRI)
-            _fo = fold_offsets if fold_offsets is not None else np.arange(K) * N
-            max_start = n_time - _fo[-1]
-            if max_start <= 0:
-                continue
-            effective_period = int(_fo[1]) if len(_fo) > 1 else int(N)
-            search_range = min(effective_period, max_start)
+            scores = np.max(_compute_fold_scores(permuted, pulse_idx,
+                                                 local_radius=FOLD_LOCAL_RADIUS),
+                            axis=1)
+        maxima.append(float(np.max(scores / sub_norm)))
+        if (time_budget_s is not None and len(maxima) >= NULL_MIN_PERMUTATIONS
+                and time.monotonic() - started > time_budget_s):
+            break
 
-            pulse_idx = np.arange(search_range)[:, None] + _fo[None, :]
-
-            fold_scores = _compute_fold_scores(power, pulse_idx,
-                                               local_radius=FOLD_LOCAL_RADIUS)
-            best_scores = np.max(fold_scores, axis=1)
-
-        # Normalize to 1W/bin reference: divide by median per-bin noise power.
-        # This matches uavrt_detection's medPowAllFreqBins=1 calibration so
-        # that base_threshold × noise_power gives the correct per-bin threshold.
-        noise_per_bin = np.mean(power, axis=1)
-        med_noise = np.median(noise_per_bin)
-        if med_noise > 0:
-            searched_scores = (best_scores[frequency_mask]
-                               if frequency_mask is not None else best_scores)
-            if searched_scores.size > 0:
-                max_scores.append(np.max(searched_scores) / med_noise)
-
-    if len(max_scores) < 10:
-        return np.inf, None, None
-
-    max_scores = np.array(max_scores)
-
-    # Fit Gumbel distribution for maxima (matches MATLAB's evfit approach).
-    # MATLAB uses evfit(-scores) which fits a Gumbel-minimum to the negated
-    # scores — equivalent to fitting Gumbel-maximum (gumbel_r) to the scores.
+    if len(maxima) < NULL_MIN_PERMUTATIONS:
+        return np.inf, None, None, len(maxima)
+    maxima = np.asarray(maxima)
     try:
-        loc, scale = gumbel_r.fit(max_scores)
+        loc, scale = gumbel_r.fit(maxima)
+        if not (np.isfinite(loc) and np.isfinite(scale) and scale > 0):
+            raise ValueError('degenerate Gumbel fit')
         threshold = gumbel_r.ppf(1.0 - pf, loc=loc, scale=scale)
-        if debug:
-            print(f'[DEBUG EVT] {len(max_scores)} trials  '
-                  f'max_scores: min={np.min(max_scores):.4e}  '
-                  f'max={np.max(max_scores):.4e}  mean={np.mean(max_scores):.4e}')
-            print(f'[DEBUG EVT] Gumbel fit: loc={loc:.4e}  scale={scale:.4e}  '
-                  f'threshold(pf={pf:.0e})={threshold:.4e}')
-        return max(threshold, 0.0), loc, scale
+        return max(float(threshold), 0.0), float(loc), float(scale), len(maxima)
     except Exception:
-        threshold = np.percentile(max_scores, 100.0 * (1.0 - pf))
-        if debug:
-            print(f'[DEBUG EVT] Gumbel fit failed, using percentile: {threshold:.4e}')
-        return max(threshold, 0.0), None, None
+        threshold = np.percentile(maxima, 100.0 * (1.0 - pf))
+        return max(float(threshold), 0.0), None, None, len(maxima)
 
 
-# ---------------------------------------------------------------------------
-# EVT threshold disk cache
-# ---------------------------------------------------------------------------
+def _extend_pulse_grid(on_idx, n_time):
+    """Continue a K-pulse window grid over [0, n_time) at its edge spacings.
 
-def _evt_cache_path(cache_dir, N_A, K, N_B=None, n_hypotheses=1,
-                    n_trials=100, n_search_bins=None):
-    """Build cache filename for EVT threshold parameters.
-
-    Uses a naming scheme that is distinct from the legacy single-rate format
-    (N...-M...-J...-K...-Trials....pythreshold) so that old and new detectors
-    can coexist in the same cache directory without collision.
-
-    N_A and N_B should be the *fractional* PRI values (N_exact, N_B_exact),
-    not the integer floors.  This prevents cache collisions between
-    configurations whose fractional PRIs differ but share the same floor
-    (e.g. N_exact=264.83 vs 264.96 both floor to 264).  The Nb and H
-    fields ensure single-rate and dual-rate configurations never share
-    entries, since dual-rate EVT thresholds are computed over a larger
-    multi-hypothesis search space.
-
-    Legacy format (still read by old code):
-        N265.000000-M0.000000-J0.000000-K5.000000-Trials100.pythreshold
-
-    New format:
-        N264.827586-Nb200.413793-H8-K5.000000-Trials100.pythreshold
-        N264.827586-Nb0-H1-K5.000000-Trials100.pythreshold   (single-rate)
+    The rate in force at each end (leading gaps for the front, trailing gaps
+    for the back, for a switch hypothesis) is estimated as a *fractional*
+    spacing from the run of near-equal gaps, so a 176.5-window PRI does not
+    drift half a window per pulse the way a single rounded gap would.
     """
-    nb_str = f'{float(N_B):.6f}' if N_B is not None else '0'
-    bins_str = str(n_search_bins) if n_search_bins is not None else 'all'
-    # S2: pure hypotheses search the full t0 range (larger null search space).
-    return os.path.join(cache_dir,
-                        f'N{float(N_A):.6f}-Nb{nb_str}-H{n_hypotheses}'
-                        f'-F{bins_str}-K{float(K):.6f}-Trials{n_trials}-S2.pythreshold')
+    on_idx = np.asarray(on_idx, dtype=np.int64)
+    if on_idx.size < 2:
+        return on_idx
+    gaps = np.diff(on_idx)
+
+    def _run_mean(seq):
+        # Gaps of one rate differ by at most 1 window (independent rounding).
+        n = 1
+        while n < seq.size and abs(int(seq[n]) - int(seq[0])) <= 1:
+            n += 1
+        return float(np.mean(seq[:n]))
+
+    first_gap = _run_mean(gaps)
+    last_gap = _run_mean(gaps[::-1])
+    parts = [on_idx]
+    if first_gap > 0:
+        n_before = int(on_idx[0] // first_gap) + 1
+        before = on_idx[0] - np.rint(first_gap * np.arange(1, n_before + 1)).astype(np.int64)
+        parts.append(before[before >= 0])
+    if last_gap > 0:
+        n_after = int((n_time - 1 - on_idx[-1]) // last_gap) + 1
+        after = on_idx[-1] + np.rint(last_gap * np.arange(1, n_after + 1)).astype(np.int64)
+        parts.append(after[after < n_time])
+    return np.concatenate(parts)
 
 
-def load_evt_cache(cache_dir, N_A, K, N_B=None, n_hypotheses=1,
-                   n_trials=100, n_search_bins=None):
-    """Load Gumbel mu/sigma from disk. Returns (mu, sigma) or (None, None)."""
-    if not cache_dir:
-        return None, None
-    path = _evt_cache_path(cache_dir, N_A, K, N_B=N_B,
-                           n_hypotheses=n_hypotheses, n_trials=n_trials,
-                           n_search_bins=n_search_bins)
-    try:
-        with open(path, 'r') as f:
-            values = [float(line.strip()) for line in f if line.strip()]
-        if len(values) >= 2:
-            return values[0], values[1]
-    except (OSError, ValueError):
-        pass
-    return None, None
+def resample_windows(power, drop_windows, rng=None):
+    """Copy of ``power`` with the given time windows redrawn from the others.
 
-
-def save_evt_cache(cache_dir, N_A, K, mu, sigma, N_B=None,
-                   n_hypotheses=1, n_trials=100, n_search_bins=None):
-    """Save Gumbel mu/sigma to disk cache."""
-    if not cache_dir or mu is None or sigma is None:
-        return
-    os.makedirs(cache_dir, exist_ok=True)
-    path = _evt_cache_path(cache_dir, N_A, K, N_B=N_B,
-                           n_hypotheses=n_hypotheses, n_trials=n_trials,
-                           n_search_bins=n_search_bins)
-    try:
-        with open(path, 'w') as f:
-            f.write(f'{mu:.15e}\n')
-            f.write(f'{sigma:.15e}\n')
-        print(f'  [Saved EVT cache: {path}]', flush=True)
-    except OSError as e:
-        print(f'WARNING: Failed to write EVT cache {path}: {e}', flush=True)
+    Replacement columns are sampled (with replacement) from the remaining
+    windows of the same spectrogram, so each bin keeps its own level and tail
+    shape while the dropped windows' content (a detected pulse train and its
+    spectral sidelobes) no longer shapes the null. Returns ``power`` itself
+    when nothing is dropped or nothing would be left to draw from.
+    """
+    n_time = power.shape[1]
+    drop = np.unique(np.asarray(drop_windows, dtype=np.int64))
+    drop = drop[(drop >= 0) & (drop < n_time)]
+    if drop.size == 0 or drop.size >= n_time:
+        return power
+    rng = np.random.default_rng() if rng is None else rng
+    keep = np.setdiff1d(np.arange(n_time), drop, assume_unique=True)
+    filled = power.copy()
+    filled[:, drop] = power[:, rng.choice(keep, size=drop.size)]
+    return filled
 
 
 # ---------------------------------------------------------------------------
@@ -1223,18 +1313,23 @@ def write_cycle_dump(log_dir, tag_id, cycle, power, segment, meta):
 # ---------------------------------------------------------------------------
 
 def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
-                evt_threshold_cache, fold_offsets=None, W=None, Wf=None,
-                debug=False, detection_margin=0.90,
+                threshold_state, fold_offsets=None, W=None, Wf=None,
+                debug=False, detection_margin=1.0,
                 hypotheses=None, N_B=None,
                 N_A_exact=None, N_B_exact=None,
                 slog=None, frequency_mask=None, max_detections=1,
-                k_folds=None):
+                k_folds=None, n_null_permutations=40, null_time_budget_s=None,
+                cycle=0, blanked_fraction=0.0):
     """Fold power spectrogram and detect pulses.
 
     Supports both single-rate and multi-hypothesis rate-switch detection.
     When *hypotheses* is provided, folds across all hypotheses.  When
     hypotheses is None, falls back to fold_offsets-based (or basic
     N-stride) single-rate fold.
+
+    The detection threshold is derived from this slice's own spectrogram by
+    ``permutation_null_threshold`` on every call; nothing is cached across
+    cycles or headings.
 
     Each detection includes a ``max_fold_fraction`` diagnostic — the
     largest single fold's fraction of the total K-fold score.  This is
@@ -1251,22 +1346,26 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         n_w:                 STFT window length.
         n_ol:                STFT overlap.
         samples_needed:      IQ samples per segment.
-        evt_threshold_cache: dict — in-memory / disk cache for EVT params.
+        threshold_state:     dict carried across cycles by the caller. Keys:
+                             ``margin_logged`` (set here); optional
+                             ``fixed_threshold`` — tests only: a base
+                             threshold to use instead of the permutation null.
         W:                   Spectral weighting matrix (or None).
         Wf:                  Frequency axis vector (or None).
         debug:               Print diagnostic info.
         hypotheses:          List from build_hypothesis_indices() (or None).
-        N_B:                 Secondary PRI spacing (for EVT cache key; None
-                             if single-rate).
-        N_A_exact:           Fractional PRI for rate A (for EVT cache key).
-                             Defaults to N if not provided.
-        N_B_exact:           Fractional PRI for rate B (for EVT cache key).
-                             Defaults to N_B if not provided.
+        N_B:                 Secondary PRI spacing (None if single-rate).
+        N_A_exact:           Fractional PRI for rate A (informational).
+        N_B_exact:           Fractional PRI for rate B (informational).
         max_detections:      Most above-threshold peaks to return (strongest
                              first, separated by the sidelobe merge distance).
-        k_folds:             Fold count for the EVT threshold (default: the
-                             module-level K). Must match fold_offsets /
-                             hypotheses and samples_needed.
+        k_folds:             Fold count (default: the module-level K). Must
+                             match fold_offsets / hypotheses and samples_needed.
+        n_null_permutations: Window permutations for the null distribution.
+        null_time_budget_s:  Stop permuting past this many seconds (per pass).
+        cycle:               Cycle counter for the per-cycle threshold log.
+        blanked_fraction:    Impulse-blanked fraction of this segment's IQ,
+                             carried into the per-cycle threshold log.
 
     Returns:
         (detections, noise_psd, best_candidate) where:
@@ -1299,7 +1398,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
 
     # --- Fold ---
     k_folds = K if k_folds is None else int(k_folds)
-    # k_folds keys the EVT threshold; if it disagrees with the geometry that
+    # k_folds sizes the fold; if it disagrees with the geometry that
     # is actually folded, the false-alarm rate is silently wrong.
     if k_folds < 1:
         raise ValueError(f'k_folds must be >= 1, got {k_folds}')
@@ -1314,6 +1413,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
     # Per-fold window offsets (fractional PRI, independently rounded)
     _fo = fold_offsets if fold_offsets is not None else np.arange(k_folds) * N
 
+    single_rate_pulse_idx = None
     if hypotheses is not None and len(hypotheses) > 0:
         best_scores, best_offsets, best_labels = fold_multi_hypothesis(
             power, hypotheses)
@@ -1325,8 +1425,8 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         effective_period = int(_fo[1]) if len(_fo) > 1 else int(N)
         search_range = min(effective_period, max_start)
 
-        pulse_idx = np.arange(search_range)[:, None] + _fo[None, :]
-        fold_scores = _compute_fold_scores(power, pulse_idx,
+        single_rate_pulse_idx = np.arange(search_range)[:, None] + _fo[None, :]
+        fold_scores = _compute_fold_scores(power, single_rate_pulse_idx,
                            local_radius=FOLD_LOCAL_RADIUS)
 
         best_scores  = np.max(fold_scores, axis=1)
@@ -1395,60 +1495,110 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         elif _elev_human:
             print(_elev_human)
 
-    # --- EVT threshold ---
-    n_hypotheses = len(hypotheses) if hypotheses else 1
+    # --- Detection threshold: null from this slice's own windows ---
     n_search_bins = (int(np.count_nonzero(frequency_mask))
                      if frequency_mask is not None else power.shape[0])
-    cache_N_A = N_A_exact if N_A_exact is not None else N
-    cache_N_B = N_B_exact if N_B_exact is not None else N_B
-    # The threshold is a max over the searched space; a cached value from a
-    # different mask or hypothesis set is the wrong false-alarm threshold.
-    search_key = (n_hypotheses, n_search_bins)
-    if evt_threshold_cache.get('search_key') != search_key:
-        evt_threshold_cache['threshold'] = None
-        evt_threshold_cache['search_key'] = search_key
-    if evt_threshold_cache.get('threshold') is None:
-        cache_dir = evt_threshold_cache.get('cache_dir')
-        mu, sigma = load_evt_cache(cache_dir, cache_N_A, k_folds, N_B=cache_N_B,
-                                   n_hypotheses=n_hypotheses,
-                                   n_search_bins=n_search_bins)
-        if mu is not None and sigma is not None and np.isfinite(mu) and np.isfinite(sigma) and sigma > 0:
-            base_threshold = max(gumbel_r.ppf(1.0 - pf, loc=mu, scale=sigma), 0.0)
-            _evt_human = (f'  [Loaded EVT cache: mu={mu:.4e}, sigma={sigma:.4e}, '
-                  f'threshold={base_threshold:.4e}]')
-            if slog:
-                slog.emit(EVT_THRESHOLD, _evt_human,
-                          source='cache', mu=float(mu), sigma=float(sigma),
-                          threshold=float(base_threshold))
-            else:
-                print(_evt_human, flush=True)
-        else:
-            n_hyp_str = f' ({n_hypotheses} hypotheses)' if n_hypotheses > 1 else ''
-            print(f'  [Generating EVT threshold via 100 noise trials{n_hyp_str}...]',
-                  flush=True)
-            base_threshold, mu, sigma = generate_evt_threshold(
-                n_w, n_ol, nfft, samples_needed, N, k_folds, pf,
-                fold_offsets=_fo, W=W, n_trials=100, debug=debug,
-                hypotheses=hypotheses,
-                frequency_mask=frequency_mask,
-            )
-            if np.isinf(base_threshold):
-                print(f'ERROR: Insufficient data for EVT threshold. '
-                      f'Segment length ({n_time} samples) too short for K={k_folds} folds.',
-                      flush=True)
-                return [], float('nan'), None
-            save_evt_cache(cache_dir, cache_N_A, k_folds, mu, sigma, N_B=cache_N_B,
-                           n_hypotheses=n_hypotheses,
-                           n_search_bins=n_search_bins)
-        evt_threshold_cache['threshold'] = base_threshold
-    else:
-        base_threshold = evt_threshold_cache['threshold']
+    # Winning-hypothesis pulse windows per bin (shared with results below).
+    hyp_lookup = {}
+    if hypotheses is not None:
+        for label, pidx in hypotheses:
+            hyp_lookup[label] = pidx
 
-    # Apply detection margin to lower the EVT threshold, increasing
-    # sensitivity at the cost of more near-threshold (marginal) detections.
-    # The two-tier confidence system classifies these via confidence_ratio.
+    def _winning_windows(b):
+        label = str(best_labels[b])
+        t0 = int(best_offsets[b])
+        if label in hyp_lookup and t0 < hyp_lookup[label].shape[0]:
+            return hyp_lookup[label][t0]
+        return t0 + _fo
+
+    fixed_threshold = threshold_state.get('fixed_threshold')
+    null_refined = False
+    n_dropped_windows = 0
+    if fixed_threshold is not None:
+        base_threshold, null_mu, null_sigma, n_perm_used = float(fixed_threshold), None, None, 0
+    else:
+        t_null_start = time.monotonic()
+
+        def _null(power_arr):
+            return permutation_null_threshold(
+                power_arr, noise_power, pf, n_null_permutations,
+                hypotheses=hypotheses if hypotheses else None,
+                pulse_idx=single_rate_pulse_idx if not hypotheses else None,
+                frequency_mask=frequency_mask,
+                time_budget_s=null_time_budget_s)
+
+        base_threshold, null_mu, null_sigma, n_perm_used = _null(power)
+        if np.isinf(base_threshold):
+            print(f'ERROR: Insufficient data for permutation null '
+                  f'({n_perm_used} usable permutations, n_time={n_time}, K={k_folds}).',
+                  flush=True)
+            return [], float('nan'), None
+
+        # First pass is conservative: a tag's pulses (and their sidelobes in
+        # neighbouring bins) inflate the null they are tested against, badly
+        # so for a strong tag at small K. Take the bins that clear it plus the
+        # strongest bin; for each whose fold looks like a pulse train (most
+        # folds well above the bin noise, no single dominant fold), redraw
+        # the train's windows from the rest of the slice and re-derive the
+        # null without it. A few coincident impulses fail the train test and
+        # stay in the null.
+        norm_scores = best_scores / noise_power
+        provisional = norm_scores > base_threshold * detection_margin
+        if frequency_mask is not None:
+            provisional &= frequency_mask
+            strongest = int(np.flatnonzero(frequency_mask)[np.argmax(norm_scores[frequency_mask])])
+        else:
+            strongest = int(np.argmax(norm_scores))
+        candidates = set(np.flatnonzero(provisional).tolist())
+        candidates.add(strongest)
+        drop_windows = []
+        for b in sorted(candidates):
+            on_idx = _winning_windows(b)
+            on_powers = _local_peak_powers_1d(power[b], on_idx, local_radius=FOLD_LOCAL_RADIUS)
+            if float(np.max(on_powers)) / max(float(np.sum(on_powers)), 1e-30) > DOMINANT_FOLD_THRESHOLD:
+                continue
+            if int(np.count_nonzero(on_powers > NULL_TRAIN_FOLD_SNR * noise_power[b])) < -(-len(on_powers) // 2):
+                continue
+            # The segment holds more than K pulses of the train (it is sized
+            # for the slowest rate); extend the fold's grid across the whole
+            # segment so those pulses do not stay in the null either.
+            train = _extend_pulse_grid(on_idx, n_time)
+            # A pulse spans up to 3 windows at 50 % overlap, the fold index may
+            # sit one window early (pooling), and the grid rounds by up to one
+            # window, so drop from r+2 before to r+3 after each start.
+            for d in range(-(FOLD_LOCAL_RADIUS + 2), FOLD_LOCAL_RADIUS + 4):
+                drop_windows.append(train + d)
+        if drop_windows:
+            drop = np.unique(np.concatenate(drop_windows))
+            refined = resample_windows(power, drop)
+            if refined is not power:
+                base_threshold, null_mu, null_sigma, n_perm_used = _null(refined)
+                null_refined = not np.isinf(base_threshold)
+                n_dropped_windows = int(drop[(drop >= 0) & (drop < n_time)].size)
+                if not null_refined:
+                    base_threshold, null_mu, null_sigma, n_perm_used = _null(power)
+
+        null_ms = (time.monotonic() - t_null_start) * 1000.0
+        _null_human = (f'  [Null: {n_perm_used} perms  mu={null_mu if null_mu is None else f"{null_mu:.4e}"}'
+                       f'  sigma={null_sigma if null_sigma is None else f"{null_sigma:.4e}"}'
+                       f'  threshold={base_threshold:.4e}'
+                       f'{"  refined" if null_refined else ""}  {null_ms:.0f} ms]') if debug else None
+        if slog:
+            slog.emit(CYCLE_THRESHOLD, _null_human, cycle=cycle,
+                      mu=null_mu, sigma=null_sigma, n_perm=n_perm_used,
+                      threshold=float(base_threshold),
+                      refined=null_refined, dropped_windows=n_dropped_windows,
+                      detection_margin=float(detection_margin),
+                      n_search_bins=n_search_bins,
+                      blanked_fraction=float(blanked_fraction),
+                      null_ms=null_ms)
+        elif _null_human:
+            print(_null_human, flush=True)
+
+    # Detection margin scales the threshold; < 1 trades false alarms for
+    # sensitivity. Logged once per run since it is a fixed setting.
     base_threshold *= detection_margin
-    if detection_margin != 1.0 and not evt_threshold_cache.get('margin_logged'):
+    if detection_margin != 1.0 and not threshold_state.get('margin_logged'):
         _margin_human = (f'  [Detection margin={detection_margin:.2f} applied: '
               f'effective threshold={base_threshold:.4e}]')
         if slog:
@@ -1457,7 +1607,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                       effective_threshold=float(base_threshold))
         else:
             print(_margin_human, flush=True)
-        evt_threshold_cache['margin_logged'] = True
+        threshold_state['margin_logged'] = True
 
     # Scale threshold by per-bin noise power (frequency-dependent)
     threshold = base_threshold * noise_power
@@ -1574,13 +1724,6 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         return [], median_noise_psd, best_cand
 
     # --- Build detection results ---
-    # Build a lookup from hypothesis label to its pulse_idx matrix so we can
-    # recover the exact pulse window indices for the winning hypothesis.
-    hyp_lookup = {}
-    if hypotheses is not None:
-        for label, pidx in hypotheses:
-            hyp_lookup[label] = pidx
-
     results = []
     for b in det_bins:
         label = str(best_labels[b])
@@ -1592,12 +1735,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         fold_score_psd = float(best_scores[b] / psd_scale)
         score_ratio = float(best_scores[b] / max(threshold[b], 1e-30))
         # Per-fold diagnostics: individual on-window powers and SNRs.
-        # Use winning hypothesis pulse_idx if available, else fold_offsets.
-        t0 = int(best_offsets[b])
-        if label in hyp_lookup and t0 < hyp_lookup[label].shape[0]:
-            on_idx = hyp_lookup[label][t0]
-        else:
-            on_idx = t0 + _fo
+        on_idx = _winning_windows(b)
         on_powers = _local_peak_powers_1d(
             power[b], on_idx, local_radius=FOLD_LOCAL_RADIUS)
         fold_snrs_db = (10.0 * np.log10(on_powers / noise_power[b])).tolist()
@@ -1695,7 +1833,7 @@ def main():
     global _should_stop
 
     ap = argparse.ArgumentParser(
-        description='VHF Pulse Detector (configurable K, EVT threshold)',
+        description='VHF Pulse Detector (configurable K, permutation-null threshold)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
     ap.add_argument('--tp',  type=float, default=0.015,
@@ -1720,10 +1858,17 @@ def main():
                     help='UDP port to send detected pulses to (0 = disabled)')
     ap.add_argument('--control-port', type=int, default=0,
                     help='Local UDP port for collection ARM commands (0 = free-running)')
-    ap.add_argument('--threshold-cache-dir', type=str, default=None,
-                    help='Directory for EVT threshold cache files (default: no disk cache)')
-    ap.add_argument('--detection-margin', type=float, default=0.90,
-                    help='EVT threshold multiplier, lower = more sensitive (default: 0.90)')
+    ap.add_argument('--null-permutations', type=int, default=40,
+                    help='STFT window permutations per cycle for the detection '
+                         'threshold null (default: 40)')
+    ap.add_argument('--null-time-budget', type=float, default=10.0,
+                    help='Seconds after which a null pass stops adding permutations '
+                         f'(never below {NULL_MIN_PERMUTATIONS}); 0 = no limit (default: 10)')
+    ap.add_argument('--impulse-blank-factor', type=float, default=0.0,
+                    help='Zero IQ bursts shorter than a quarter pulse whose magnitude '
+                         'exceeds this multiple of the segment median (0 = off)')
+    ap.add_argument('--detection-margin', type=float, default=1.0,
+                    help='Threshold multiplier, lower = more sensitive (default: 1.0)')
     ap.add_argument('--confidence-ratio', type=float, default=1.3,
                     help='Score/threshold ratio for confirmed status (default: 1.3)')
     ap.add_argument('--lock-score-ratio', type=float, default=3.0,
@@ -1760,6 +1905,12 @@ def main():
         sys.exit(f'Error: --fs (sample rate) must be positive, got {args.fs}')
     if args.detection_margin <= 0:
         sys.exit(f'Error: --detection-margin must be positive, got {args.detection_margin}')
+    if args.null_permutations < NULL_MIN_PERMUTATIONS:
+        sys.exit(f'Error: --null-permutations must be >= {NULL_MIN_PERMUTATIONS}, got {args.null_permutations}')
+    if args.null_time_budget < 0:
+        sys.exit(f'Error: --null-time-budget must be >= 0, got {args.null_time_budget}')
+    if args.impulse_blank_factor < 0:
+        sys.exit(f'Error: --impulse-blank-factor must be >= 0, got {args.impulse_blank_factor}')
     if args.confidence_ratio <= 0:
         sys.exit(f'Error: --confidence-ratio must be positive, got {args.confidence_ratio}')
     if args.lock_score_ratio <= 0:
@@ -1841,15 +1992,16 @@ def main():
     # Spectral weighting matrix (sub-bin matched filter, uavrt_detection style)
     W, Wf = build_weighting_matrix(n_w, args.fs)
     nfft = W.shape[1]   # output frequency bins (= 2*n_w for default zetas)
+    usable_band_mask = np.abs(Wf) <= USABLE_BAND_FRACTION * args.fs / 2.0
 
     # The acquisition search band is fixed by CLI args, so an empty band is a
     # configuration error; catch it here rather than as a run of no-detections.
     if args.freq and args.center_freq > 0:
         expected_offset_hz = args.freq - args.center_freq * 1e6
-        if not np.any(np.abs(Wf - expected_offset_hz) <= ACQUISITION_SEARCH_HZ):
+        if not np.any(usable_band_mask & (np.abs(Wf - expected_offset_hz) <= ACQUISITION_SEARCH_HZ)):
             sys.exit(
                 f'Error: --freq is {expected_offset_hz:+.0f} Hz from --center-freq, '
-                f'outside the channel (\u00b1{Wf.max():.0f} Hz) plus the '
+                f'outside the usable channel (\u00b1{USABLE_BAND_FRACTION * args.fs / 2.0:.0f} Hz) plus the '
                 f'{ACQUISITION_SEARCH_HZ:.0f} Hz search tolerance.')
 
     if args.debug:
@@ -1886,8 +2038,8 @@ def main():
                   if N_B is not None else '')
     _cfreq_line = (f'\n  Center freq     {args.center_freq:.6f} MHz'
                    if args.center_freq > 0 else '')
-    _cache_line = (f'\n  EVT cache dir   {args.threshold_cache_dir}'
-                   if args.threshold_cache_dir else '')
+    _blank_line = (f'\n  Impulse blank   {args.impulse_blank_factor:.1f} x median'
+                   if args.impulse_blank_factor > 0 else '')
     _startup_human = (
         f'=== VHF Pulse Detector ===\n'
         f'  Pulse width     {args.tp * 1000:.1f} ms\n'
@@ -1902,12 +2054,13 @@ def main():
         f'  Segment         {samples_needed} samples  ({seg_sec:.1f} s)\n'
         f'  False alarm %   {args.pf * 100:.2g}%  '
         f'(~{fa_per_hour:.2f} false alarms/hour)\n'
+        f'  Null perms      {args.null_permutations}  (budget {args.null_time_budget:.0f} s)\n'
         f'  Det margin      {args.detection_margin:.2f}\n'
         f'  Conf ratio      {args.confidence_ratio:.2f}\n'
         f'  UDP port        {args.port}\n'
         f'  Warmup discard  {args.warmup_seconds:.1f} s'
         f'{_cfreq_line}'
-        f'{_cache_line}\n'
+        f'{_blank_line}\n'
     )
     slog.emit(STARTUP, _startup_human,
               tp=args.tp, tip=args.tip,
@@ -2022,10 +2175,10 @@ def main():
     collection_ready_sent = False
     last_ready_sent = float('-inf')
 
-    # EVT threshold cache (regenerated if geometry changes).
-    evt_threshold_cache = {}
-    if args.threshold_cache_dir:
-        evt_threshold_cache['cache_dir'] = args.threshold_cache_dir
+    # Cross-cycle threshold bookkeeping (see fold_detect threshold_state).
+    threshold_state = {}
+    # Shorter than this and an above-threshold burst is an impulse, not a pulse.
+    impulse_max_run = max(1, n_w // 4)
 
     # Start a dedicated heartbeat thread (pure timer, 1 Hz)
     heartbeat_stop = threading.Event()
@@ -2206,6 +2359,9 @@ def main():
             stream.retire(cursor)
             had_gap = bool(had_gap_fills)
 
+            segment, blanked_fraction = blank_impulses(
+                segment, args.impulse_blank_factor, impulse_max_run)
+
             t_stft_start = time.monotonic()
             power, n_win = compute_stft_power(segment, n_w, n_ol, nfft, W=W,
                                                min_windows=K)
@@ -2244,33 +2400,20 @@ def main():
                               f'len={gf_len} samples '
                               f'(covers STFT windows {win_start}-{win_end})')
 
-            # Invalidate EVT cache if geometry changed. The search band is the
-            # acquisition band throughout: after the provisional lock the fold
-            # search only feeds the candidate bank, so it must keep looking at
-            # the whole band, not just around the current lock.
-            n_freq_cur = power.shape[0]
-            n_time_cur = power.shape[1]
+            # The search band is the acquisition band throughout: after the
+            # provisional lock the fold search only feeds the candidate bank,
+            # so it must keep looking at the whole band, not just around the
+            # current lock. The decimator's transition band is never searched.
+            frequency_mask = usable_band_mask.copy()
             if args.freq and args.center_freq > 0:
                 expected_offset_hz = args.freq - args.center_freq * 1e6
-                frequency_mask = np.abs(Wf - expected_offset_hz) <= ACQUISITION_SEARCH_HZ
-            else:
-                frequency_mask = None
-            n_search_bins = (int(np.count_nonzero(frequency_mask))
-                             if frequency_mask is not None else n_freq_cur)
-            if (evt_threshold_cache.get('n_freq') != n_freq_cur or
-                evt_threshold_cache.get('n_time') != n_time_cur or
-                evt_threshold_cache.get('n_search_bins') != n_search_bins):
-                evt_threshold_cache['threshold'] = None
-                evt_threshold_cache['margin_logged'] = False
-                evt_threshold_cache['n_freq'] = n_freq_cur
-                evt_threshold_cache['n_time'] = n_time_cur
-                evt_threshold_cache['n_search_bins'] = n_search_bins
+                frequency_mask &= np.abs(Wf - expected_offset_hz) <= ACQUISITION_SEARCH_HZ
 
             t_fold_start = time.monotonic()
             detections, nodet_noise_psd, best_candidate = fold_detect(
                                      power, N, args.pf, args.fs, nfft,
                                      n_w, n_ol, samples_needed,
-                                     evt_threshold_cache,
+                                     threshold_state,
                                      fold_offsets=fold_offsets,
                                      W=W, Wf=Wf,
                                      debug=args.debug,
@@ -2286,7 +2429,12 @@ def main():
                                      max_detections=(MAX_LOCK_CANDIDATES
                                                      if collection_control is not None
                                                      else 1),
-                                     k_folds=K)
+                                     k_folds=K,
+                                     n_null_permutations=args.null_permutations,
+                                     null_time_budget_s=(args.null_time_budget
+                                                         if args.null_time_budget > 0 else None),
+                                     cycle=cycle,
+                                     blanked_fraction=blanked_fraction)
             t_fold_end = time.monotonic()
             bank_detections = detections
             detections = detections[:1]
@@ -2348,7 +2496,7 @@ def main():
                             lock_candidates, current_candidate,
                             frequency_tolerance_hz=LOCKED_SEARCH_HZ,
                             pri_tolerance_seconds=n_ws / args.fs,
-                            phase_tolerance_seconds=n_ws / args.fs,
+                            phase_tolerance_seconds=LOCK_PHASE_TOLERANCE_STEPS * n_ws / args.fs,
                             locked=pulse_lock is not None,
                             sightings=lock_sightings, slice_id=cycle_slice_id)
                         if bank_index is None:
@@ -2388,6 +2536,15 @@ def main():
                         elif event == 'seen':
                             print(f'CANDIDATE {bank_index} sighted again on slice '
                                   f'{cycle_slice_id} ({len(sightings)} slice(s))',
+                                  flush=True)
+                        elif event == 'reanchored':
+                            # Earlier headings were measured at the timing
+                            # that just missed; measure them all again.
+                            for buffered in buffered_slices:
+                                buffered['measured'].discard(bank_index)
+                            print(f'CANDIDATE {bank_index} re-anchored on slice '
+                                  f'{cycle_slice_id}: phase projected from its '
+                                  f'timing missed; re-measuring all buffered headings',
                                   flush=True)
                         slog.emit(LOCK_CANDIDATE,
                                   f'  [CANDIDATE {bank_index}] {event} '

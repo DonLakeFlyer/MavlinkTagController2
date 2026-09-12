@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 from log_schema import (read_jsonl, entries_by_type,
                         STARTUP, DETECTION, NO_DETECTION, FOLDS, TIMING,
                         NOISE_ELEVATED, GAP_EVENT,
-                        EVT_THRESHOLD, HYPOTHESIS, SESSION_END)
+                        EVT_THRESHOLD, CYCLE_THRESHOLD, HYPOTHESIS, SESSION_END)
 
 # Decimator rate warnings beyond this count are treated as a sustained mismatch
 # rather than a startup transient (measured-rate check runs ~1/s).
@@ -230,6 +230,8 @@ class DetectorSummary:
     gap_events: List[dict] = field(default_factory=list)
     hypothesis_summaries: List[dict] = field(default_factory=list)
     evt_info: List[dict] = field(default_factory=list)
+    # Per-cycle data-derived thresholds (CYCLE_THRESHOLD records)
+    cycle_thresholds: List[dict] = field(default_factory=list)
     heading: Optional[str] = None  # e.g. '000', '045' for rotation headings
     revisit_slice: Optional[int] = None  # heading-NNN-sSS: confirmation revisit of a flown heading
 
@@ -246,6 +248,8 @@ class BearingResult:
     # Trailing columns added with protocol v3; absent in older logs.
     n_sighted_slices: Optional[int] = None
     confirmed: Optional[bool] = None
+    # Added 2026-09: detections attributed to the tag, with or without a bearing.
+    heard: Optional[bool] = None
 
 
 @dataclass
@@ -537,6 +541,9 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
     # --- EVT_THRESHOLD ---
     det.evt_info = entries_by_type(entries, EVT_THRESHOLD)
 
+    # --- CYCLE_THRESHOLD ---
+    det.cycle_thresholds = entries_by_type(entries, CYCLE_THRESHOLD)
+
     # --- SESSION_END ---
     for e in entries_by_type(entries, SESSION_END):
         if per_slice:
@@ -608,11 +615,11 @@ def parse_bearing_log(path: str) -> List[BearingResult]:
                 if not line.strip():
                     continue
                 parts = line.strip().split(',')
-                # 5 = original, 7 = + lat/lon, 9 = protocol v3; anything else is
-                # a truncated write.
-                if len(parts) not in (5, 7, 9):
+                # 5 = original, 7 = + lat/lon, 9 = protocol v3, 10 = + heard;
+                # anything else is a truncated write.
+                if len(parts) not in (5, 7, 9, 10):
                     print(f'Warning: skipping malformed row {line_no} in {path}: '
-                          f'{len(parts)} fields (expected 5, 7 or 9)', file=sys.stderr)
+                          f'{len(parts)} fields (expected 5, 7, 9 or 10)', file=sys.stderr)
                     continue
                 try:
                     br = BearingResult(
@@ -630,6 +637,10 @@ def parse_bearing_log(path: str) -> List[BearingResult]:
                         if parts[8] not in ('0', '1'):
                             raise ValueError(f'confirmed must be 0 or 1, got {parts[8]!r}')
                         br.confirmed = parts[8] == '1'
+                    if len(parts) >= 10:
+                        if parts[9] not in ('0', '1'):
+                            raise ValueError(f'heard must be 0 or 1, got {parts[9]!r}')
+                        br.heard = parts[9] == '1'
                 except ValueError as exc:
                     print(f'Warning: skipping malformed row {line_no} in {path}: {exc}',
                           file=sys.stderr)
@@ -1142,6 +1153,32 @@ def generate_report(log_dir: str) -> str:
                       f'threshold={e.get("effective_threshold", 0):.4e}')
             w()
 
+        # Per-cycle data-derived thresholds
+        if det.cycle_thresholds:
+            w('### Per-cycle threshold (permutation null)')
+            w()
+            thr = [e.get('threshold') for e in det.cycle_thresholds
+                   if isinstance(e.get('threshold'), (int, float))]
+            if thr:
+                w(f'- **Base threshold:** {_stat_line(thr, "", ".3g")}')
+            n_perm = [e.get('n_perm') for e in det.cycle_thresholds
+                      if isinstance(e.get('n_perm'), (int, float))]
+            if n_perm:
+                w(f'- **Permutations:** min {min(n_perm)}, max {max(n_perm)}')
+            null_ms = [e.get('null_ms') for e in det.cycle_thresholds
+                       if isinstance(e.get('null_ms'), (int, float))]
+            if null_ms:
+                w(f'- **Null time:** {_stat_line(null_ms, "ms", ".0f")}')
+            refined = sum(1 for e in det.cycle_thresholds if e.get('refined'))
+            w(f'- **Refined after a train cleared the first pass:** '
+              f'{refined}/{len(det.cycle_thresholds)} cycles')
+            blanked = [e.get('blanked_fraction') for e in det.cycle_thresholds
+                       if isinstance(e.get('blanked_fraction'), (int, float))]
+            if blanked and max(blanked) > 0:
+                w(f'- **Impulse-blanked IQ:** mean {100 * sum(blanked) / len(blanked):.2f} %, '
+                  f'max {100 * max(blanked):.2f} %')
+            w()
+
         # Timing stats
         if det.timing_total_ms:
             w('### Processing Timing')
@@ -1283,9 +1320,11 @@ def generate_report(log_dir: str) -> str:
                 if b.confirmed is False:
                     bearing_str += ' (unconfirmed)'
             elif b.n_valid_slices == 0:
-                bearing_str = 'none (no detections)'
+                bearing_str = 'none (nothing heard)'
+            elif b.n_sighted_slices == 0:
+                bearing_str = 'none (heard, no lock)'
             else:
-                bearing_str = 'none (below confidence floor)'
+                bearing_str = 'none (heard, below confidence floor)'
             sighted_str = ('n/a' if b.n_sighted_slices is None
                            else str(b.n_sighted_slices))
             w(f'| {b.tag_id} | {bearing_str} | '

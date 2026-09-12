@@ -8,7 +8,7 @@ classification are in [CONFIDENCE_PIPELINE.md](CONFIDENCE_PIPELINE.md); the
 dual-rate hypothesis bank is in [RATE_SWITCH_DETECTOR.md](RATE_SWITCH_DETECTOR.md).
 
 ```
-UDP (3840 Hz complex64)  →  ring  →  IQ stream  →  segment  →  STFT·W  →  fold  →  EVT  →  peaks  →  report
+UDP (3840 Hz complex64)  →  ring  →  IQ stream  →  segment  →  [blank]  →  STFT·W  →  fold  →  null  →  peaks  →  report
                         udp_receiver.py  iq_stream.py        (K·PRI)
 ```
 
@@ -91,34 +91,54 @@ at any K. Gain is ~`10·log10(K)` dB over a single pulse (13 dB at K=20). With a
 secondary PRI, the fold runs a bank of rate-switch hypotheses and the best
 hypothesis wins (`fold_multi_hypothesis`).
 
-The search is masked to `ACQUISITION_SEARCH_HZ` = ±2000 Hz around the entered
-tag offset when `--freq` and `--center-freq` are given.
+The search is always masked to the decimator's passband, `|f| ≤
+ USABLE_BAND_FRACTION (0.9) × fs/2` = ±1728 Hz: the last FIR stage in
+`decimator/src/main.cpp` has its cutoff at 0.45 × fs, so the outer 10 % of the
+channel is transition band — attenuated, partly aliased, and where a strong
+on-channel tag's spectral leakage otherwise shows up as spurious candidates.
+When `--freq` and `--center-freq` are given it is further masked to
+`ACQUISITION_SEARCH_HZ` = ±2000 Hz around the entered tag offset. The same
+mask bounds the permutation null below.
 
-## 6. EVT threshold
+## 6. Detection threshold (window-permutation null)
 
-Rather than an analytic Gamma tail, the null distribution of the fold maximum is
-learned empirically (`generate_evt_threshold`):
+The null distribution of the fold maximum is derived from each dwell's own
+spectrogram (`permutation_null_threshold`), once per cycle, with no cache:
 
-1. 100 unit-variance complex-Gaussian noise trials are pushed through the *same*
-   STFT·W → fold → masked search as real data (this captures window overlap and
-   W-matrix correlations).
-2. The maximum score of each trial is recorded; a Gumbel (`scipy.stats.gumbel_r`)
-   is fitted to the 100 maxima (as MATLAB `evfit`).
-3. `base_threshold = gumbel_r.ppf(1 − pf)`, then × `--detection-margin` (0.90).
+1. The STFT time windows are randomly permuted and the *identical* fold search
+   (same hypotheses, same frequency mask, same local-max pooling) is re-run.
+   Permutation destroys periodicity at the PRI while preserving each bin's
+   level, colour, spur bins, tail shape and impulsiveness — so the null
+   describes *this* heading's noise, including directional interference.
+2. Each permutation's maximum of `fold_score[f] / noise_power[f]` over the
+   searched bins is one null sample; `--null-permutations` (default 40) samples
+   are fitted with a Gumbel (`scipy.stats.gumbel_r`).
+3. `base_threshold = gumbel_r.ppf(1 − pf)`, then × `--detection-margin`
+   (default 1.0, i.e. the threshold *is* `pf`).
 4. Per bin: `threshold[f] = base_threshold × noise_power[f]`.
 
-The trial result depends only on geometry (`n_freq`, `n_time`, K, number of
-hypotheses, number of searched bins), so it is cached in
-`--threshold-cache-dir` under a name encoding those parameters
-(`…-F<bins>-K<K>-Trials100-S2.pythreshold`) and regenerated only when the
-geometry changes. Generation takes on the order of a second per hypothesis on
-a Pi.
+Because a tag's pulses (and their spectral sidelobes in neighbouring bins)
+remain in the permuted data, the first pass is conservative. If any bin clears
+it with a non-transient fold (`max_fold_fraction ≤ DOMINANT_FOLD_THRESHOLD`),
+that train's windows — extended across the whole segment at the winning
+hypothesis's edge spacings — are redrawn from the rest of the slice
+(`resample_windows`) and the null is derived again. Detections and their
+`score_ratio` are then judged against this refined threshold. A pure-noise
+slice never triggers refinement more often than `pf`, so the false-alarm rate
+is unchanged by it.
 
-Caveat established from the Apr-11 data: the threshold is calibrated to
-Gaussian noise of the *estimated* per-bin level. If the field noise is not
-well described by that estimate the realised false-alarm rate can be far above
-`pf` (88 % of dwells vs 5 % nominal on 2026-04-11). See the calibration item in
-[docs/proposals/README.md](../proposals/README.md).
+Before the STFT, `--impulse-blank-factor` (default 0 = off) zeros
+above-threshold bursts shorter than a quarter pulse width, removing corona /
+switching impulses without touching collar pulses; the blanked fraction is
+logged per cycle.
+
+Each cycle writes a `cycle_threshold` record (`mu`, `sigma`, `n_perm`,
+`threshold`, `refined`, `dropped_windows`, `blanked_fraction`, `null_ms`) so
+per-heading threshold drift is visible in the `.jsonl`.
+
+Cost is `n_perm` fold searches on an already computed spectrogram; the STFT
+and the acquisition fold themselves are unchanged. Wall time is logged as
+`null_ms`.
 
 ## 7. Peak selection
 
@@ -170,7 +190,7 @@ a doubled Δt means a missed cycle. True inter-pulse timing needs raw IQ
 
 | Stage | Per cycle |
 | --- | --- |
-| EVT threshold generation | ~0.8 s, first cycle per geometry (then cached) |
+| Permutation-null threshold | `--null-permutations` (40) fold searches on the computed spectrogram, every cycle; wall time logged as `null_ms` |
 | STFT + W | ~5 ms |
 | Fold | ~3 ms |
 | Peak selection | ~1 ms |
@@ -181,13 +201,13 @@ below the cycle period. Memory: one power spectrogram per buffered slice
 
 ## Rationale
 
-- **EVT rather than Gamma.** The trials push *Gaussian* noise through the real
-  STFT / W-matrix / fold / masked-search geometry, so the fitted maximum
-  accounts for window overlap, W-matrix correlation and the size of the search
-  space — things an analytic Gamma tail on a single bin gets wrong. It does
-  **not** adapt to non-Gaussian field noise (arcs, static); the realised
-  false-alarm rate in such noise can be far above `pf`, as on 2026-04-11. That
-  gap is the calibration item in [docs/proposals/README.md](../proposals/README.md).
+- **Permutation null rather than a Gaussian Monte Carlo.** The earlier
+  threshold pushed synthetic Gaussian noise through the geometry once and
+  cached it; it tracked the noise *level* but not its tail shape, colour or
+  direction, and on 2026-04-11 88 % of dwells "detected" at a nominal 5 %.
+  Permuting the slice's own windows keeps every non-periodic property of the
+  real noise and still captures window overlap, W-matrix correlation and the
+  search-space size, because the identical search is re-run.
 - **W matrix rather than zero-padding.** Same sub-bin resolution with the
   matched-filter SNR gain, and identical to the uavrt reference so results are
   comparable.

@@ -27,7 +27,12 @@ TIMING           = 'timing'
 NOISE_STATS      = 'noise_stats'
 NOISE_ELEVATED   = 'noise_elevated'
 GAP_EVENT        = 'gap_event'
+# One-off threshold notes (detection margin); replayed as preamble.
 EVT_THRESHOLD    = 'evt_threshold'
+# Per-cycle data-derived threshold: Gumbel (mu, sigma) of the window-permutation
+# null, n_perm, base threshold, impulse-blanked IQ fraction. One record per
+# dwell, so per-heading threshold drift is visible.
+CYCLE_THRESHOLD  = 'cycle_threshold'
 HYPOTHESIS       = 'hypothesis'
 SESSION_END      = 'session_end'
 STFT_DEBUG       = 'stft_debug'

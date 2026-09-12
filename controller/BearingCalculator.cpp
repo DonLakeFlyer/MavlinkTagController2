@@ -23,15 +23,50 @@ std::optional<float> BearingCalculator::revisitHeadingFor(const std::vector<Resu
     return std::nullopt;
 }
 
-void BearingCalculator::addSlice(float heading_deg, double signal_power, uint32_t tag_id,
-                                 double snr_db, uint8_t candidate_id, bool sighted)
+uint32_t BearingCalculator::largestFrequencyCluster(const std::vector<double>& freqsHz, double toleranceHz)
 {
-    _slices.push_back({heading_deg, signal_power, tag_id, snr_db, true, candidate_id, sighted});
+    uint32_t best = 0;
+    for (const double centre : freqsHz) {
+        if (!std::isfinite(centre)) continue;
+        uint32_t n = 0;
+        for (const double f : freqsHz) {
+            if (std::isfinite(f) && std::fabs(f - centre) <= toleranceHz) ++n;
+        }
+        best = std::max(best, n);
+    }
+    return best;
 }
 
-void BearingCalculator::addNoDetection(float heading_deg, uint32_t tag_id)
+void BearingCalculator::addSlice(float heading_deg, double signal_power, uint32_t tag_id,
+                                 double snr_db, uint8_t candidate_id, bool sighted,
+                                 double noise_psd)
 {
-    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false, 0, false});
+    _slices.push_back({heading_deg, signal_power, tag_id, snr_db, true, candidate_id, sighted, noise_psd});
+}
+
+void BearingCalculator::addNoDetection(float heading_deg, uint32_t tag_id, double noise_psd)
+{
+    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false, 0, false, noise_psd});
+}
+
+std::vector<double> BearingCalculator::sliceWeights(const std::vector<SliceData>& slices)
+{
+    std::vector<double> known;
+    for (const auto& s : slices) {
+        if (std::isfinite(s.noise_psd) && s.noise_psd > 0.0) known.push_back(s.noise_psd);
+    }
+    std::vector<double> weights(slices.size(), 1.0);
+    if (known.empty()) return weights;
+    std::sort(known.begin(), known.end());
+    const double reference = known[known.size() / 2];
+    for (size_t i = 0; i < slices.size(); ++i) {
+        const double n = slices[i].noise_psd;
+        if (std::isfinite(n) && n > 0.0) {
+            const double ratio = reference / n;
+            weights[i] = ratio * ratio;
+        }
+    }
+    return weights;
 }
 
 void BearingCalculator::reset()
@@ -97,6 +132,21 @@ std::vector<BearingCalculator::Result> BearingCalculator::solveCandidates() cons
     return results;
 }
 
+bool BearingCalculator::_isBetterCandidate(const Result& candidate, const Result& incumbent)
+{
+    const float delta = candidate.r_squared - incumbent.r_squared;
+    if (std::fabs(delta) > kCandidateConfidenceTolerance) {
+        return delta > 0.0f;
+    }
+    if (candidate.n_sighted_slices != incumbent.n_sighted_slices) {
+        return candidate.n_sighted_slices > incumbent.n_sighted_slices;
+    }
+    if (candidate.n_valid_slices != incumbent.n_valid_slices) {
+        return candidate.n_valid_slices > incumbent.n_valid_slices;
+    }
+    return candidate.best_snr > incumbent.best_snr;
+}
+
 std::vector<BearingCalculator::Result> BearingCalculator::solve() const
 {
     std::map<uint32_t, Result> best;
@@ -104,9 +154,7 @@ std::vector<BearingCalculator::Result> BearingCalculator::solve() const
         auto it = best.find(candidate.tag_id);
         if (it == best.end()) {
             best.emplace(candidate.tag_id, candidate);
-        } else if (candidate.r_squared > it->second.r_squared
-                   || (candidate.r_squared == it->second.r_squared
-                       && candidate.n_valid_slices > it->second.n_valid_slices)) {
+        } else if (_isBetterCandidate(candidate, it->second)) {
             it->second = candidate;
         }
     }
@@ -122,41 +170,43 @@ std::vector<BearingCalculator::Result> BearingCalculator::solve() const
     return results;
 }
 
-// Least-squares fit of power(θ) = A·pattern(θ-φ) + B for a fixed φ.
+// Weighted least-squares fit of power(θ) = A·pattern(θ-φ) + B for a fixed φ.
 // B is only free when there are enough detections to constrain it; otherwise
 // it is pinned at 0 (signal_power is already noise-subtracted).
 void BearingCalculator::_fitAmplitude(const std::vector<double>& g,
                                       const std::vector<double>& p,
+                                      const std::vector<double>& w,
                                       bool fitFloor, double& A, double& B)
 {
     const int n = static_cast<int>(p.size());
-    double sg = 0.0, sgg = 0.0, sp = 0.0, sgp = 0.0;
+    double sw = 0.0, swg = 0.0, swgg = 0.0, swp = 0.0, swgp = 0.0;
     for (int i = 0; i < n; ++i) {
-        sg  += g[i];
-        sgg += g[i] * g[i];
-        sp  += p[i];
-        sgp += g[i] * p[i];
+        sw   += w[i];
+        swg  += w[i] * g[i];
+        swgg += w[i] * g[i] * g[i];
+        swp  += w[i] * p[i];
+        swgp += w[i] * g[i] * p[i];
     }
     if (fitFloor) {
-        const double det = n * sgg - sg * sg;
-        if (std::abs(det) > 1e-12) {
-            A = (n * sgp - sg * sp) / det;
-            B = (sp - A * sg) / n;
+        const double det = sw * swgg - swg * swg;
+        if (std::abs(det) > 1e-12 && sw > 0.0) {
+            A = (sw * swgp - swg * swp) / det;
+            B = (swp - A * swg) / sw;
             if (A >= 0.0 && B >= 0.0) return;
             if (A >= 0.0) {
                 // Negative floor is unphysical and would let the model predict
                 // zero power at censored headings; fall back to the B=0 boundary.
                 B = 0.0;
-                A = sgg > 1e-12 ? std::max(0.0, sgp / sgg) : 0.0;
+                A = swgg > 1e-12 ? std::max(0.0, swgp / swgg) : 0.0;
                 return;
             }
         }
         A = 0.0;
-        B = std::max(0.0, sp / n);
+        B = sw > 0.0 ? std::max(0.0, swp / sw) : 0.0;
         return;
     }
     B = 0.0;
-    A = sgg > 1e-12 ? std::max(0.0, sgp / sgg) : 0.0;
+    A = swgg > 1e-12 ? std::max(0.0, swgp / swgg) : 0.0;
 }
 
 BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const std::vector<SliceData>& slices) const
@@ -166,19 +216,23 @@ BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const
     result.bearing_deg = std::numeric_limits<float>::quiet_NaN();
     result.r_squared = 0.0f;
 
-    std::vector<double> detHeadings, detPowers, censHeadings;
+    std::vector<double> detHeadings, detPowers, detWeights, censHeadings, censWeights;
+    const std::vector<double> weights = sliceWeights(slices);
     double bestSnr = -1e9;
     double bestPower = -std::numeric_limits<double>::infinity();
     double minPositivePower = std::numeric_limits<double>::infinity();
     float bestHeading = 0;
     uint32_t nSighted = 0;
-    for (const auto& s : slices) {
+    for (size_t i = 0; i < slices.size(); ++i) {
+        const auto& s = slices[i];
         if (!s.detected) {
             censHeadings.push_back(s.heading_deg);
+            censWeights.push_back(weights[i]);
             continue;
         }
         detHeadings.push_back(s.heading_deg);
         detPowers.push_back(s.signal_power);
+        detWeights.push_back(weights[i]);
         bestSnr = std::max(bestSnr, s.snr_db);
         if (s.sighted) ++nSighted;
         if (s.signal_power > bestPower) {
@@ -206,8 +260,9 @@ BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const
     const double censorLimit = kCensorFraction * minPositivePower;
     const bool fitFloor = nDet >= kMinDetectedForFloor;
 
+    // Weighted energy: the reference the cost is judged against.
     double sumPowerSq = 0.0;
-    for (double p : detPowers) sumPowerSq += p * p;
+    for (int i = 0; i < nDet; ++i) sumPowerSq += detWeights[i] * detPowers[i] * detPowers[i];
 
     // The strongest detection must lie in the front half of the pattern, so
     // only scan φ within ±90° of it. This also breaks the front/back mirror
@@ -221,16 +276,16 @@ BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const
     for (int k = 0; k < nSteps; ++k) {
         const double phi = bestHeading - 90.0 + k * kScanStepDeg;
         for (int i = 0; i < nDet; ++i) g[i] = patternLinear(detHeadings[i] - phi);
-        _fitAmplitude(g, detPowers, fitFloor, A, B);
+        _fitAmplitude(g, detPowers, detWeights, fitFloor, A, B);
 
         double cost = 0.0;
         for (int i = 0; i < nDet; ++i) {
             const double r = detPowers[i] - (A * g[i] + B);
-            cost += r * r;
+            cost += detWeights[i] * r * r;
         }
         for (int j = 0; j < nCens; ++j) {
             const double excess = A * patternLinear(censHeadings[j] - phi) + B - censorLimit;
-            if (excess > 0.0) cost += excess * excess;
+            if (excess > 0.0) cost += censWeights[j] * excess * excess;
         }
         costs[k] = cost;
         if (cost < minCost) {
@@ -262,5 +317,14 @@ BearingCalculator::Result BearingCalculator::_solveForTag(uint32_t tag_id, const
 
     result.bearing_deg = static_cast<float>(phi);
     result.r_squared = static_cast<float>(fitFactor * spanFactor * dofFactor);
+
+    // Residuals at the reported bearing, for the candidate log.
+    for (int i = 0; i < nDet; ++i) g[i] = patternLinear(detHeadings[i] - phi);
+    _fitAmplitude(g, detPowers, detWeights, fitFloor, A, B);
+    result.residuals.reserve(nDet);
+    for (int i = 0; i < nDet; ++i) {
+        result.residuals.push_back({static_cast<float>(detHeadings[i]),
+                                    detPowers[i] - (A * g[i] + B), detWeights[i]});
+    }
     return result;
 }

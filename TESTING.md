@@ -26,7 +26,7 @@ make test                                         # configure + build + ctest, r
 | `test_collection_protocol` | `controller/tests/test_collection_protocol.cpp` | `TunnelProtocol.h` command ids and struct sizes the controller depends on | Guards the CPM pin |
 | `test_collection_coordinator` | `controller/tests/test_collection_coordinator.cpp` | ARM/ARMED/CYCLE_COMPLETE state machine, duplicates, cancel/finalize | |
 | `test_detector_protocol` | `controller/tests/test_detector_protocol.cpp` | TTDP header/payload layout (`shared/detector_protocol.h`) | Mirror of `detector/tests/test_detector_protocol.py` |
-| `test_bearing_calculator` | `controller/tests/test_bearing_calculator.cpp` | Pattern fit, candidate selection, wraparound, noise tolerance | |
+| `test_bearing_calculator` | `controller/tests/test_bearing_calculator.cpp` | Pattern fit, weighted headings and residuals, candidate selection, wraparound, noise tolerance, confirmed/revisit semantics; run for both antenna patterns | |
 | `test_python_pulse_mapper` | `controller/tests/test_python_pulse_mapper.cpp` | TTDP pulse → tunnel `PythonPulseInfo_t` mapping | |
 | `zmq_timestamp_test`, `zmq_loss_detection_test` | `airspyhf_zeromq/tests/` | Live SDR timestamp continuity and loss detection | **Hardware**: exit 77 (skipped) without an Airspy HF+ |
 
@@ -44,7 +44,7 @@ separately.
 
 | Directory | Files | Covers |
 | --- | --- | --- |
-| `detector/tests/` | `test_end_to_end.py`, `test_rate_switch.py`, `test_iq_stream.py`, `test_udp_receiver.py`, `test_collection_control.py`, `test_detector_protocol.py`, `test_pulse_reporting.py`, `test_structured_logging.py` | Full STFT→fold→EVT pipeline on synthetic IQ, dual-rate hypotheses, gap handling, ARM handling, TTDP encode/decode, `.jsonl` schema |
+| `detector/tests/` | `test_end_to_end.py`, `test_rate_switch.py`, `test_threshold_null.py`, `test_iq_stream.py`, `test_udp_receiver.py`, `test_collection_control.py`, `test_detector_protocol.py`, `test_pulse_reporting.py`, `test_structured_logging.py` | Full STFT→fold→threshold pipeline on synthetic IQ, dual-rate hypotheses, permutation-null threshold and impulse blanking, gap handling, ARM handling, TTDP encode/decode, `.jsonl` schema |
 | `simulator/tests/` | `test_simulator.py` | Pulse timing (fixed and rate-switch), ZMQ header encoding, SNR-vs-distance model |
 | `analyzer/tests/` | `test_flight_checks.py`, `test_post_flight_analysis.py`, `test_iq_replay.py`, `test_psd_spectrum.py`, `test_signal_analyzer.py`, `test_ipi_analyzer.py` | Log parsers (legacy and `.jsonl` layouts), report generation, offline replay, PSD, live analyzers' DSP |
 
@@ -76,7 +76,7 @@ Per-directory details: [detector/tests/README.md](detector/tests/README.md),
    ```bash
    ./build/controller/MavlinkTagController2
    ```
-3. Without an SDR, add `--simulator [strong|marginal|below-marginal|competing]`;
+3. Without an SDR, add `--simulator [strong|moderate|marginal|below-marginal|silent|competing]`;
    the controller spawns `iq_simulator.py`, the decimator and detectors when
    detection is started from the GCS. See
    [simulator/README.md](simulator/README.md) and

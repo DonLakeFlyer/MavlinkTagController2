@@ -5,13 +5,9 @@ Tests cover:
   - Multi-hypothesis fold correctness
   - Fold quality (max_fold_fraction / dominant-fold check)
   - Segment length computation
-  - EVT cache naming isolation
   - End-to-end fold_detect with synthetic signals
   - Regression: single-rate mode matches legacy behavior
 """
-
-import os
-import tempfile
 
 import numpy as np
 import pytest
@@ -34,9 +30,6 @@ from pulse_detector import (
     fold_multi_hypothesis,
     hyp_label_to_rate_state,
     rate_state_for_pri,
-    _evt_cache_path,
-    load_evt_cache,
-    save_evt_cache,
 )
 
 
@@ -411,51 +404,6 @@ class TestComputeSegmentSamples:
 
 
 # ---------------------------------------------------------------------------
-# EVT cache naming
-# ---------------------------------------------------------------------------
-
-class TestEvtCacheNaming:
-
-    def test_new_format_differs_from_legacy(self):
-        """New cache path must not match legacy format."""
-        new_path = _evt_cache_path('/tmp', 265, 5, N_B=200, n_hypotheses=8)
-        # Legacy format would contain 'M0.000000-J0.000000'
-        assert 'M0.000000' not in new_path
-        assert 'Nb' in new_path
-        assert 'H8' in new_path
-
-    def test_single_rate_new_differs_from_legacy(self):
-        """Even single-rate new format must not collide with legacy."""
-        new_path = _evt_cache_path('/tmp', 265, 5, N_B=None, n_hypotheses=1)
-        assert 'Nb0' in new_path
-        assert 'H1' in new_path
-        assert 'M0.000000' not in new_path
-
-    def test_different_N_B_gives_different_path(self):
-        path1 = _evt_cache_path('/tmp', 265, 5, N_B=200, n_hypotheses=8)
-        path2 = _evt_cache_path('/tmp', 265, 5, N_B=300, n_hypotheses=8)
-        assert path1 != path2
-
-    def test_round_trip_save_load(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            save_evt_cache(tmpdir, 265, 5, 1.234, 0.567,
-                           N_B=200, n_hypotheses=8)
-            mu, sigma = load_evt_cache(tmpdir, 265, 5,
-                                       N_B=200, n_hypotheses=8)
-            assert mu == pytest.approx(1.234, abs=1e-10)
-            assert sigma == pytest.approx(0.567, abs=1e-10)
-
-    def test_load_mismatched_N_B_returns_none(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            save_evt_cache(tmpdir, 265, 5, 1.234, 0.567,
-                           N_B=200, n_hypotheses=8)
-            mu, sigma = load_evt_cache(tmpdir, 265, 5,
-                                       N_B=300, n_hypotheses=8)
-            assert mu is None
-            assert sigma is None
-
-
-# ---------------------------------------------------------------------------
 # End-to-end fold_detect with synthetic data
 # ---------------------------------------------------------------------------
 
@@ -592,7 +540,7 @@ class TestFoldDetectEndToEnd:
         hyps = build_hypothesis_indices(N_A, K, n_time, N_B=None)
 
         # Use a trivially low threshold to force detection
-        evt_cache = {'threshold': 1.0}
+        evt_cache = {'fixed_threshold': 1.0}
         n_w_fake = 58
         n_ol_fake = 29
         det, _, _ = fold_detect(
@@ -627,7 +575,7 @@ class TestFoldDetectEndToEnd:
 
         hyps = build_hypothesis_indices(N_A, K, n_time, N_B=None)
 
-        evt_cache = {'threshold': 50.0}
+        evt_cache = {'fixed_threshold': 50.0}
         n_w_fake = 58
         n_ol_fake = 29
         det, noise_psd, best_cand = fold_detect(
@@ -652,7 +600,7 @@ class TestFoldDetectEndToEnd:
         power[signal_bin, 10] = 5000.0
 
         hyps = build_hypothesis_indices(N_A, K, n_time, N_B=None)
-        evt_cache = {'threshold': 50.0}
+        evt_cache = {'fixed_threshold': 50.0}
         det, _, _ = fold_detect(
             power, N_A, 5e-2, 3840.0, n_freq, 58, 29,
             n_time * 29 + 29, evt_cache, hypotheses=hyps)

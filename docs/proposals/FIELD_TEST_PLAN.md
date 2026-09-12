@@ -128,6 +128,30 @@ amplitude vs height should follow 20 dB/decade if the two-ray model holds.
 ~+650 Hz offset and another drifting +463 → +331 Hz across a morning; a
 ±200 Hz acquisition gate would have rejected the real collar.
 
+### 7. 5 km acceptance flight — listening-post profile
+
+**Settles:** whether the full 8-heading hover profile
+([archive/END_TO_END_8x20_SYSTEM.md](../archive/END_TO_END_8x20_SYSTEM.md))
+reaches the operator's 5 km go/no-go range, and how the per-dwell threshold
+behaves on real directional noise. Also produces the installed-pattern
+measurement that replaces the `kRa2a` / `kRa23k` table values.
+
+**Procedure:** known collar at 5 km, ground level. Drone at 400 ft, full
+8 × 45° sweep at K = 20 via TagTracker auto-detection, **once at a clean site
+and once next to power / telephone lines**. On the same flight, after the
+sweep, hold the tag direction and rotate in 10° steps through 360° (one
+short dwell each) for the pattern LUT. Record raw IQ throughout.
+
+**Pass:** *confirmed* result with the correct 45° sector at both sites
+within the 7 min profile; `cycle_threshold` records show the null tracking
+the site (higher `mu` toward the lines, unchanged detection at the clean
+site); blanked fraction reported per dwell when `--impulse-blank-factor` is
+on.
+
+**If it fails:** at the clean site → link budget (h², antenna) is the
+limit, not the detector; at the line site only → compare dwells with and
+without impulse blanking in replay to decide the default.
+
 ## Time budget
 
 | Capture | Flying? | Est. time |
@@ -138,6 +162,7 @@ amplitude vs height should follow 20 dB/decade if the two-ray model holds.
 | 4 — noise baseline | minimal | 10 min |
 | 5 — height ladder | yes (hover) | 1 flight, ~20 min |
 | 6 — temperature drift | no | 2 × 5 min, hours apart |
+| 7 — 5 km acceptance + pattern rotation | yes | 2 flights (two sites), ~12 min each |
 
 Captures 2, 4, and 6 need no flight window and can fill gaps.
 

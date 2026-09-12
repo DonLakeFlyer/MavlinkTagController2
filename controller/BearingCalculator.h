@@ -16,6 +16,15 @@ public:
         bool        detected;
         uint8_t     candidate_id;   // detector lock candidate; no-detections are candidate-agnostic
         bool        sighted;        // detector's fold search found this candidate on this slice
+        double      noise_psd;      // per-bin noise at the measurement; <= 0 or non-finite = unknown
+    };
+
+    // One detected heading's departure from the fitted pattern, in the
+    // order the slices were added.
+    struct Residual {
+        float       heading_deg;
+        double      residual;       // measured - modelled power (linear)
+        double      weight;         // fit weight applied to this heading
     };
 
     struct Result {
@@ -28,6 +37,7 @@ public:
         uint8_t     candidate_id;   // lock candidate this result was fitted from
         uint32_t    n_candidates;   // candidates compared for this tag
         bool        rejected;       // best candidate fell below the confidence floor
+        std::vector<Residual> residuals;  // detected headings only
     };
 
     // Fits with the given antenna's pattern; the confidence floor starts at
@@ -36,17 +46,22 @@ public:
 
     // signal_power is linear, noise-subtracted power (drives the fit);
     // snr_db is only reported back as Result::best_snr. candidate_id groups
-    // measurements taken at competing detector locks.
+    // measurements taken at competing detector locks. noise_psd sets the
+    // heading's weight in the fit (see sliceWeights); pass 0 when unknown.
     void addSlice(float heading_deg, double signal_power, uint32_t tag_id,
-                  double snr_db, uint8_t candidate_id = 0, bool sighted = false);
+                  double snr_db, uint8_t candidate_id = 0, bool sighted = false,
+                  double noise_psd = 0.0);
     // Armed heading where the detector reported no pulse. Enters the fit as a
     // censored observation: predicted power must not exceed a fraction of the
     // weakest detected power in the rotation. Applies to every candidate.
-    void addNoDetection(float heading_deg, uint32_t tag_id);
+    void addNoDetection(float heading_deg, uint32_t tag_id, double noise_psd = 0.0);
     // One result per (tag, candidate), unselected and unfloored.
     std::vector<Result> solveCandidates() const;
     // One result per tag: the candidate with the highest confidence, with
     // bearing_deg set to NaN (rejected=true) when it is below the floor.
+    // Confidences within kCandidateConfidenceTolerance do not separate
+    // candidates; the one sighted on more headings wins, then more detected
+    // slices, then higher best_snr.
     std::vector<Result> solve() const;
     void setConfidenceFloor(float floor) { _confidenceFloor = floor; }
     float confidenceFloor() const { return _confidenceFloor; }
@@ -63,11 +78,33 @@ public:
     // One revisit per collection: with several such tags only the first gets it.
     static std::optional<float> revisitHeadingFor(const std::vector<Result>& results);
 
+    // Size of the largest group of frequencies that all lie within
+    // toleranceHz of one member. Used to tell a tag heard below the lock
+    // ratio (its acquisition hits share a bin across headings) from noise
+    // (hits scatter across the search band).
+    static uint32_t largestFrequencyCluster(const std::vector<double>& freqsHz, double toleranceHz);
+
+    // Inverse-variance weights for one tag's slices. A noise-subtracted
+    // K-pulse mean has variance proportional to noise_psd^2 (K is the same
+    // for every slice of a collection, so it cancels), hence
+    // w = (median noise / noise)^2, dimensionless and 1 at the typical
+    // heading. Slices with unknown noise get 1; if no slice has a usable
+    // noise the fit is unweighted.
+    static std::vector<double> sliceWeights(const std::vector<SliceData>& slices);
+
 private:
     Result _solveForTag(uint32_t tag_id, const std::vector<SliceData>& slices) const;
+    static bool _isBetterCandidate(const Result& candidate, const Result& incumbent);
     static void _fitAmplitude(const std::vector<double>& g, const std::vector<double>& p,
+                              const std::vector<double>& w,
                               bool fitFloor, double& A, double& B);
 
+    // Two candidates measuring the same pulses (a duplicate lock, a sidelobe
+    // image) trace the same pattern and differ in confidence by well under
+    // 0.01 from noise alone; a flat interferer against a pattern-shaped tag
+    // differs by tenths. Below this the fit cannot tell them apart and the
+    // sighting count decides.
+    static constexpr float  kCandidateConfidenceTolerance = 0.05f;
     static constexpr double kScanStepDeg          = 0.5;
     static constexpr int    kMinDetectedForFloor  = 3;     // fewer → noise floor pinned at 0
     static constexpr double kCensorFraction       = 0.5;   // no-detection ⇒ power < this × weakest detection

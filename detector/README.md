@@ -37,14 +37,16 @@ else `python3`.
 | `--center-freq` | `0.0` | Channel centre, MHz (display and frequency gate) |
 | `--freq` | `0` | Absolute tag frequency, Hz (reported in pulses; with `--center-freq` enables the ±2 kHz search gate) |
 | `--pf` | `5e-2` | False-alarm probability per cycle |
-| `--detection-margin` | `0.90` | Multiplier on the EVT threshold; lower = more sensitive |
+| `--null-permutations` | `40` | STFT window permutations per cycle for the data-derived threshold |
+| `--null-time-budget` | `10` | Seconds after which a null pass stops adding permutations (never below 10); `0` = no limit |
+| `--impulse-blank-factor` | `0` (off) | Zero IQ bursts shorter than a quarter pulse whose magnitude exceeds this multiple of the segment median |
+| `--detection-margin` | `1.0` | Multiplier on the threshold; lower = more sensitive |
 | `--confidence-ratio` | `1.3` | `score/threshold` at or above → HIGH (`confirmed_status = 1`), unless one fold carries > 80 % of the score (dominant-fold gate → LOW) |
 | `--lock-score-ratio` | `3.0` | Minimum `score/threshold` for a lock candidate |
 | `--warmup-seconds` | `5.0` | IQ discarded before the first cycle |
 | `--tag-id` | `0` | Tag id carried in reports |
 | `--pulse-port` | `0` | UDP port for TTDP reports (`0` = none) |
 | `--control-port` | `0` | Local UDP port for `ARM` commands (`0` = free-running, no collections) |
-| `--threshold-cache-dir` | none | Where `*.pythreshold` EVT caches live |
 | `--log-dir` | none | Write `detector_<tag>.jsonl` (and per-heading subdirs when armed) here |
 | `--dump-spectrogram` | off | Save `tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json}` per cycle (~0.9 MB at K=5, ~3.7 MB at K=20) |
 | `--debug` | off | Per-stage diagnostics |
@@ -70,14 +72,13 @@ Without hardware use the simulator: `simulator/run_sim_pipeline.sh` or
 | Control in | TTDP `ARM(heading_deg)` on `--control-port` |
 | Reports out | TTDP `READY`, `ARMED`, `PULSE`, `NO_DETECTION`, `CYCLE_COMPLETE`, `FAILED`, `HEARTBEAT` (1 Hz) to `--pulse-port` — layout in [shared/README.md](../shared/README.md#ttdp-detector-protocol) |
 | Console | one line per cycle, e.g. `[   7 08:43:10]  DETECTED  146.609080 MHz  (-1920.0 Hz)  SNR 18.4 dB  score_ratio 1.599  noise 5.230e-12  171 ms  [LOW]`; `MEASURED …` lines for locked measurements; `no detection … best=…` otherwise |
-| Structured log | `detector_<tag>.jsonl`, entry types in `shared/log_schema.py`; when armed, one file per `heading-NNN/` |
-| EVT cache | `<cache-dir>/…-F<bins>-K<K>-Trials100-S2.pythreshold`, keyed by geometry |
+| Structured log | `detector_<tag>.jsonl`, entry types in `shared/log_schema.py`; when armed, one file per `heading-NNN/`. One `cycle_threshold` record per cycle carries the null's Gumbel fit, permutation count and blanked fraction |
 
 ## Key files
 
 | File | Role |
 | --- | --- |
-| `pulse_detector.py` | STFT·W, K-fold, EVT threshold, peak selection, lock-candidate bank, per-slice measurement, PRI refit, reporting |
+| `pulse_detector.py` | STFT·W, K-fold, permutation-null threshold, impulse blanking, peak selection, lock-candidate bank, per-slice measurement, PRI refit, reporting |
 | `iq_stream.py` | Continuous sample timeline, segment cutting, gap zero-fill / barrier |
 | `udp_receiver.py` | Receive thread and bounded ring |
 | `collection_control.py` | `ARM` handling and slice bookkeeping |
@@ -94,7 +95,7 @@ See [detector/tests/README.md](tests/README.md) and [TESTING.md](../TESTING.md).
 
 ## Further reading
 
-- [docs/design/DETECTOR_PIPELINE.md](../docs/design/DETECTOR_PIPELINE.md) — one cycle end to end: stream, STFT·W, fold, EVT, peaks, SNR
+- [docs/design/DETECTOR_PIPELINE.md](../docs/design/DETECTOR_PIPELINE.md) — one cycle end to end: stream, STFT·W, fold, threshold, peaks, SNR
 - [docs/design/COLLECTION_FLOW.md](../docs/design/COLLECTION_FLOW.md) — acquisition → lock → per-slice measurement → bearing
 - [docs/design/CONFIDENCE_PIPELINE.md](../docs/design/CONFIDENCE_PIPELINE.md) — `pf` / margin / confidence ratio / dominant-fold gate
 - [docs/design/RATE_SWITCH_DETECTOR.md](../docs/design/RATE_SWITCH_DETECTOR.md) — dual-rate collars
@@ -108,6 +109,6 @@ See [detector/tests/README.md](tests/README.md) and [TESTING.md](../TESTING.md).
 | Process dies at once with `Illegal instruction` (SIGILL, controller logs "Process fail: 4") | aarch64 VM advertises SME; numpy's OpenBLAS picks its `armv9sme` kernel and the guest faults. Verify: `OPENBLAS_VERBOSE=2 .venv/bin/python -c "import numpy"` prints `Core: armv9sme` | `OPENBLAS_CORETYPE=ARMV8` in the environment of every numpy process (`/etc/environment` or `Environment=` in the systemd unit) |
 | Hangs after the startup banner | No IQ arriving | Decimator running? Its `--ports` includes this `--port`? Firewall on localhost UDP? |
 | No detections | Tag off / wrong frequency / wrong `--tp` `--tip` | Confirm with a handheld receiver; check `--center-freq` and the tune offset; check decimator log shows `locked input rate` |
-| Detections on nearly every cycle at scattered offsets, SNR ≈ 15–18 dB | EVT threshold not matching the field noise; these are noise maxima (see the Apr-11 record in `docs/analysis/`) | Lower `--pf`, set `--detection-margin 1.0` (the default 0.90 lowers the threshold); a stable collar clusters within a bin or two of one offset |
+| Detections on nearly every cycle at scattered offsets, SNR ≈ 15–18 dB | Noise maxima clearing the threshold (see the Apr-11 record in `docs/analysis/`) | Check the `cycle_threshold` records: is the null being refined on noise? Try `--impulse-blank-factor 6` at impulsive sites; lower `--pf`; a stable collar clusters within a bin or two of one offset |
 | Frequent `GAP ≥` barriers | CPU starvation or UDP buffer loss between decimator and detector | Check `top`; check decimator `perf` counters (`queue_drops`, `dropped`); reduce other load |
-| First cycle takes many seconds | EVT cache being generated for a new geometry | Expected once per (K, tp, fs, hypotheses); cached in `--threshold-cache-dir` afterwards |
+| `cycle_threshold.n_perm` below `--null-permutations` | The null pass hit `--null-time-budget` (dual-rate K=20 is the expensive case) | Expected on slow hosts; raise the budget if the dwell has headroom, or accept the coarser Gumbel fit |

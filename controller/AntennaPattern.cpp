@@ -10,6 +10,8 @@ namespace {
 // Eyeballed from the Telonics RA-2A reception radiation pattern polar plot
 // (Antennas/RA-2AHS.jpg). Free-space manufacturer plot; the installed
 // pattern with the airframe will differ, especially in the side nulls.
+// Source: datasheet. Replace the values in place with the installed pattern
+// measured on the calibration flight (docs/proposals/FIELD_TEST_PLAN.md).
 const AntennaPattern kRa2a = {
     ANTENNA_ID_RA2A,
     "RA-2A",
@@ -25,6 +27,7 @@ const AntennaPattern kRa2a = {
 // Eyeballed from the Telonics RA-23 reception radiation pattern polar plot
 // (Antennas/RA-23K.jpg). Its radial scale is non-linear: 2 dB rings out to
 // 10 dB, then 20/30/50 compressed toward the centre; expect +/-1.5 dB.
+// Source: datasheet. Replace in place once measured installed (see kRa2a).
 const AntennaPattern kRa23k = {
     ANTENNA_ID_RA23K,
     "RA-23K",

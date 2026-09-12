@@ -157,9 +157,20 @@ private:
     static constexpr uint32_t kLiveCandidateMinSlices    = 3;
     // A lock sighted independently on this many headings needs no revisit.
     static constexpr uint32_t kConfirmedSightings        = 2;
+    // Without a lock no bearing is reported: acquisition hits (score_ratio
+    // 1..3) are individually inside the per-heading false-alarm rate and do
+    // not constrain the pattern fit. The tag is still "heard" when this many
+    // hits agree in frequency within the detector's locked search band
+    // (LOCKED_SEARCH_HZ in pulse_detector.py); noise hits scatter over ~105
+    // bins, so two in one bin on different headings is ~1e-3 per rotation.
+    static constexpr uint32_t kHeardMinAgreeingHits      = 2;
+    static constexpr double   kHeardFrequencyToleranceHz = 200.0;
     // An ARM within this of the requested revisit heading satisfies the revisit;
     // well inside the 45 deg slice spacing, well outside the GCS heading-hold error.
     static constexpr float    kRevisitHeadingToleranceDeg = 15.0f;
+    // Used when the GCS sends detection_margin = 0. The detector's threshold
+    // is derived from each dwell's own data, so no safety margin is needed.
+    static constexpr double   kDefaultDetectionMargin     = 1.0;
 
     uint8_t _liveCandidateFor(uint32_t tagId) const;
     // Re-fits all candidates of tagId from _rotationSlices; if a different one

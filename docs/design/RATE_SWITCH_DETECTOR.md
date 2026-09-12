@@ -32,7 +32,7 @@ For each hypothesis, the detector:
 2. Slides the template across all valid start positions within the segment.
 3. Sums STFT power at the K window positions → fold score.
 
-The best score across all hypotheses and start positions is compared against an EVT-derived threshold (calibrated over the full hypothesis bank to control false alarm rate).
+The best score across all hypotheses and start positions is compared against a threshold derived from the segment's own window-permutation null (run over the full hypothesis bank to control the false alarm rate).
 
 ## Fold Quality Diagnostic
 
@@ -143,7 +143,7 @@ The IQ simulator (`simulator/iq_simulator.py`) supports rate switching:
 
 Complete:
 1. Hypothesis generation (`build_hypothesis_indices`) and multi-hypothesis fold (`fold_multi_hypothesis`) in `pulse_detector.py`.
-2. EVT threshold calibrated over full hypothesis bank.
+2. Permutation-null threshold re-runs the full hypothesis bank, so the expanded search space is in the null.
 3. Max-fold-fraction diagnostic computed per detection for confidence downgrade.
 4. Detection logs include hypothesis label (e.g. `hyp=A_to_B_c2`).
 5. UDP reporting includes `rate_state` derived from hypothesis label (`hyp_label_to_rate_state`).
@@ -157,6 +157,5 @@ Complete:
 - Multi-hypothesis fold: correct hypothesis wins for injected signals; Occam preference for pure over marginal switch.
 - Max-fold-fraction diagnostic and its use in confidence downgrade (detections are never discarded).
 - Segment length computation for single- and dual-rate.
-- EVT cache naming isolation between single-rate, dual-rate, and legacy formats.
 - End-to-end `fold_detect` at rate A and across an A→B switch; single-rate regression against the legacy fold path.
 - `hyp_label_to_rate_state` mapping and `last_rate` → predict-TIP selection.

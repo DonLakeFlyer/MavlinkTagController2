@@ -1,6 +1,19 @@
 # End-to-end system: 8×20 hovering listening post
 
-**Status: open.**
+> **IMPLEMENTED / ARCHIVED (2026-09-12).** The code items in §10 have landed;
+> current behaviour is described in
+> [docs/design/DETECTOR_PIPELINE.md](../design/DETECTOR_PIPELINE.md) §6 and
+> [docs/design/COLLECTION_FLOW.md](../design/COLLECTION_FLOW.md). Source line
+> numbers below refer to the code as it was when this was written. Deviations
+> from the text: the permutation null gets a second pass with a detected
+> train's windows redrawn (a tag inflated its own null far more than
+> "slightly"); no new antenna id was added — measured pattern values will
+> replace the existing `kRa2a` / `kRa23k` tables in place; the revisit dwell
+> stays mandatory (no operator opt-out); vehicle climb/descent tuning was
+> discussion only. Field items still open are listed in
+> [docs/proposals/README.md](../proposals/README.md).
+
+**Status: implemented.**
 
 This document is the hand-off record of a design discussion (2026-09-12). It
 states the operational requirements, the physics assumptions, the decisions
@@ -15,7 +28,7 @@ Related current-code descriptions (read these first when picking this up):
 - [docs/design/SYSTEM_OVERVIEW.md](../design/SYSTEM_OVERVIEW.md) — processes, data path, log artifacts
 - [docs/analysis/2026-04_FLIGHT_DATA_ANALYSIS.md](../analysis/2026-04_FLIGHT_DATA_ANALYSIS.md) and
   [docs/analysis/2026-09_MULTIPATH_ANALYSIS_REVIEW.md](../analysis/2026-09_MULTIPATH_ANALYSIS_REVIEW.md) — the April-11 false-detection evidence
-- [FIELD_TEST_PLAN.md](FIELD_TEST_PLAN.md) — capture campaign; this doc adds a 5 km acceptance flight to it
+- [FIELD_TEST_PLAN.md](../proposals/FIELD_TEST_PLAN.md) — capture campaign; this doc adds a 5 km acceptance flight to it
 
 ---
 
@@ -76,7 +89,7 @@ a ground-level collar.) Levers, ordered by dB per effort:
 | Cross-heading confirmation (§6) | "a few dB equivalent": lets single-dwell candidates be admitted loosely and confirmed structurally | 0 | Already largely in code (`locks_agree`) |
 | STFT window = pulse width | 0 if already matched | 0 | **Verified matched:** `n_w = ceil(tp · fs)` ([pulse_detector.py L1796](../../detector/pulse_detector.py#L1796)) |
 | Larger K on the sweep | ~5 log₁₀(K) dB at low SNR: 20→40 ≈ +1.5 dB | doubles hover | **Rejected** — does not fit R4 |
-| 3-element Yagi | ≈ +3.5 dB, narrower beam | 0 | Hardware; see [YAGI_ANTENNA_DESIGN.md](YAGI_ANTENNA_DESIGN.md) |
+| 3-element Yagi | ≈ +3.5 dB, narrower beam | 0 | Hardware; see [YAGI_ANTENNA_DESIGN.md](../proposals/YAGI_ANTENNA_DESIGN.md) |
 | Coherent inter-pulse integration | up to +3 dB / doubling | — | **Not feasible** — collar oscillator is not phase-coherent pulse to pulse |
 
 ## 4. Flight profile decision: 8 headings × K=20
@@ -396,11 +409,11 @@ order. Test files per repository convention are listed alongside.
 - Update [docs/design/DETECTOR_PIPELINE.md](../design/DETECTOR_PIPELINE.md)
   (threshold section) and [COLLECTION_FLOW.md](../design/COLLECTION_FLOW.md)
   (confirmation rule, weighted fit).
-- Flip this proposal's row in [README.md](README.md) to *implemented* and
+- Flip this proposal's row in [README.md](../proposals/README.md) to *implemented* and
   move this file to `docs/archive/` when D1–D4, K1–K2 have landed; the
   "EVT threshold calibration / cache validity" and "Frequency-consistency
   gate" rows are subsumed by this doc and should be marked accordingly.
-- Add the 5 km acceptance flight to [FIELD_TEST_PLAN.md](FIELD_TEST_PLAN.md).
+- Add the 5 km acceptance flight to [FIELD_TEST_PLAN.md](../proposals/FIELD_TEST_PLAN.md).
 
 ## 11. Explicitly rejected / out of scope
 
