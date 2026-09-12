@@ -1,7 +1,10 @@
 # Detection Confidence Pipeline
 
-How `false_alarm_prob`, `detection_margin`, `confidence_ratio`, and `uniformity`
-interact to produce detection classifications.
+How `false_alarm_prob`, `detection_margin`, `confidence_ratio` and the
+dominant-fold gate (`DOMINANT_FOLD_THRESHOLD`) interact to classify each
+cycle's strongest fold peak. Applies to acquisition reports; locked
+measurements (`detection_status` 2) bypass this classification — see
+[COLLECTION_FLOW.md](COLLECTION_FLOW.md).
 
 ## Overview
 
@@ -12,7 +15,7 @@ The detector uses a layered threshold system. Each layer serves a distinct role:
 | 1 | `false_alarm_prob` (pf) | 0.05 | Sets the fundamental noise-floor threshold via EVT |
 | 2 | `detection_margin` | 0.90 | Lowers the threshold to increase sensitivity |
 | 3 | `confidence_ratio` | 1.30 | Classifies detections as HIGH or LOW confidence |
-| — | `uniformity` | — | Diagnostic metric (not used in classification) |
+| 3 | `DOMINANT_FOLD_THRESHOLD` | 0.80 | Downgrades to LOW when one fold carries most of the score |
 
 ## Pipeline flow
 
@@ -36,10 +39,16 @@ The detector uses a layered threshold system. Each layer serves a distinct role:
         ┌────────────┼────────────┐
         │            │            │
    < 1.0         1.0–1.3       ≥ 1.3
-  No det.     SUBTHRESHOLD   SUPERTHRESHOLD
-              Conf:0 [LOW]     Conf:1
-
-        uniformity ──── logged but not used in decision
+ NO_DETECTION  SUBTHRESHOLD      │
+   (3)         Conf:0 [LOW]      │
+                          ┌──────▼──────┐
+                          │ max_fold_   │
+                          │ fraction    │
+                          └──┬──────┬──┘
+                        > 0.8        ≤ 0.8
+                    SUBTHRESHOLD  SUPERTHRESHOLD
+                    Conf:0           Conf:1
+                    [DOMINANT_FOLD]
 ```
 
 ---
@@ -100,7 +109,7 @@ have scored 0.90–1.00 now score above 1.0 and appear as detections.
 
 ---
 
-## Layer 3: `confidence_ratio` classifies HIGH vs LOW
+## Layer 3: `confidence_ratio` and the dominant-fold gate classify HIGH vs LOW
 
 Each detection's score is compared to the (margined) threshold to produce a
 score ratio:
@@ -109,23 +118,29 @@ score ratio:
 score_ratio = best_scores[b] / max(threshold[b], 1e-30)
 ```
 
-This ratio is then compared to `confidence_ratio` (default 1.3):
+This ratio is compared to `confidence_ratio` (default 1.3), and the fold-shape
+metric `max_fold_fraction` to `DOMINANT_FOLD_THRESHOLD` (0.8):
 
 ```python
-is_marginal = score_ratio < confidence_ratio
+has_dominant_fold = det.fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
+is_marginal = det.score_ratio < confidence_ratio or has_dominant_fold
 det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
               else DETECTION_STATUS_SUPERTHRESHOLD)
 ```
 
-| score_ratio | Classification | `detection_status` | `confirmed_status` | Log tag |
-|-------------|----------------|--------------------|--------------------|---------|
-| ≥ 1.3 | Confident | `SUPERTHRESHOLD` (1) | 1 | *(none)* |
-| 1.0 – 1.3 | Marginal | `SUBTHRESHOLD` (0) | 0 | `[LOW]` |
-| < 1.0 | Below threshold | Not reported | — | — |
+| score_ratio | max_fold_fraction | Classification | `detection_status` | `confirmed_status` | Log tag |
+|-------------|-------------------|----------------|--------------------|--------------------|---------|
+| ≥ 1.3 | ≤ 0.8 | Confident | `SUPERTHRESHOLD` (1) | 1 | *(none)* |
+| ≥ 1.3 | > 0.8 | Single-fold transient | `SUBTHRESHOLD` (0) | 0 | `[DOMINANT_FOLD]` |
+| 1.0 – 1.3 | any | Marginal | `SUBTHRESHOLD` (0) | 0 | `[LOW]` |
+| < 1.0 | — | Below threshold | `NO_DETECTION` (3), carrying `noise_psd` and the best sub-threshold `score_ratio` | 0 | `no detection … best=…` |
 
 The `[LOW]` tag in detector output and `Conf:0` in controller logs both indicate
 a marginal detection — one that only passed because `detection_margin` lowered
 the threshold, and whose score_ratio didn't reach `confidence_ratio`.
+`[DOMINANT_FOLD]` marks a detection that cleared the ratio but whose energy sits
+in one fold. The same `max_fold_fraction` gate also bars a peak from becoming a
+lock candidate.
 
 ### The sensitivity band
 
@@ -151,40 +166,33 @@ deliberate sensitivity band between `1.0` and `confidence_ratio`:
 
 ---
 
-## Uniformity: diagnostic metric (not yet in decision path)
+## Fold-shape metric: `max_fold_fraction`
 
-Uniformity measures how evenly the detection energy is distributed across
-K folds:
+How much of the K-fold score comes from a single fold:
 
 ```python
-uniformity = on_powers.min() / max(on_powers.max(), 1e-30)
+max_fold_fraction = max(on_powers) / sum(on_powers)
 ```
 
-| Uniformity | Meaning |
-|------------|---------|
-| ~1.0 | Equal power in all folds — consistent pulsed signal |
-| ~0.5 | 2:1 power variation — moderate, possibly real at low SNR |
-| ~0.0 | One fold dominates — spike-driven, likely transient/RFI |
+| max_fold_fraction | Meaning | Action |
+|-------------------|---------|--------|
+| ≈ 1/K | Equal power in all folds — consistent pulsed signal | pass |
+| 0.2 – 0.8 | Uneven, normal for a weak signal in noise | pass |
+| > 0.8 | One fold dominates — transient or RFI spike | downgrade to `SUBTHRESHOLD`; ineligible for lock |
 
-### Current status
+It replaced the earlier `min/max` "uniformity" ratio, which fell to ~0.01 even
+for strong real signals and could not be thresholded. Per-fold SNRs
+(`fold_snrs`) and `max_fold_fraction` are written to the `FOLDS` `.jsonl`
+entry and the `[FOLDS]` console line. They are **not** in the TTDP
+`PulsePayload`, so the controller and GCS see only the resulting
+`detection_status` (putting them on the wire is Change 3 in
+[CONFIDENCE_IMPROVEMENTS.md](../proposals/CONFIDENCE_IMPROVEMENTS.md)).
 
-Uniformity is:
-- **Computed** for every detection in `pulse_detector.py`
-- **Logged** in the `[FOLDS]` diagnostic line
-- **Stored** in the in-process `fold_info` dict for local downstream use
-- **NOT sent** in the current UDP packet format, so it is not available to the controller/GCS unless the wire format is extended
-- **NOT used** in the SUBTHRESHOLD/SUPERTHRESHOLD classification
-
-A detection with `uniformity=0.000` will still be classified as `Conf:1` if
-its `score_ratio ≥ 1.3`. This is a known gap.
-
-### Planned use
-
-The on-window uniformity test described in [CROSS_RATE_REJECTION.md](CROSS_RATE_REJECTION.md)
-would add uniformity as a rejection criterion: detections with uniformity below
-a threshold (e.g., 0.10) could be downgraded or rejected. Similarly, the on/off
-contrast test in [CW_REJECTION.md](CW_REJECTION.md) would reject continuous-wave
-interference. Neither test is implemented in the detection decision path yet.
+Limits: the gate catches single-transient spikes only. Noise maxima whose
+energy is spread across folds pass it — on the Apr-11 data `max_fold_fraction`
+ranged 0.11–0.75 for all 69 noise detections. The on/off contrast test in
+[CW_REJECTION.md](../proposals/CW_REJECTION.md) (continuous-wave interference)
+and a cross-heading frequency-consistency check remain open proposals.
 
 ---
 
@@ -222,11 +230,15 @@ When reviewing field data:
    real detection.
 2. **score_ratio 1.0–1.3 + consistent frequency** → real signal at edge of range,
    correctly flagged LOW.
-3. **score_ratio ≥ 1.3 + uniformity ≈ 0 + scattered frequencies** → likely
-   transient RFI or interference. The confidence gate passes it, but uniformity
-   and frequency spread indicate it's not a real pulsed tag.
-4. **score_ratio < 1.0** → below threshold, no detection reported.
+3. **score_ratio ≥ 1.3 + `[DOMINANT_FOLD]`** → single transient; already downgraded
+   to `Conf:0`.
+4. **score_ratio ≥ 1.3, folds spread, but frequencies scattered across headings
+   (±kHz) and SNR sitting at the K-fold noise floor (~17 dB at K=20)** → noise
+   maxima passing every per-cycle gate (the Apr-11 pattern). Only cross-heading
+   frequency consistency separates these from a tag.
+5. **score_ratio < 1.0** → `NO_DETECTION` report; `noise_psd` and the best
+   sub-threshold `score_ratio` are still available for trend plots.
 
-Frequency consistency across rotation headings is currently the strongest
-post-hoc discriminator between real tags and false positives, since uniformity
-is not yet used in the classification logic.
+Frequency consistency across rotation headings is the strongest post-hoc
+discriminator between real tags and false positives; no per-cycle gate
+currently uses it.

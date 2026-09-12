@@ -1,26 +1,39 @@
 # 3-Element Yagi Antenna Design — 146–147 MHz Drone Telemetry
 
+**Status: open (hardware).** Not built. The RHCP variant this document
+originally proposed for multipath rejection was removed on 2026-09-12: at the
+1.4° grazing angle of a 5 km / 400 ft geometry the ground reflection keeps the
+same circular-polarisation sense, so an RHCP feed rejects nothing and costs 3 dB
+(see [2026-09_MULTIPATH_ANALYSIS_REVIEW.md](../analysis/2026-09_MULTIPATH_ANALYSIS_REVIEW.md)).
+The case for a Yagi rests on gain and beamwidth only. Adopting it requires a
+new pattern LUT in TagTracker (see below).
+
 ## Why a 3-Element Yagi
 
 The RA-2AK is a broad-pattern antenna well-suited to handheld surveys where the operator sweeps slowly. For a drone platform doing an 8-point rotation sweep with LM pattern fitting, the antenna beamwidth is the primary limit on bearing resolution — the LM fit has more angular gradient to work with as the beam narrows. A 3-element Yagi offers a practical balance:
 
 | Antenna | Gain (dBd) | 3dB Beamwidth | Boom Length | Verdict |
 |---|---|---|---|---|
-| RA-2AK (current) | ~1–2 | ~120° | — | Broad, limits bearing resolution |
+| RA-2AK (current) | 4 (Telonics published) | ~120° | — | Broad, limits bearing resolution |
 | 2-element Yagi | ~5 | ~90° | ~35 cm | Modest improvement, short boom |
 | **3-element Yagi** | **~7.5** | **~65°** | **~82 cm** | **Best balance for 680 class** |
 | 4-element Yagi | ~9 | ~55° | ~130 cm | Diminishing return, too long |
 | 5-element Yagi | ~10 | ~50° | ~200 cm | Not viable on 680 class |
 
-The 3-element is the inflection point: the jump from RA-2AK to 3-element Yagi is large (~5–6 dBd gain, roughly half the beamwidth). The jump from 3-element to 4-element is much smaller and comes at significant cost in boom length and drag.
+The 3-element is the inflection point: the jump from RA-2AK to 3-element Yagi is ~3 dB of gain and roughly half the beamwidth. The jump from 3-element to 4-element is much smaller and comes at significant cost in boom length and drag.
 
-At 5+ km with K=20 integration and the Airspy HF+, signal strength is not the limiting factor. The gain matters less than the pattern shape for bearing accuracy, and the Yagi's sharper lobe gives the LM fit a much steeper gradient near boresight.
+At 5+ km the two-ray ground loss is a fixed ~20 dB penalty on top of free-space
+loss, so both the ~3 dB of extra gain over the RA-2AK's published 4 dBd
+(≈ +19 % range on the two-ray slope; see
+[2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](../analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md))
+and the sharper lobe matter: the gain buys link margin, and the Yagi's steeper
+gradient near boresight gives the LM fit more to work with for bearing accuracy.
 
 ---
 
 ## Off-the-Shelf Option: Arrow Antenna 146-3
 
-For the linear (non-RHCP) version, the **Arrow Antenna 146-3** is a direct match to the design spec and does not need to be built from scratch.
+The **Arrow Antenna 146-3** is a direct match to the design spec and does not need to be built from scratch.
 
 **Purchase links:**
 - [Arrow Antenna direct (146-3ii)](http://www.arrowantennas.com/arrowii/146-3ii.html) — ~USD $114
@@ -39,8 +52,6 @@ For the linear (non-RHCP) version, the **Arrow Antenna 146-3** is a direct match
 **Adapter required:** The Arrow 146-3 has a **BNC connector only**. The Airspy HF+ uses SMA. A BNC-female to SMA-male adapter is needed — use a quality silver-plated one, not a cheap brass adapter, to avoid additional loss at this frequency.
 
 **Drone mount:** Remove the foam grip and fabricate a simple bracket from aluminium flat stock to clamp the 3/4" boom to your drone frame standoff. The Arrow II Mounting Bracket can also be used if it suits your standoff geometry.
-
-**For RHCP:** The Arrow provides the boom, reflector, and director — the three components you would otherwise have to build. The driven element is then replaced as described in the RHCP modification section below.
 
 ---
 
@@ -77,62 +88,6 @@ A split-dipole driven element at this spacing presents approximately **28–35 o
 **Folded dipole driven element:** Raises feedpoint impedance to ~120–140 ohms. With a λ/4 coaxial impedance transformer (75-ohm coax cut to 340 mm electrical length), presents ~50 ohms. More complex construction than the gamma match but no moving parts and no capacitor to drift.
 
 Avoid direct-connection 50-ohm matching without a balun — common-mode currents on the coax will distort the pattern and corrupt the bearing measurement.
-
----
-
-## RHCP Variant for Multipath Mitigation
-
-As described in `MULTIPATH_ANALYSIS.md`, the ground-reflected signal arrives as opposite-hand circular polarisation. An RHCP antenna strongly rejects it.
-
-The simplest RHCP implementation for a Yagi is a **crossed-dipole driven element with 90° hybrid feed**:
-
-- Two dipoles at 90° to each other replace the single driven element, both at the same boom position
-- A 90° hybrid coupler (coaxial λ/4 delay line) feeds them in quadrature
-- The reflector and director remain unchanged — parasitic elements still provide pattern shaping under a circularly polarised driven element (gain and F/B ratio reduced slightly, ~1–2 dB, vs the linear version)
-
-### Modifying the Arrow 146-3 for RHCP
-
-If you purchased the Arrow 146-3, the boom, reflector, and director are already built. Only the driven element needs modification.
-
-**Parts needed:**
-- 1× length of Easton aluminium arrow shaft or 9.5 mm aluminium tube, 966 mm total (2× 483 mm arms) — for the second dipole
-- 1× small aluminium or HDPE cross-hub to mount both dipoles at 90° on the Arrow's 3/4" boom (fabricate from flat stock or 3D print in PETG)
-- 1× BNC T-connector (female-female-male)
-- ~380 mm of RG-59 75-ohm coax with solid PE dielectric (velocity factor 0.66) — starting stock length, to be trimmed to a 338 mm delay line
-- 2× BNC male connectors to terminate the delay line
-- Heat shrink and self-amalgamating tape for weatherproofing
-
-**Delay line length:**
-
-λ/4 at 146.5 MHz in free space = 512 mm. With solid-PE RG-59 (velocity factor 0.66):
-
-```
-Physical length = 512 mm × 0.66 = 338 mm
-```
-
-**338 mm** is the electrical quarter-wave target for the coax section. Connector bodies add physical length, so cut the RG-59 slightly long, fit the BNC connectors, then verify and trim with a VNA until the assembled delay line is an electrical λ/4 at 146.5 MHz. The line should present a short circuit at 146.5 MHz when the far end is open, or an open circuit when the far end is shorted.
-
-**Assembly steps:**
-
-1. **Remove the Arrow's original driven element** from the boom. Retain the gamma match assembly — this becomes the feed for dipole A.
-
-2. **Fabricate the cross-hub.** A simple flat plate of 3 mm aluminium with two perpendicular slots to accept the boom and the second dipole mounting tube works well. The second dipole must be electrically isolated from the boom (HDPE sleeve or nylon spacers).
-
-3. **Mount dipole A** (the original Arrow driven element with gamma match) back on the boom at the original position, oriented horizontally.
-
-4. **Mount dipole B** (the new element) at the same boom position, oriented vertically, with arms of 483 mm each side. Match dipole B to 50 ohms — the simplest approach is a second gamma match identical to the Arrow's original. Alternatively, a split dipole centre-fed through a 1:1 balun (choke balun, 5 turns of RG-58 through a FT-50-43 toroid) works well and is more predictable.
-
-5. **Feed arrangement:**
-   - Main feedline from Airspy HF+ → BNC T-connector
-   - T port 1 → dipole A gamma match (direct connection)
-   - T port 2 → 338 mm RG-59 delay line → dipole B feedpoint
-   - This phase-shifts dipole B by 90°, producing circular polarisation
-
-6. **Weatherproof the feedpoint.** Self-amalgamating tape over all connectors, then heat shrink over the assembly. In African conditions moisture ingress at the BNC joints is the most common failure point.
-
-**Handedness:** With the antenna pointing forward and dipole A horizontal, the configuration above produces RHCP when viewed from behind (signal rotates clockwise looking forward). To verify: rotate a linearly polarised test transmitter from 45° to 135° tilt — the received SNR should remain within 1–2 dB across both orientations. If the SNR varies more than ~3 dB, one dipole is mismatched or the delay line length is off.
-
-To flip to LHCP if needed, swap which dipole receives the delay line.
 
 ---
 
@@ -227,5 +182,4 @@ Note these are free-space values. The mounted pattern will differ, particularly 
 1. **VNA check:** Measure SWR at 146–147 MHz after mounting on drone (motors off). Target SWR < 1.5:1 across the band. Retune gamma match if needed.
 2. **Pattern check:** Rotate drone against fixed transmitter at 50+ m, confirm peak and null positions match expectations.
 3. **Bearing offset calibration:** Confirm boresight heading matches FC compass heading; apply fixed correction in TagTracker if not.
-4. **RHCP handedness (if built):** Verify correct handedness as described above before flying.
-5. **LUT update in TagTracker:** Do not fly with the RA-2AK LUT still active.
+4. **LUT update in TagTracker:** Do not fly with the RA-2AK LUT still active.

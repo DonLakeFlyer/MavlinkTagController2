@@ -1,5 +1,14 @@
 # VHF Multipath Analysis & Mitigation
 
+> **SUPERSEDED (2026-09-12).** Kept as a record of the field hypothesis from
+> 2026-04-11. The path-difference model in §“The Geometry Problem” and §3 uses
+> the plane-wave formula and is wrong for a ground-level transmitter; the
+> dual-altitude re-test (§2) and RHCP justification (§1) built on it do not
+> hold, and re-analysis of the Apr-11 logs shows the detections were noise, not
+> a faded signal. See
+> [2026-09_MULTIPATH_ANALYSIS_REVIEW.md](../analysis/2026-09_MULTIPATH_ANALYSIS_REVIEW.md)
+> for the section-by-section verdict and which items survive.
+
 ## Context
 
 This document covers multipath propagation problems encountered during aerial VHF collar telemetry surveys of African wild dog at 5+ km range, using a 680-class quadrotor at 400 ft AGL with an Airspy HF+ and Telenics RA antenna. The bearing solution is computed in TagTracker using an 8-point rotation sweep and Levenberg-Marquardt pattern fitting.

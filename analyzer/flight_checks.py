@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the FLIGHT_DATA_ANALYSIS.md checks against recorded flight logs.
+"""Run the docs/analysis/2026-04_FLIGHT_DATA_ANALYSIS.md checks against recorded flight logs.
 
 Walks a directory tree of controller/detector logs (MavlinkTagController.log,
 py_detector_*.log or per-heading heading-NNN/detector_*.jsonl, session.json or

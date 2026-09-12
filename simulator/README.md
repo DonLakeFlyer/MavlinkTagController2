@@ -35,6 +35,10 @@ pip install -r simulator/requirements.txt
 
 ## Presets
 
+A preset defines its own tag(s). Used by `run_sim_pipeline.sh --preset`, by
+`iq_simulator.py --preset`, and by the controller only when **no tag is
+configured** from the GCS.
+
 | Preset       | Description                                    |
 |-------------|------------------------------------------------|
 | `strong`     | Single tag, 25 dB SNR — clear detection        |
@@ -44,6 +48,29 @@ pip install -r simulator/requirements.txt
 | `distant`    | Single tag, 3 dB SNR — below typical threshold |
 | `dropout`    | Strong tag with 5% random packet drops         |
 | `gap`        | Strong tag with 100 ms gaps every 10 s         |
+
+## Controller signal levels
+
+When the controller runs `--simulator <level>` **and a tag is configured**, the
+tag's own frequency, `tp`, `tip` (and secondary rate) come from the GCS and the
+level only sets its SNR. SNR is specified at the 768 kHz simulator output; the
+200× decimator adds ~23 dB of processing gain before the detector. Levels are
+calibrated against the detector's default `--lock-score-ratio` of 3.0
+(`detector/pulse_detector.py`) at K=20; the level SNRs themselves are set in
+`controller/main.cpp`:
+
+| Level | Simulator SNR | ≈ Detector SNR | Tag bearing | Interferer | Expected behaviour |
+|---|---|---|---|---|---|
+| `strong` (default) | 20 dB | 43 dB | `--sim-tx-bearing-deg` (0) | — | Locks on the first cycle |
+| `marginal` | −21 dB | 2 dB | 0 | — | Locks, but is sighted on one heading only, so `FinishCollection` requests a revisit slice |
+| `below-marginal` | −33 dB | −10 dB | 0 | — | Never locks; every heading reports no-detection |
+| `competing` | −18 dB | 5 dB | 135 | flat −18 dB tone at tag +1 kHz (`kSimulatorInterfererOffsetHz`, heading-independent) | Interferer takes the provisional lock on heading 0; the tag is below threshold there and is admitted near 135° as an alternate candidate; earlier headings are retro-measured and the candidate selection at finish must pick the tag |
+
+Any other word after `--simulator` is treated as a preset name. `strong` is
+both a level (20 dB) and a preset (25 dB); which applies depends on whether a
+tag is configured. `--sim-tx-bearing-deg`, `--sim-antenna` and `--sim-pri-ppm`
+modify the configured tag under any level (see
+[controller/README.md](../controller/README.md#usage)).
 
 ## Simulator options
 
@@ -126,13 +153,16 @@ detectors automatically when detection is started via the MAVLink tunnel.
 # Build the controller
 make controller
 
-# Start with default preset ("strong")
+# Start with the default level ("strong")
 ./build/controller/MavlinkTagController2 --simulator
 
-# Start with a specific preset
+# Level: sets the SNR of the GCS-configured tag (see "Controller signal levels")
+./build/controller/MavlinkTagController2 --simulator competing
+
+# Preset: used only when no tag is configured (see "Presets")
 ./build/controller/MavlinkTagController2 --simulator weak
 
-# Combine with a connection URL
+# Preset plus a connection URL
 ./build/controller/MavlinkTagController2 --simulator two-tags serial:///dev/ttyACM0:115200
 ```
 
@@ -140,9 +170,10 @@ In this mode:
 - SDR hardware detection is bypassed
 - `iq_simulator.py` publishes IQ on ZMQ PUB port 5555
 - The decimator uses `--shift-khz 0` (no DC-spur offset)
-- `uavrt_detection` processes run unchanged
+- `pulse_detector.py` processes run unchanged
 - Tag parameters from the MAVLink tag database are mapped to simulator
-  `--freq-offset-hz`, `--tp`, and `--tip` arguments
+  `--freq-offset-hz`, `--tp`, `--tip` (and `--tip-secondary`) arguments; the
+  level sets `--snr`
 - If no tags are configured when detection starts, the selected preset is used
 - The Python venv at `$REPO/.venv` is preferred; falls back to system `python3`
 
@@ -158,17 +189,17 @@ In this mode:
 
 ## Wire format
 
-Each ZMQ message: 40-byte header + interleaved float32 I/Q payload.
-Matches `shared/tagtracker_wireformat/zmq_iq_packet.h` exactly.
+Each ZMQ message: 40-byte header + interleaved float32 I/Q payload, exactly
+as defined in `shared/tagtracker_wireformat/zmq_iq_packet.h` (table in
+[shared/README.md](../shared/README.md#zeromq-iq-packet-format)). The
+simulator sets `sample_rate = 768000` and `flags = 0`. A wire-format change
+must update `simulator/iq_simulator.py` and `simulator/tests/test_simulator.py`
+in the same commit.
 
-| Field          | Type     | Value                    |
-|---------------|----------|--------------------------|
-| magic          | uint32   | 0x5a514941               |
-| version        | uint16   | 1                        |
-| header_size    | uint16   | 40                       |
-| sequence       | uint64   | Monotonic counter        |
-| timestamp_us   | uint64   | CLOCK_MONOTONIC µs       |
-| sample_rate    | uint32   | 768000                   |
-| sample_count   | uint32   | samples_per_packet       |
-| payload_bytes  | uint32   | sample_count × 8         |
-| flags          | uint32   | 0                        |
+## Tests
+
+```bash
+.venv/bin/python -m pytest simulator/tests -v
+```
+
+See [simulator/tests/README.md](tests/README.md) and [TESTING.md](../TESTING.md).

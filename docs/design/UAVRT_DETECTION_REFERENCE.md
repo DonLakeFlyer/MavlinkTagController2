@@ -1,4 +1,13 @@
-# Pulse Detection Pipeline — Detailed Analysis
+# uavrt_detection (MATLAB) — Pipeline Reference
+
+> **Scope.** This describes the original MATLAB/C++ `uavrt_detection` by
+> Michael W. Shafer, which this repository no longer runs. It is kept because the
+> Python detector inherits its STFT, W-matrix, fold and EVT stages and because
+> `tipu`/`tipj`, the D/I/C/T/S modes and the confirmation state machine are
+> referenced when comparing the two. For the detector actually deployed see
+> [DETECTOR_PIPELINE.md](DETECTOR_PIPELINE.md) and
+> [COLLECTION_FLOW.md](COLLECTION_FLOW.md); for the differences see
+> [PYTHON_VS_UAVRT.md](PYTHON_VS_UAVRT.md).
 
 This application (**UAV-RT Detection**) detects periodic radio tag pulses from streaming IQ data received over UDP. It is authored by Michael W. Shafer and designed for wildlife radio telemetry from UAVs. The system is written in MATLAB with MATLAB Coder annotations for C++ code generation.
 

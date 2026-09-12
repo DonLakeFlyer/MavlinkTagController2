@@ -1,8 +1,26 @@
 # Detector Analysis: Amplitude vs Detection
 
+> **Analysis record.** The changes proposed in this document have since been
+> built; it is kept as the reasoning behind them, not as a to-do list.
+> Implementation status against the numbered changes further down:
+>
+> | Change | Status | Where |
+> | --- | --- | --- |
+> | 1 Fixed-offset amplitude readout (`group_snr`) | implemented | `pulse_detector.py`, `PulsePayload.group_snr` |
+> | 2 Measure every heading with one persistent detector | implemented | `heading-NNN/` layout, `CollectionCoordinator` |
+> | 3 Retrospective lock, candidate bank | implemented | `MAX_LOCK_CANDIDATES`, `BearingCalculator::solveCandidates` |
+> | 4 Lock definitions (`score_ratio >= 3`, no dominant fold) | implemented | `--lock-score-ratio`, `DOMINANT_FOLD_THRESHOLD` |
+> | 5 Frequency prior (±2 kHz acquire, ±200 Hz locked) | implemented | `ACQUISITION_SEARCH_HZ`, `LOCKED_SEARCH_HZ` |
+> | 6 Linear-power pattern fit | implemented | fit consumes linear `group_snr` / `signal_power`; `snr_db` is diagnostic only |
+> | 7 Single K per collection (no separate post-lock K) | implemented | K is the tag's (`tagInfo.k`, TagTracker default 20); protocol v3 removed `measurement_k` |
+> | Whole-rotation PRI fit | implemented | `fit_lock_timing` |
+>
+> Current behaviour is documented in
+> [docs/design/COLLECTION_FLOW.md](../design/COLLECTION_FLOW.md).
+
 **Status: modelled, and since validated against flight data.** Every number
 below comes from Monte-Carlo simulation of the detector's own algorithm at its
-real parameters. The checks in `FLIGHT_DATA_ANALYSIS.md` have now been run
+real parameters. The checks in [2026-04_FLIGHT_DATA_ANALYSIS.md](2026-04_FLIGHT_DATA_ANALYSIS.md) have now been run
 against the April 2026 PDC testing data (see its Results section): the SNR
 floor was confirmed to ~0.1 dB at K=20, the rear-heading energy is consistent
 with noise rather than multipath (not yet conclusive — needs rear-heading
@@ -412,7 +430,7 @@ lock maintains itself.
 
 The detector searches all bins every cycle with no frequency constraint;
 uavrt_detection uses a ±100 Hz adaptive lock (documented in
-`PYTHON_VS_UAVRT_COMPARISON.md` as "Frequency tracking: None"). A ±200 Hz gate on
+[PYTHON_VS_UAVRT.md](../design/PYTHON_VS_UAVRT.md) as "Frequency tracking: None"). A ±200 Hz gate on
 a ±1920 Hz search span keeps ~10% of the band — roughly 10× fewer false locks at
 **zero sensitivity cost**, because it is a prior, not a higher bar.
 
@@ -605,7 +623,7 @@ near-zero amplitudes — are what the pattern fit (change 6) uses to reject the
   of a full-size 2-element reproduces that within 0.1 dB (6.19 dBi, 10.5 dB F/B).
   It is performing to spec; the loss is downstream.
 - **The Arrow 146-3 / a 3-element upgrade.** The design in
-  `YAGI_ANTENNA_DESIGN.md` (1026/965/910 mm, 82 cm boom, 9.5 mm tube) models at
+  [YAGI_ANTENNA_DESIGN.md](../proposals/YAGI_ANTENNA_DESIGN.md) (1026/965/910 mm, 82 cm boom, 9.5 mm tube) models at
   9.15 dBi, 58° HPBW, **10.3 dB F/B** — beamwidth and gain improve, front/back
   does not. And the gain advantage over the RA-2AHS is +3.0 dB, not the +5–6 dBd
   the doc assumes (it rates the RA-2AK at 1–2 dBd; Telonics publishes 4 dBd).
@@ -629,7 +647,7 @@ grazing incidence (Γ ≈ −1 for both polarisations below the pseudo-Brewster 
 You are well past the breakpoint, i.e. on the 1/d⁴ slope, where **range ∝ G^(1/4)**.
 This is why antenna gain is a weak range lever and why processing changes are
 worth more than aperture. It is also why terrain scatter is competitive with the
-direct path — see the multipath question in `FLIGHT_DATA_ANALYSIS.md`.
+direct path — see the multipath question in [2026-04_FLIGHT_DATA_ANALYSIS.md](2026-04_FLIGHT_DATA_ANALYSIS.md).
 
 ## Modelling caveats
 

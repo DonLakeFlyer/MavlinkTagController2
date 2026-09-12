@@ -1,5 +1,14 @@
 # Confidence Classification Improvements
 
+**Status (2026-09-12):**
+
+| Change | Status | Notes |
+| --- | --- | --- |
+| 1 Dominant-fold fraction gate | **implemented** | `DOMINANT_FOLD_THRESHOLD = 0.8` in `pulse_detector.py`; used in both the HIGH/LOW classification and lock candidacy. Re-analysis of the Apr-11 logs shows it catches **none** of those 69 detections (`max_fold_fraction` 0.11–0.75) — the "all 8 downgraded" prediction below was based on the legacy `min/max` metric. See [2026-09_MULTIPATH_ANALYSIS_REVIEW.md](../analysis/2026-09_MULTIPATH_ANALYSIS_REVIEW.md). |
+| 2 On/off contrast test | open | Detail in [CW_REJECTION.md](CW_REJECTION.md). No `--min-contrast-db`, no contrast computation in code. |
+| 3 Uniformity in the UDP packet | partial | `max_fold_fraction` and per-fold SNRs are computed and logged (`FOLDS` entry in the `.jsonl`), not serialised in `PulsePayload` (still 60 bytes). |
+| 4 Frequency consistency across headings | open | The single strongest discriminator for the Apr-11 data (offsets spread ±2 kHz). See note in the section — the persistent detector now makes a detector-side implementation possible. |
+
 Changes needed to reduce false-positive detections that currently pass the
 confidence gate. Motivated by Apr-11 field data where Flight 2 produced 8/8
 Conf:1 detections that were all transient/RFI artifacts.
@@ -26,6 +35,11 @@ different frequency. The score_ratio gate cannot catch this.
 
 ## Change 1: Dominant-Fold Fraction Gate in Detector
 
+**Implemented.** Kept for the rationale; the code now reads
+`is_marginal = det.score_ratio < confidence_ratio or has_dominant_fold` and the
+same gate applies to lock candidacy. Current behaviour is described in
+[CONFIDENCE_PIPELINE.md](../design/CONFIDENCE_PIPELINE.md).
+
 **Priority: High — biggest single impact, minimal code change**
 
 ### What
@@ -37,7 +51,7 @@ score_ratio.
 
 ### Where
 
-[pulse_detector.py](pulse_detector.py), in the detection reporting loop
+[pulse_detector.py](../../detector/pulse_detector.py), in the detection reporting loop
 (currently ~line 988).
 
 ### Current code
@@ -111,7 +125,7 @@ power everywhere; a real pulse has high on/off contrast.
 
 ### Where
 
-[pulse_detector.py](pulse_detector.py), in the fold detection function,
+[pulse_detector.py](../../detector/pulse_detector.py), in the fold detection function,
 after computing `on_powers` and before building `fold_info`.
 
 ### Proposed code
@@ -165,7 +179,7 @@ can log it and downstream consumers (TagTracker) can use it.
 
 This is a **breaking change** to the detector↔controller interface.
 
-**Detector side** ([detector_protocol.py](detector_protocol.py), [pulse_detector.py](pulse_detector.py)):
+**Detector side** ([detector_protocol.py](../../detector/detector_protocol.py), [pulse_detector.py](../../detector/pulse_detector.py)):
 
 ```python
 # Current:  _PULSE_PAYLOAD = struct.Struct('<IIBBBB6d')
@@ -175,12 +189,12 @@ This is a **breaking change** to the detector↔controller interface.
 Add `uniformity` to `PulseReport` and `encode_pulse_report()`, and pass it
 through `send_pulse_udp()`. The payload grows by 8 bytes.
 
-**Controller side** ([../shared/detector_protocol.h](../shared/detector_protocol.h)):
+**Controller side** ([shared/detector_protocol.h](../../shared/detector_protocol.h)):
 
 Append `double uniformity;` to `TagTrackerDetectorProtocol::PulsePayload`
 and update the expected payload size check.
 
-**Controller side** ([../controller/CommandHandler.cpp](../controller/CommandHandler.cpp)):
+**Controller side** ([controller/CommandHandler.cpp](../../controller/CommandHandler.cpp)):
 
 Copy `payload.uniformity` into `PythonPulseInfo_t` in `_handlePythonPulse()`
 and add it to the log format string:
@@ -210,9 +224,13 @@ all headings that reported detections. A real tag produces the same frequency
 
 ### Where
 
-This belongs in the **controller**, not the detector, because the detector
-runs as independent per-heading instances with no cross-heading awareness.
-The controller already accumulates per-heading results.
+When this was written the detector was restarted per heading, so only the
+controller saw a whole rotation. One detector process now persists across the
+rotation and already banks lock candidates with a ±200 Hz frequency gate
+(`LOCKED_SEARCH_HZ`), so the check could live in the detector for acquisition
+reports as well; the controller still has the rotation-level view for a
+post-hoc downgrade. Either way the trigger is the same: detections whose
+offsets scatter across the ±2 kHz acquisition window are noise.
 
 ### Proposed logic
 
@@ -228,7 +246,7 @@ After 8-heading rotation completes:
 
 ### Where in controller
 
-[../controller/CommandHandler.cpp](../controller/CommandHandler.cpp) or a new
+[controller/CommandHandler.cpp](../../controller/CommandHandler.cpp) or a new
 rotation-level aggregation class. The controller currently processes each
 pulse independently — it would need to buffer a rotation's worth of pulses
 before applying this check.
