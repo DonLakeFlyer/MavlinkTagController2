@@ -7,6 +7,7 @@ behaviour, the row here becomes **implemented**, and the proposal file moves to
 
 | Proposal | Doc | Status | Evidence / notes |
 | --- | --- | --- | --- |
+| End-to-end 8×20 hovering listening post (per-slice data-derived threshold, impulse blanking, confirmation rule, weighted fit, measured pattern) | [END_TO_END_8x20_SYSTEM.md](END_TO_END_8x20_SYSTEM.md) | open | Design hand-off 2026-09-12. Subsumes the "EVT threshold calibration" and "Frequency-consistency gate" rows below. Acceptance: Apr-11 replay detection rate 88 % → ≈ pf |
 | Dominant-fold fraction gate | [CONFIDENCE_IMPROVEMENTS.md](CONFIDENCE_IMPROVEMENTS.md) Ch1 | implemented | `DOMINANT_FOLD_THRESHOLD` in `detector/pulse_detector.py`. Does not catch the Apr-11 noise detections. |
 | On/off contrast (CW rejection) | [CW_REJECTION.md](CW_REJECTION.md), Ch2 | open | No `--min-contrast-db` in code |
 | Uniformity / fold diagnostics in `PulsePayload` | Ch3 | partial | Computed and logged in `.jsonl` `FOLDS`; not on the wire (`PulsePayload` is 60 bytes). Wire-format change: detector, `shared/detector_protocol.h`, controller, tests in one commit |
