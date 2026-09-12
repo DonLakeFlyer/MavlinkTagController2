@@ -1,6 +1,6 @@
 # Flight Data Analysis Plan
 
-Companion to `DETECTOR_AMPLITUDE_ANALYSIS.md`. That document is entirely
+Companion to [2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md). That document is entirely
 simulation; this one lists the checks against real flight data that confirm it,
 falsify it, or settle the questions simulation cannot answer.
 
@@ -223,7 +223,7 @@ collar's true carrier sat ~+650 Hz off the entered frequency, so a window
 centered on the entered frequency excludes genuine direct/multipath copies
 (re-run against the empirical carrier), and `flight_checks.py` aggregates
 all headings rather than only rear headings (≥90° from the known bearing).
-The collar-OFF rotation in FIELD_TEST_PLAN.md is the decisive test. On the
+The collar-OFF rotation in [FIELD_TEST_PLAN.md](../proposals/FIELD_TEST_PLAN.md) is the decisive test. On the
 available evidence no antenna front/back purchase is warranted, and the
 companion document's changes address the symptom.
 
@@ -314,7 +314,7 @@ comparison is still outstanding — record one before the next campaign.
 
 ## Check 6 — If you have raw IQ
 
-`PYTHON_VS_UAVRT_COMPARISON.md` notes the Python detector does not record IQ but
+[PYTHON_VS_UAVRT.md](../design/PYTHON_VS_UAVRT.md) notes the Python detector does not record IQ but
 uavrt_detection writes it per segment. **If any flight has raw IQ, this is the
 definitive test and needs no further flying.**
 
@@ -373,7 +373,7 @@ floor to ~0.1 dB. The companion document's conclusions stand as written.
 
 ## Still outstanding after this analysis
 
-See `FIELD_TEST_PLAN.md` for the capture campaign that closes these.
+See [FIELD_TEST_PLAN.md](../proposals/FIELD_TEST_PLAN.md) for the capture campaign that closes these.
 
 - **True PRI per collar** (Check 4) — needs `ipi_analyzer` on a live UDP
   stream (it has no raw-file input; an offline raw-IQ timing path is not yet

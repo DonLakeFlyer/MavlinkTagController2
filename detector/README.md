@@ -1,554 +1,113 @@
 # VHF Pulse Detector
 
-Python-based pulse detector for crystal-oscillator wildlife radio collars. Implements K-fold coherent integration with Extreme Value Theory (EVT) thresholding for robust detection under non-Gaussian noise conditions.
-
-## Overview
-
-This detector is designed for crystal-oscillator VHF tags with **no timing uncertainty** (ti_pu=0, ti_pj=0). It receives decimated IQ data via UDP from the `airspyhf_zeromq → decimator` pipeline and performs stateless detection cycles optimized for single-tag tracking scenarios.
-
-**Pipeline:**
-```
-airspyhf_zeromq_rx  →  ZMQ PUB  →  decimator  →  UDP  →  pulse_detector.py
-```
-
-## Algorithm Pipeline
-
-### 1. Data Accumulation (~10 seconds per cycle)
-
-The detector accumulates IQ samples until it has enough data to fold K pulses (K is configurable via `--k`, default 5):
+Python K-fold pulse detector for crystal-oscillator wildlife radio collars.
+Consumes decimated IQ over UDP, integrates K pulses at the known interval,
+thresholds against an empirically calibrated (EVT) noise model and reports
+each cycle to the controller over the TTDP protocol. During a rotation it also
+banks lock candidates and measures every heading at each of them for the
+bearing fit.
 
 ```
-samples_needed = STFT_step × (K × PRI_windows + 1) + STFT_overlap
-               ≈ 38,400 samples at 3840 Hz
-               ≈ 10 seconds
+airspyhf_zeromq_rx → ZMQ → airspyhf_decimator → UDP :10000, :10001, … → pulse_detector.py → TTDP/UDP :50000 → controller
 ```
 
-Each cycle is **independent**—all state is discarded between cycles for simplicity and robustness against drift.
+## Install
 
-### 2. STFT + Spectral Weighting (W Matrix)
-
-**Window sizing:** Matched to pulse width
-- `n_w = ⌈pulse_width × sample_rate⌉` (e.g., 15 ms → 58 samples)
-- 50% overlap (`n_ol = n_w / 2`)
-- Rectangular window (matched to on/off keyed pulse shape, matching uavrt_detection's `rectwin`)
-
-**Spectral weighting matrix W** (from uavrt_detection's `weightingmatrix.m`):
-
-Instead of zero-padding the FFT for sub-bin resolution, we use a Toeplitz-based matched filter matrix that provides both interpolation and optimal SNR gain:
-
-1. For each sub-bin shift `zeta` in `[0, 0.5]`:
-   - Create frequency-shifted pulse template: `s[n] = exp(2jπ·zeta·n/n_w)`
-   - Compute normalised, DC-centred DFT: `Xs = fftshift(fft(s)) / ‖fft(s)‖`
-   - Build circulant Toeplitz matrix from `Xs`
-2. Stack and reshape (Fortran order) to interleave columns
-3. Sort columns by ascending frequency
-
-**Result:** `W` is `(n_w, 2·n_w)` — doubles frequency resolution to half-bin spacing.
-
-**STFT computation with W:**
-```
-S = fftshift(fft(segment, n=n_w))    # n_w-point FFT per window (no zero-padding)
-scores = W^H · S                      # matched-filter at each sub-bin frequency
-power = |scores|²                     # detection statistic
-```
-
-**Output:** Power spectrogram `(n_freq, n_time)` where:
-- `n_freq = 2·n_w` (116 bins for 15 ms pulse at 3840 Hz)
-- Frequency axis: DC-centred, from `Wf` vector
-- Time axis: STFT window indices at 50% overlap step
-
-### 3. K-Fold Pulse Integration
-
-For each frequency bin, the detector searches all possible first-pulse offsets within one PRI:
-
-```python
-search_range = min(PRI_windows, max_valid_start)
-pulse_idx = first_offset + [0, N, 2N, ..., (K-1)×N]  # K folds
-```
-
-**Folding operation:** Sum power at each candidate pattern:
-```
-fold_score[f, offset] = Σ(k=0 to K-1) power[f, offset + k×N]
-```
-
-This provides **coherent integration gain** proportional to K when the pulse timing is correct, while random noise averages out.
-
-### 4. EVT (Extreme Value Theory) Threshold
-
-Unlike analytical Gamma-distribution thresholds, EVT learns the **actual noise statistics** empirically.
-
-**Monte Carlo calibration (first cycle only):**
-1. Generate 100 synthetic complex Gaussian noise trials (unit-variance)
-2. Run each through the **full STFT + W matrix pipeline** (captures correlations from window overlap and spectral weighting)
-3. Fold and search each trial identically to real data
-4. Record maximum score across all frequencies/offsets per trial
-5. Fit **Gumbel distribution** (`gumbel_r`) to the max scores — matching MATLAB's `evfit`
-6. Compute threshold at desired P<sub>f</sub> from fitted distribution
-
-**Noise estimation** (per frequency bin, matching uavrt_detection `wfmstft.m`):
-1. 3-window moving mean along time axis (smooths transients)
-2. Median of smoothed power per frequency bin
-3. Mask bins where power > 10× median (excludes signal energy and strong interference)
-4. Mean of unmasked bins → `noise_power[f]`
-
-**Per-frequency scaling:**
-```python
-threshold[f] = base_threshold × noise_power[f]
-```
-
-**Why EVT?**
-- Handles non-Gaussian noise (impulsive interference, power line arcs)
-- Empirically adapts to actual noise tail behavior
-- More robust than parametric assumptions in harsh RF environments
-
-**Threshold cache:** Regenerated only if data geometry changes (n_freq, n_time).
-
-### 5. Peak Detection & Sidelobe Suppression
-
-**Candidate selection:**
-```python
-det_bins = where(fold_scores > threshold)
-```
-
-**Spectral sidelobe merging:**
-- Detections within `max(15, nfft // 4)` bins (~29 bins ≈ 960 Hz at default settings) are merged
-- Only the **strongest peak** is retained per cluster
-- Prevents reporting multiple detections for a single tag due to FFT sidelobes
-
-**Output limit:** Top 1 detection by SNR (configurable for multi-tag scenarios)
-
-### 6. SNR Calculation
-
-For each detected frequency bin:
-
-```python
-signal = fold_score[f]          # sum of K pulse-window powers
-noise  = noise_power[f]          # per-window noise estimate
-SNR_dB = 10 × log10(signal / noise)
-```
-
-This matches uavrt_detection's convention: the fold score naturally scales with K (more folds → higher numerator → higher reported SNR). Expect roughly `10×log10(K)` dB improvement over single-pulse detection (e.g. ≈ 7 dB for K=5, ≈ 13 dB for K=20).
-
-> **Note:** The denominator is the single-window noise estimate, *not* `K × noise_power`. This means the reported SNR includes the integration gain and is directly comparable to uavrt_detection's output.
-
-## Controller Reporting Protocol
-
-The persistent detector uses the packed little-endian TTDP protocol defined in `detector_protocol.py` and `shared/detector_protocol.h`. After startup warmup it sends `READY`; each `ARM` command carries collection and slice IDs that are echoed in `ARMED`, pulse/no-detection reports, `CYCLE_COMPLETE`, and `FAILED`. The `detection_status` and `confirmed_status` fields tell the controller and GCS what happened:
-
-### Detection Status Values
-
-Defined in `TunnelProtocol.h` and mirrored in the detector:
-
-| Value | Name | Meaning |
-|-------|------|------|
-| `0` | SUBTHRESHOLD | Marginal detection (fold score < confidence_ratio × threshold) |
-| `1` | SUPERTHRESHOLD | Confident detection (fold score ≥ confidence_ratio × threshold) |
-| `2` | CONFIRMED | Fixed-coordinate measurement at a lock candidate (collection mode only, after the provisional lock) |
-| `3` | NO_DETECTION | Detector searched this cycle and found nothing |
-
-### Confirmed Status
-
-Binary (0 or 1). For acquisition reports the Python detector uses the confidence ratio as a proxy; locked measurements (`detection_status=2`) always carry `confirmed_status=1`:
-
-- `confirmed_status=1` — confident detection (score ≥ confidence_ratio × threshold; default ratio 1.3) or a locked measurement
-- `confirmed_status=0` — everything else (marginal, no detection)
-
-The controller logs `confirmed_status=1` pulses at Info level and `confirmed_status=0` at Debug level. Outside a collection both are forwarded to the GCS; during a collection only CONFIRMED (locked) reports of the live lock candidate are forwarded (see below).
-
-### Per-Cycle Report Types
-
-| Scenario | `detection_status` | `confirmed_status` | Key fields |
-|----------|-------------------|--------------------|-----------|
-| **Strong detection** (score ≥ confidence_ratio × threshold) | `1` (SUPERTHRESHOLD) | `1` | frequency, SNR, noise_psd, stft_score |
-| **Marginal detection** (score < confidence_ratio × threshold) | `0` (SUBTHRESHOLD) | `0` | frequency, SNR, noise_psd, stft_score |
-| **No detection** | `3` (NO_DETECTION) | `0` | noise_psd, start_time (no frequency/SNR) |
-| **Locked measurement** (collection mode, after lock) | `2` (CONFIRMED) | `1` | group_snr = per-pulse power at the candidate's frequency/phase, `candidate_id`; `stft_score` = fold score of an independent sighting of that candidate on that slice, `0` when the slice was only measured |
-
-### Lock Candidates (`candidate_id`)
-
-In collection mode the detector banks up to `MAX_LOCK_CANDIDATES` (4) qualifying fold peaks. The strongest qualifying peak of the first cycle that has one becomes the *provisional* lock at once — there is no same-heading confirmation cycle; confirmation is retrospective (a second sighting on another heading, or a revisit slice requested by the controller). Post-lock cycles are the same K-pulse fold as acquisition, so the fold search keeps full sensitivity and a tag found later in the rotation is still admitted (append-only once locked). Every slice's spectrogram is retained for the rotation and each slice is measured at **all** banked candidates, reported once per buffered cycle per candidate (the controller upserts per slice) with `candidate_id` set (`0` = provisional lock, `1..3` = alternates); a late candidate is therefore also measured on every earlier heading. After every cycle each candidate's PRI is refitted over the whole buffered rotation (`fit_lock_timing`, nominal ±300 ppm; collar crystals sit tens of ppm off nominal and the error grows with distance from the anchor) and, if it moved, all its slices are re-measured and re-sent. The controller keeps one entry per `(tag_id, candidate_id, slice_id)`, fits the antenna pattern to each candidate at `FinishCollection`, and reports the best-fitting one (or no bearing if none clears the confidence floor). If the winner was sighted on only one heading the controller asks the GCS for one revisit slice at the fitted bearing before finalising. The GCS live view follows one candidate per tag — the provisional lock until another candidate's pattern fit clearly overtakes it, at which point the controller replays that candidate's headings so the display corrects mid-rotation. Acquisition (`0`/`1`) and no-detection (`3`) reports always carry `candidate_id = 0`.
-
-Heartbeats are not pulse reports: the detector sends a header-only TTDP `HEARTBEAT` message (see `shared/detector_protocol.h`) once per second, with no `PulsePayload`.
-
-### No-Detection Reports
-
-When a cycle completes without finding a pulse above threshold, the detector sends a `detection_status=3` report carrying the observed `noise_psd`. This serves as a "rich heartbeat" — the GCS knows the detector is alive, actively searching, and can display the current noise floor. The controller forwards these to the GCS at debug log level.
-
-This is a Python detector addition; the uavrt_detection MATLAB/C++ detector does not send no-detection reports.
-
-## Gap Handling (Conservative Strategy)
-
-The detector monitors timestamp continuity between UDP packets to detect data loss.
-
-### Continuous timeline
-
-IQ is kept in a single stream (`iq_stream.py`) indexed by absolute sample
-position. Nothing on the control plane clears it: an `ARM` only records the
-stream index where that heading begins, so a segment for slice *N* starts at the
-first sample received after its `ARM` while earlier samples remain available as
-history. Segments are cut back-to-back with no discarded overshoot, so
-consecutive segments are sample-contiguous. History further than one segment
-behind the read cursor is retired and counted (`retired_samples` in
-`SESSION_END`).
-
-Datagrams are received on a dedicated thread into a bounded ring
-(`udp_receiver.py`) so STFT/fold/dump stalls cannot back up the kernel socket.
-Ring overflow is counted (`rx_ring_dropped`) and surfaces as a timestamp gap.
-
-### Two-Tier Gap Classification
-
-A single threshold at **2×t_p** (30 ms for default 15 ms pulse width) determines handling:
-
-| Gap Size | Action | Rationale |
-|----------|--------|-----------|
-| **< 2×t_p** (< 30 ms) | **Zero-fill** | Maintains STFT continuity, prevents phase jumps |
-| **≥ 2×t_p** (≥ 30 ms) | **Barrier** | Likely missed pulse(s); no segment may span the hole |
-
-**No "accept as-is" category:** All gaps are handled actively—either compensated via zero-fill or fenced off with a barrier.
-
-### Zero-Fill Implementation
-
-When any gap below the threshold is detected:
-1. Calculate missing sample count: `gap_seconds × sample_rate`
-2. Insert `np.zeros(N, dtype=complex64)` into buffer
-3. Flag segment with `[ZEROFILLED]` in output
-4. Continue processing (STFT sees continuous data)
-
-**Rationale:** A 15 ms gap in 10 seconds of data degrades SNR by ~0.006 dB—negligible compared to discarding 10 seconds and losing the detection entirely.
-
-### Large Gap Handling
-
-When a gap ≥30 ms is detected:
-1. The hole is **not** zero-filled; a barrier is placed at the first post-gap sample
-2. The current segment's cursor moves to the barrier (pre-gap samples stay in history)
-3. Log event with detailed diagnostics
-4. Accumulation continues from the barrier
-
-**Rationale:** Missing >2% of segment data corrupts fold timing. Processing would yield false negatives or spurious detections.
-
-### Gap Logging
-
-**Startup banner:**
-```
-Gap handling:
-  < 30.0 ms: zero-fill missing samples
-  ≥ 30.0 ms: discard segment and reset buffer
-```
-
-**Runtime logging:**
-```
-GAP < THRESHOLD: 15.3 ms (< 30.0 ms) - zero-filling 59 samples
-
-*** GAP ≥ RESET THRESHOLD: 125.5 ms (≥30.0 ms) ***
-    Discarding 18432 buffered samples and resetting segment
-    Expected packet after 266.7 ms, got 392.2 ms
-```
-
-**Final statistics:**
-```
---- Detection stopped after 42 cycles (420 s) ---
-  Detections:        38
-  Zero-filled gaps:  3 (< 30.0 ms)
-  Reset gaps:        1 (≥ 30.0 ms, segments discarded)
-  Total gap events:  4
-```
-
-## Configuration Parameters
-
-### Required
-
-| Parameter | Description | Example |
-|-----------|-------------|---------|
-| `--tip` | Inter-pulse interval (seconds) | `2.0` |
-
-### Optional
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--tp` | `0.015` | Pulse duration (seconds) |
-| `--fs` | `3840.0` | Decimated sample rate (Hz) |
-| `--port` | `10000` | UDP port for IQ data |
-| `--pf` | `5e-2` | False-alarm probability (per cycle) |
-| `--center-freq` | `0.0` | Channel center freq (MHz, display only) |
-| `--log-dir` | none | Write `detector_<tag>.jsonl` structured log here (see `shared/log_schema.py`) |
-| `--dump-spectrogram` | off | Save `tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json}` per cycle to `--log-dir` (~0.9 MB/cycle, ~330 MB/hour) |
-
-### False Alarm Probability (P<sub>f</sub>)
-
-The `--pf` parameter controls detection sensitivity. This system is designed for detecting weak tags at the edge of range (beyond omni antenna + handheld radio detection), so defaults favor maximum sensitivity.
-
-Three operational presets (matching TagTracker QGC dropdown):
-
-| Preset | P<sub>f</sub> | `--pf` value | FA per rotation (8 headings) | Use case |
-|--------|-------------|-------------|------------------------------|----------|
-| **Aggressive** | 5% | `5e-2` | ~34% chance of ≥1 false dot | Maximum range, weak tags (default) |
-| **Moderate** | 1% | `1e-2` | ~8% chance of ≥1 false dot | Good balance for most flights |
-| **Conservative** | 0.1% | `1e-3` | ~0.8% chance of ≥1 false dot | Cleaner display, slight range loss |
-
-Marginal detections (score < 2× threshold) are flagged as `[LOW]` in console output and sent as `SUBTHRESHOLD` to the GCS, helping operators distinguish possible false alarms from confident detections.
-
-**Trade-off:** Lower P<sub>f</sub> reduces false alarms but increases risk of missing weak tags at range.
-
-## Usage Examples
-
-### Basic (single 146 MHz tag, 2s interval)
 ```bash
-python3 pulse_detector.py --tp 0.015 --tip 2.0 --center-freq 146.000
+./setup_venv.sh          # from the repo root: creates .venv from simulator/requirements.txt (numpy, scipy, pyzmq, matplotlib, pytest)
 ```
 
-### Conservative (low false-alarm rate)
+The controller launches the detector with `.venv/bin/python3` when present,
+else `python3`.
+
+## Usage
+
 ```bash
-python3 pulse_detector.py --tp 0.015 --tip 2.0 --pf 1e-6 --center-freq 146.000
+.venv/bin/python detector/pulse_detector.py --tip 2.0 --tp 0.015 --center-freq 146.000
 ```
 
-### Custom sample rate and port
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--tip` | *required* | Inter-pulse interval, s |
+| `--tp` | `0.015` | Pulse width, s |
+| `--tip-secondary` | off | Second PRI for dual-rate collars; enables the multi-hypothesis fold |
+| `--k` | `5` | Pulses folded per cycle (the controller passes the tag's K, typically 20) |
+| `--fs` | `3840` | Decimated sample rate, Hz |
+| `--port` | `10000` | UDP port to receive IQ on |
+| `--center-freq` | `0.0` | Channel centre, MHz (display and frequency gate) |
+| `--freq` | `0` | Absolute tag frequency, Hz (reported in pulses; with `--center-freq` enables the ±2 kHz search gate) |
+| `--pf` | `5e-2` | False-alarm probability per cycle |
+| `--detection-margin` | `0.90` | Multiplier on the EVT threshold; lower = more sensitive |
+| `--confidence-ratio` | `1.3` | `score/threshold` at or above → HIGH (`confirmed_status = 1`), unless one fold carries > 80 % of the score (dominant-fold gate → LOW) |
+| `--lock-score-ratio` | `3.0` | Minimum `score/threshold` for a lock candidate |
+| `--warmup-seconds` | `5.0` | IQ discarded before the first cycle |
+| `--tag-id` | `0` | Tag id carried in reports |
+| `--pulse-port` | `0` | UDP port for TTDP reports (`0` = none) |
+| `--control-port` | `0` | Local UDP port for `ARM` commands (`0` = free-running, no collections) |
+| `--threshold-cache-dir` | none | Where `*.pythreshold` EVT caches live |
+| `--log-dir` | none | Write `detector_<tag>.jsonl` (and per-heading subdirs when armed) here |
+| `--dump-spectrogram` | off | Save `tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json}` per cycle (~0.9 MB at K=5, ~3.7 MB at K=20) |
+| `--debug` | off | Per-stage diagnostics |
+
+`pf` presets used by TagTracker: Aggressive `5e-2` (default), Moderate `1e-2`,
+Conservative `1e-3`. Lower `pf` = fewer false dots, slightly less range.
+
+Standalone pipeline against real hardware at 146.000 MHz (starts SDR,
+decimator and detector; Ctrl-C stops all three):
+
 ```bash
-python3 pulse_detector.py --tp 0.020 --tip 3.0 --fs 7680 --port 10002
+detector/run_detector.sh
 ```
 
-### Full pipeline via run_detector.sh
+Without hardware use the simulator: `simulator/run_sim_pipeline.sh` or
+`MavlinkTagController2 --simulator` (see [simulator/README.md](../simulator/README.md)).
+
+## Inputs / outputs
+
+| | |
+| --- | --- |
+| IQ in | UDP datagrams of `complex64` at `--fs`; the first sample is a header whose float lanes are bit-cast `uint32` seconds / nanoseconds (`decode_timestamp`), the rest are IQ (decimator format) |
+| Control in | TTDP `ARM(heading_deg)` on `--control-port` |
+| Reports out | TTDP `READY`, `ARMED`, `PULSE`, `NO_DETECTION`, `CYCLE_COMPLETE`, `FAILED`, `HEARTBEAT` (1 Hz) to `--pulse-port` — layout in [shared/README.md](../shared/README.md#ttdp-detector-protocol) |
+| Console | one line per cycle, e.g. `[   7 08:43:10]  DETECTED  146.609080 MHz  (-1920.0 Hz)  SNR 18.4 dB  score_ratio 1.599  noise 5.230e-12  171 ms  [LOW]`; `MEASURED …` lines for locked measurements; `no detection … best=…` otherwise |
+| Structured log | `detector_<tag>.jsonl`, entry types in `shared/log_schema.py`; when armed, one file per `heading-NNN/` |
+| EVT cache | `<cache-dir>/…-F<bins>-K<K>-Trials100-S2.pythreshold`, keyed by geometry |
+
+## Key files
+
+| File | Role |
+| --- | --- |
+| `pulse_detector.py` | STFT·W, K-fold, EVT threshold, peak selection, lock-candidate bank, per-slice measurement, PRI refit, reporting |
+| `iq_stream.py` | Continuous sample timeline, segment cutting, gap zero-fill / barrier |
+| `udp_receiver.py` | Receive thread and bounded ring |
+| `collection_control.py` | `ARM` handling and slice bookkeeping |
+| `detector_protocol.py` | TTDP encode/decode (mirror of `shared/detector_protocol.h`) |
+| `run_detector.sh` | Standalone hardware pipeline |
+
+## Tests
+
 ```bash
-cd detector
-./run_detector.sh
+.venv/bin/python -m pytest detector/tests -v
 ```
 
-This script automatically starts:
-1. `airspyhf_zeromq_rx` at 146.010 MHz (radio hardware)
-2. `decimator` with 10 kHz shift (768 kHz → 3840 Hz, removes DC spur)
-3. `pulse_detector.py` with configured tag parameters
+See [detector/tests/README.md](tests/README.md) and [TESTING.md](../TESTING.md).
 
-## Output Format
+## Further reading
 
-### Detection Output
-
-**With center frequency:**
-```
-[   1 18:51:43]  DETECTED  145.999768 MHz  (-231.7 Hz)  SNR 76.1 dB  11 ms  Δt=10.000s
-```
-
-**Without center frequency:**
-```
-[   1 18:51:43]  DETECTED  -231.7 Hz  SNR 76.1 dB  11 ms  Δt=10.000s
-```
-
-**Marginal detection (low confidence):**
-```
-[   1 18:51:43]  DETECTED  145.999768 MHz  (-231.7 Hz)  SNR 12.3 dB  10 ms  Δt=10.000s  [LOW]
-```
-
-**No detection:**
-```
-[   1 18:51:43]  no detection  11 ms
-```
-
-**With zero-fill warning:**
-```
-[   2 18:51:53]  DETECTED  145.999768 MHz  SNR 74.2 dB  12 ms  Δt=10.050s [ZEROFILLED]
-```
-
-### Output Fields
-
-| Field | Description |
-|-------|-------------|
-| `[cycle time]` | Cycle index and UTC timestamp |
-| `freq MHz` | Absolute frequency (if `--center-freq` provided) |
-| `(offset Hz)` | Frequency offset from channel center |
-| `SNR dB` | Signal-to-noise ratio after K-fold integration |
-| `proc_ms` | Processing time for this cycle |
-| `Δt` | Time since previous detection (cycle-to-cycle) |
-| `[LOW]` | Marginal detection (score < 2× threshold); sent as SUBTHRESHOLD/unconfirmed to GCS |
-| `[ZEROFILLED]` | Flag indicating segment had medium gaps |
-
-### Interpreting Δt (Inter-Detection Time)
-
-**Expected:** `Δt ≈ K × t_ip = 5 × 2.0s = 10.0s`
-
-The detector reports once per cycle after folding K pulses. To verify tag timing:
-
-- **Δt ≈ 10.0s** → Tag is transmitting at 2.0s intervals (5 pulses detected and folded)
-- **Δt ≈ 20.0s** → Missed one detection cycle (weak signal, interference, or gap)
-- **Δt ≈ 12.0s** → Tag might be at 2.4s intervals (5 × 2.4 = 12s)
-- **Δt ≈ 8.0s** → Tag might be at 1.6s intervals (5 × 1.6 = 8s)
-
-Variation of ±0.1s is normal (packet jitter, processing time).
-
-## Comparison to uavrt_detection
-
-| Feature | pulse_detector.py | uavrt_detection (MATLAB) |
-|---------|-------------------|--------------------------|
-| **Spectral weighting** | W matrix (Toeplitz matched filter) | W matrix (weightingmatrix.m) |
-| **Window** | Rectangular (rectwin) | Rectangular (rectwin) |
-| **Sub-bin resolution** | W matrix with zetas=[0, 0.5] | W matrix with configurable zetas |
-| **Noise estimation** | 10× median masking | 10× median masking (wfmstft.m) |
-| **Threshold method** | EVT Gumbel (Monte Carlo through full pipeline) | EVT Gumbel (evfit/evthresh) |
-| **Temporal validation** | None (stateless) | Confirmation state machine |
-| **State persistence** | Discarded per cycle | Tracked across segments |
-| **Gap handling** | Zero-fill + discard | Zero-fill + stale-data reset |
-| **Frequency tracking** | None | Adaptive ±100 Hz lock |
-| **Timing uncertainty** | Assumes zero (ti_pu=0) | Configurable (ti_pu, ti_pj) |
-| **Multi-signal peeling** | Not needed (1 tag/channel) | Iterative peak removal |
-| **Complexity** | Low (single file) | High (state machine, posteriori) |
-
-### When to Use Each
-
-**pulse_detector.py:**
-- Single-tag tracking
-- Crystal-oscillator tags (precise timing)
-- Simple deployment scenarios
-- Quick field validation
-- Lower computational overhead
-
-**uavrt_detection:**
-- Multi-tag environments
-- Oscillator drift compensation needed
-- Production UAV deployments
-- Requires high confirmation confidence
-- Integration with full UAV-RT stack
-
-## Performance Characteristics
-
-### Computational Cost
-
-At 3840 Hz decimated rate with default parameters:
-
-| Component | Time (per cycle) | Notes |
-|-----------|-----------------|-------|
-| EVT threshold generation | ~800 ms | First cycle only (cached) |
-| STFT + W matrix | ~5 ms | ~1.3k windows (10 s segment), W^H multiplication |
-| Pulse folding | ~3 ms | Vectorized NumPy operations |
-| Peak detection | ~1 ms | Per-frequency threshold comparison |
-| **Total** | **~10 ms** | (800 ms first cycle) |
-
-**Duty cycle:** 10 ms processing / 10 s collection = **0.1% CPU**
-
-### Detection Sensitivity
-
-**Theoretical SNR improvement from K-fold integration:**
-- Single pulse: SNR_in = 10×log10(pulse_power / noise_power)
-- K-fold: SNR_out = SNR_in + 10×log10(K)
-- K=5: **SNR_in + 7.0 dB**, K=3: SNR_in + 4.8 dB
-
-**Practical detection limits:**
-- Strong tags (local): 60-80 dB SNR (easily detected)
-- Moderate tags (1-2 km): 20-40 dB SNR (reliable)
-- Weak tags (3-5 km): 10-20 dB SNR (marginal, depends on P<sub>f</sub>)
-- Very weak (> 5 km): < 10 dB SNR (missed or requires lower P<sub>f</sub>)
-
-### False Alarm Rate
-
-With `--pf 5e-2` (default, Aggressive) and ~10-second cycles (K=5, tip=2.0 s):
-
-```
-FA_rate = (3600 s/hour) / (10 s/cycle) × 5e-2 = 18 FA/hour
-FA_per_rotation = 1 - (1 - 5e-2)^8 = ~34% chance of ≥1 false dot per rotation
-```
-
-In practice, false alarms are marginal detections near threshold (low SNR) and flagged as `[LOW]`/`SUBTHRESHOLD`, making them easy to distinguish from real tags which show consistent frequency and SNR patterns across multiple headings.
+- [docs/design/DETECTOR_PIPELINE.md](../docs/design/DETECTOR_PIPELINE.md) — one cycle end to end: stream, STFT·W, fold, EVT, peaks, SNR
+- [docs/design/COLLECTION_FLOW.md](../docs/design/COLLECTION_FLOW.md) — acquisition → lock → per-slice measurement → bearing
+- [docs/design/CONFIDENCE_PIPELINE.md](../docs/design/CONFIDENCE_PIPELINE.md) — `pf` / margin / confidence ratio / dominant-fold gate
+- [docs/design/RATE_SWITCH_DETECTOR.md](../docs/design/RATE_SWITCH_DETECTOR.md) — dual-rate collars
+- [docs/design/FREQUENCY_RANGE.md](../docs/design/FREQUENCY_RANGE.md) — bandwidth and bin resolution
+- [docs/design/PYTHON_VS_UAVRT.md](../docs/design/PYTHON_VS_UAVRT.md) — differences from the MATLAB reference
 
 ## Troubleshooting
 
-### Detector or simulator dies immediately with `Illegal instruction` (SIGILL, "Process fail: 4")
-
-Seen on aarch64 VMs (Parallels on Apple silicon) after a host/hypervisor update: the guest advertises SME in `/proc/cpuinfo`, the OpenBLAS bundled with numpy selects its `armv9sme` kernel, and the guest kernel faults on the first SME instruction. Verify with `OPENBLAS_VERBOSE=2 .venv/bin/python -c "import numpy"` (prints `Core: armv9sme`). Fix: `OPENBLAS_CORETYPE=ARMV8` in the environment of every process that imports numpy — system-wide via a line in `/etc/environment` (re-login), or `Environment=` in a systemd unit.
-
-### No Detections
-
-**Check:**
-1. Tag is powered and transmitting (verify with handheld radio)
-2. Radio is tuned correctly (`run_detector.sh` expects 146.000 MHz tag)
-3. Decimator is receiving data (look for `[dec] locked input rate` message)
-4. Detector shows startup banner (if not, check Python dependencies)
-5. Tag parameters match (`--tp` and `--tip` must be correct)
-
-**Try:**
-- Increase `--pf` to `1e-3` for more sensitivity
-- Reduce distance to tag
-- Check for RF interference
-
-### Too Many False Alarms
-
-**Solutions:**
-- Decrease `--pf` to `1e-5` or `1e-6`
-- Increase minimum SNR threshold in code (line 160)
-- Increase sidelobe merging distance (line 152)
-- Move away from power lines / urban RF
-
-### Frequent Large Gaps
-
-**Causes:**
-- CPU overload (other processes competing)
-- Network congestion (ZMQ → decimator → detector)
-- Insufficient UDP receive buffer
-
-**Solutions:**
-- Monitor CPU usage (`top`/`htop`)
-- Increase UDP receive buffer (already set to 1 MB at line 306)
-- Check decimator performance stats
-- Reduce system load
-
-### Detector Hangs After Startup
-
-**Likely cause:** No data arriving via UDP
-
-**Check:**
-- Decimator is running and bound to correct port
-- `--ports` argument to decimator includes detector's `--port`
-- Firewall not blocking UDP localhost traffic
-
-## Dependencies
-
-- Python 3.7+
-- NumPy (vectorized operations, FFT)
-- SciPy (Gumbel distribution fitting, Toeplitz matrix construction)
-
-**Install:**
-```bash
-pip3 install numpy scipy
-```
-
-## Implementation Notes
-
-### Choosing K
-
-K (fold count) is configurable via `--k` (default 5). The default K=5 balances:
-- Cycle time (~10 s at tip=2.0 s)
-- Computational cost
-- 7 dB SNR gain over single-pulse detection
-- Fast feedback in field testing
-
-Higher K (e.g. 20) increases sensitivity (+13 dB) at the cost of longer cycles (~27 s) and longer EVT cache generation on first run. The fractional PRI fix ensures fold alignment is accurate at any K.
-
-### Why Stateless?
-
-Unlike uavrt_detection's stateful tracking, this detector discards all state between cycles because:
-1. **Simplicity:** No state machine, no priori/posteriori bookkeeping
-2. **Robustness:** Immune to state corruption from transient interference
-3. **Single-tag optimization:** Stateless is sufficient when tracking one known tag
-4. **Predictable timing:** Crystal oscillators have minimal drift over 10-second windows
-
-For drift-prone tags or multi-tag scenarios, use the full uavrt_detection pipeline.
-
-### EVT vs Gamma Distribution
-
-The switch from analytical Gamma to empirical EVT thresholding was motivated by field observations in the African bush:
-- Power line arcs create impulsive noise with fat tails
-- Lightning static doesn't follow exponential assumptions
-- EVT adapts to actual noise without parametric assumptions
-
-In clean RF environments, both methods perform similarly. In harsh environments, EVT is more robust.
-
-## References
-
-- **UAV-RT Detection System:** https://github.com/dynamic-and-active-systems-lab/uavrt_detection
-- **Extreme Value Theory:** Coles, S. (2001). *An Introduction to Statistical Modeling of Extreme Values*. Springer.
-
-
-## License
-
-See repository root LICENSE file.
-
-## Authors
-
-Detector implementation: Dynamic and Active Systems Lab contributors
-UAV-RT system design: Michael W. Shafer
-Integration: Don Lake (Dynamic and Active Systems Lab)
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Process dies at once with `Illegal instruction` (SIGILL, controller logs "Process fail: 4") | aarch64 VM advertises SME; numpy's OpenBLAS picks its `armv9sme` kernel and the guest faults. Verify: `OPENBLAS_VERBOSE=2 .venv/bin/python -c "import numpy"` prints `Core: armv9sme` | `OPENBLAS_CORETYPE=ARMV8` in the environment of every numpy process (`/etc/environment` or `Environment=` in the systemd unit) |
+| Hangs after the startup banner | No IQ arriving | Decimator running? Its `--ports` includes this `--port`? Firewall on localhost UDP? |
+| No detections | Tag off / wrong frequency / wrong `--tp` `--tip` | Confirm with a handheld receiver; check `--center-freq` and the tune offset; check decimator log shows `locked input rate` |
+| Detections on nearly every cycle at scattered offsets, SNR ≈ 15–18 dB | EVT threshold not matching the field noise; these are noise maxima (see the Apr-11 record in `docs/analysis/`) | Lower `--pf`, set `--detection-margin 1.0` (the default 0.90 lowers the threshold); a stable collar clusters within a bin or two of one offset |
+| Frequent `GAP ≥` barriers | CPU starvation or UDP buffer loss between decimator and detector | Check `top`; check decimator `perf` counters (`queue_drops`, `dropped`); reduce other load |
+| First cycle takes many seconds | EVT cache being generated for a new geometry | Expected once per (K, tp, fs, hypotheses); cached in `--threshold-cache-dir` afterwards |

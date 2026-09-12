@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Check 6 from FLIGHT_DATA_ANALYSIS.md — offline IQ replay.
+"""Check 6 from docs/analysis/2026-04_FLIGHT_DATA_ANALYSIS.md — offline IQ replay.
 
 Loads a raw airspy-hf capture (complex_float32 at 768 kHz), shifts the tag
 band to baseband, decimates to the detector rate (3840 Hz) using a streaming
 mirror of the production decimator (decimator/src/main.cpp filter taps and
 output phase), runs the detector's own STFT + K-fold search (the "current
 metric"), and then applies the fixed-offset amplitude estimator
-(amplitude_at_known_pulse) from DETECTOR_AMPLITUDE_ANALYSIS.md at the locked
+(amplitude_at_known_pulse) from docs/analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md at the locked
 (bin, phase), reporting absolute signal power and noise separately.
 
 Usage:

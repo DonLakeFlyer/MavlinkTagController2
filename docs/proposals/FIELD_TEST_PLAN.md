@@ -1,7 +1,9 @@
 # Field Test Plan — Test Collar Capture Campaign
 
-Companion to `FLIGHT_DATA_ANALYSIS.md` (results of the April 2026 analysis) and
-`DETECTOR_AMPLITUDE_ANALYSIS.md` (the proposed changes). This plan covers the
+**Status: open (field work).** None of the captures below have been flown yet.
+
+Companion to [2026-04_FLIGHT_DATA_ANALYSIS.md](../analysis/2026-04_FLIGHT_DATA_ANALYSIS.md) (results of the April 2026 analysis) and
+[2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](../analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md) (the proposed changes). This plan covers the
 next field session with a **real collar, not on a dog**, and lists exactly the
 captures needed to convert the remaining simulation-only conclusions into
 measured fact.

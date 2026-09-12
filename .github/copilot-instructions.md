@@ -1,21 +1,19 @@
 # Repository Instructions
 
-This is a monorepo containing the full UAV radio-tag tracking signal pipeline:
-
-| Component | Directory | Description |
-| --- | --- | --- |
-| Controller | `controller/` | MAVLink tag controller, detector management, pulse relay |
-| Decimator | `decimator/` | ZeroMQ→UDP IQ decimator (8×5×5) |
-| ZeroMQ publisher | `airspyhf_zeromq/` | Airspy HF+ SDR → ZeroMQ PUB stream |
-| Wire format | `shared/tagtracker_wireformat/` | Shared packet header (header-only C library) |
+This is a monorepo containing the full UAV radio-tag tracking signal pipeline
+(SDR publisher, decimator, Python detector, MAVLink controller, simulator,
+analyzers). The component table and layout are in the root [README.md](../README.md);
+the end-to-end flow is in `docs/design/SYSTEM_OVERVIEW.md`.
 
 ## Wire-format contract
 
-The packet header in `shared/tagtracker_wireformat/zmq_iq_packet.h` is the single source of truth for all three components. Any change to field layout, sizes, endianness, magic, or version semantics is a **breaking contract change** that must:
+The packet header in `shared/tagtracker_wireformat/zmq_iq_packet.h` is the single source of truth for the SDR publisher, decimator and simulator. Any change to field layout, sizes, endianness, magic, or version semantics is a **breaking contract change** that must:
 
 - Bump `TTWF_ZMQ_IQ_VERSION`.
-- Update all three components atomically in the same commit/PR.
-- Update the ZeroMQ packet format table in README.md.
+- Update all consumers atomically in the same commit/PR.
+- Update the ZeroMQ packet format table in `shared/README.md`.
+
+The same rule applies to `shared/detector_protocol.h` (controller ↔ detector): update `detector/detector_protocol.py`, `controller/tests/test_detector_protocol.cpp` and `detector/tests/test_detector_protocol.py` together.
 
 ## Coding focus
 
@@ -46,11 +44,14 @@ The packet header in `shared/tagtracker_wireformat/zmq_iq_packet.h` is the singl
 
 ## Build system
 
-The top-level CMakeLists.txt supports selective builds:
+All three C/C++ components are built by the top-level CMakeLists.txt (libairspyhf is a required system dependency). Per-component CMake presets (`controller`, `decimator`, `airspyhf-zeromq`, and `-release` variants) filter the build to one target; `debug`/`release` enable `BUILD_TESTING`. `make` / `make test` wrap these.
 
-- `BUILD_CONTROLLER` (ON by default)
-- `BUILD_DECIMATOR` (ON by default)
-- `BUILD_AIRSPYHF_ZMQ` (OFF by default — requires system libairspyhf)
+## Documentation placement
+
+- Component READMEs answer only "what is this and how do I run it" (sections: purpose, build, usage with CLI table from the argument parser, inputs/outputs, key files, tests, further reading, optional troubleshooting). No algorithms, protocol semantics, field results, proposals or source line numbers.
+- `docs/design/` describes current code only; `docs/analysis/` is dated and never rewritten; every `docs/proposals/` doc has a `Status:` line and a row in `docs/proposals/README.md`; superseded material goes to `docs/archive/` with a banner. Index: `docs/README.md`.
+- When implementing a proposal, update the design doc and the proposal status row in the same PR.
+- Test list: `TESTING.md`.
 
 ## Test requirements by change type
 

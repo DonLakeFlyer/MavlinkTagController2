@@ -2,7 +2,10 @@
 
 [![CI](https://github.com/DonLakeFlyer/MavlinkTagController2/actions/workflows/ci.yml/badge.svg)](https://github.com/DonLakeFlyer/MavlinkTagController2/actions/workflows/ci.yml)
 
-Monorepo for the UAV radio-tag tracking signal pipeline. Contains three co-deployed components and a shared wire-format header.
+Companion-computer software for UAV radio-collar tracking. An Airspy HF+ SDR
+streams IQ over ZeroMQ, a decimator narrows it to a 3.84 kHz channel per tag, a
+Python K-fold detector finds the collar pulses, and a MAVLink controller turns
+per-heading detections into a bearing for the ground station (TagTracker).
 
 ## Architecture
 
@@ -10,298 +13,103 @@ Monorepo for the UAV radio-tag tracking signal pipeline. Contains three co-deplo
 Airspy HF+ SDR
      │
      ▼
-airspyhf_zeromq_rx        ─── publishes IQ over ZeroMQ PUB
+airspyhf_zeromq_rx        publishes 768 kHz IQ over ZeroMQ PUB      (or simulator/iq_simulator.py)
      │
      ▼
-airspyhf_decimator        ─── subscribes ZMQ, decimates (8×5×5), emits UDP
+airspyhf_decimator        shifts 10 kHz, decimates 8×5×5, emits UDP IQ per detector
      │
      ▼
-MavlinkTagController2     ─── MAVLink controller, spawns detectors, relays pulses
+detector/pulse_detector.py   one per tag: STFT → K-fold → EVT threshold → TTDP pulse reports
+     │
+     ▼
+MavlinkTagController2     supervises the above, fits antenna pattern → bearing, MAVLink tunnel to GCS
 ```
 
-All three share a single packet header defined in [`shared/tagtracker_wireformat/zmq_iq_packet.h`](shared/tagtracker_wireformat/zmq_iq_packet.h).
+Wire contracts between these live in [shared/](shared/README.md). The full data
+and control flow is described in
+[docs/design/SYSTEM_OVERVIEW.md](docs/design/SYSTEM_OVERVIEW.md).
 
 ## Repository layout
 
-```
-shared/                        Shared wire-format header (header-only library)
-  tagtracker_wireformat/
-    zmq_iq_packet.h            ZeroMQ IQ packet header definition
-  tests/
-    test_zmq_iq_packet.c       Wire-format unit tests
+| Directory | Contents | README |
+| --- | --- | --- |
+| `controller/` | MAVLink tag controller (C++) | [controller/README.md](controller/README.md) |
+| `decimator/` | ZeroMQ → UDP decimator (C++) | [decimator/README.md](decimator/README.md) |
+| `airspyhf_zeromq/` | Airspy HF+ → ZeroMQ publisher (C) | [airspyhf_zeromq/README.md](airspyhf_zeromq/README.md) |
+| `detector/` | Python pulse detector | [detector/README.md](detector/README.md) |
+| `simulator/` | Synthetic IQ source, drop-in SDR replacement | [simulator/README.md](simulator/README.md) |
+| `analyzer/` | Offline log/IQ analysis and live signal characterisation tools | [analyzer/README.md](analyzer/README.md) |
+| `shared/` | Wire-format and protocol headers, log schema | [shared/README.md](shared/README.md) |
+| `setup/` | Raspberry Pi install and auto-start scripts | [setup/README.md](setup/README.md) |
+| `docs/` | Design references, analysis records, proposals, archive | [docs/README.md](docs/README.md) |
+| `cmake/` | `CPM.cmake` (fetches MAVLink headers and `TunnelProtocol.h` at configure time) | — |
+| `Antennas/` | Reference photos of the RA-2AHS and RA-23K antennas | — |
 
-controller/                    MAVLink tag controller
-  CMakeLists.txt
-  main.cpp, *.cpp, *.h
+## Build
 
-decimator/                     ZeroMQ → UDP decimator (was AirspyHFDecimate)
-  CMakeLists.txt
-  src/main.cpp
-  tests/test_main.cpp
+### Prerequisites
 
-airspyhf_zeromq/               Airspy HF+ ZeroMQ publisher (was airspyhf-zeromq)
-  CMakeLists.txt
-  libairspyhf/                 Vendored libairspyhf source
-  tools/                       airspyhf_zeromq_rx source
-  tests/                       Integration tests (require hardware)
-
-simulator/                     IQ signal simulator (drop-in SDR replacement)
-  iq_simulator.py              Synthetic IQ generator (ZMQ PUB, wire-format compatible)
-  run_sim_pipeline.sh          Standalone sim → decimator → detector pipeline
-  pulse_detector.py            Standalone pulse detector for simulation use
-
-detector/                      Python pulse detector (standalone / simulation)
-
-cmake/                         Build utilities
-  CPM.cmake                    CPM.cmake package manager (downloads mavlink at configure time)
-
-setup/                         Raspberry Pi setup and boot scripts
-```
-
-## Build prerequisites
-
-Top-level CMake now checks these at configure time:
-
-- Boost
-- Threads (pthreads)
-- pkg-config
-- libzmq
-- libusb-1.0
-- libairspyhf (system-installed)
-
-Install on Ubuntu/Debian:
+Boost, Threads, pkg-config, libzmq, libusb-1.0, libairspyhf (system), Python 3 + venv.
 
 ```bash
-sudo apt install build-essential cmake pkg-config libboost-all-dev libzmq3-dev libusb-1.0-0-dev libairspyhf-dev
-```
-
-Install on macOS (Homebrew):
-
-```bash
+# Ubuntu / Debian / Raspberry Pi OS
+sudo apt install build-essential cmake pkg-config libboost-all-dev libzmq3-dev libusb-1.0-0-dev libairspyhf-dev python3 python3-venv
+# macOS
 brew install cmake pkg-config boost zeromq libusb airspyhf
 ```
 
-## Quick start
-
-### Build controller + decimator (default)
+### Quick start
 
 ```bash
-make
+make                 # release build of controller, decimator, airspyhf_zeromq
+./setup_venv.sh      # Python venv for detector, simulator, analyzer
+make test            # all ctest targets
 ```
 
-### Build individual components
-
-```bash
-make controller
-make decimator
-make airspyhf_zeromq
-```
-
-### Run tests
-
-```bash
-make test
-```
-
-### Raw CMake
-
-```bash
-cmake -S . -B build \
-    -DBUILD_TESTING=ON
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-```
+Individual components: `make controller`, `make decimator`, `make airspyhf_zeromq`.
 
 ### CMake presets
 
 | Preset | Description |
 | --- | --- |
-| `debug` | Full build with tests enabled |
-| `release` | Optimised release build |
-| `relwithdebinfo` | Release with debug info |
-| `controller` | Build only `MavlinkTagController2` |
-| `decimator` | Build only `airspyhf_decimator` |
-| `airspyhf-zeromq` | Build only `airspyhf_zeromq_rx` |
-
-Per-component presets inherit from `debug` and filter to a single target.
-
-### CMake options
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `BUILD_TESTING` | `OFF` | Build and register tests |
-
-## Component details
-
-### Controller (MavlinkTagController2)
-
-The MAVLink controller receives tag definitions over a MAVLink tunnel, writes per-tag detector configurations, spawns `uavrt_detection` processes, and relays pulse detections back over MAVLink.
-
-**Usage:**
+| `debug` / `release` / `relwithdebinfo` | Full build; `debug` and `release` enable `BUILD_TESTING` |
+| `controller`, `decimator`, `airspyhf-zeromq` | Debug build filtered to one target (`-release` variants exist) |
 
 ```bash
-# Default SITL connection
-./build/controller/MavlinkTagController2
-
-# Custom connection
-./build/controller/MavlinkTagController2 serial:///dev/ttyACM0:115200
-
-# Simulator mode (replaces SDR hardware with iq_simulator.py)
-./build/controller/MavlinkTagController2 --simulator
-
-# Simulator mode with a specific preset
-./build/controller/MavlinkTagController2 --simulator weak
-
-# Simulator mode with a custom connection URL
-./build/controller/MavlinkTagController2 --simulator two-tags serial:///dev/ttyACM0:115200
+cmake --preset debug && cmake --build --preset debug && ctest --preset debug
 ```
 
-| CLI argument | Description |
+Dependencies fetched by CPM (cache `~/.cache/CPM`): MAVLink `c_library_v2` and
+`DonLakeFlyer/TagTrackerTunnelProtocol`, both pinned by `GIT_TAG` in
+`CMakeLists.txt`. The tunnel-protocol pin must match TagTracker's
+`custom/CMakeLists.txt`; bump both together.
+
+## Running
+
+- On the aircraft: [setup/README.md](setup/README.md) (Raspberry Pi, auto-start on boot, Pixhawk serial settings).
+- On a desk with SITL or no SDR: [TESTING.md](TESTING.md#running-against-px4-sitl) and `MavlinkTagController2 --simulator`.
+- Per-component CLI reference: the component READMEs above.
+
+## Testing
+
+`make test` runs every ctest target; Python tests are run per directory with
+pytest. [TESTING.md](TESTING.md) lists all of them.
+
+## Documentation
+
+[docs/README.md](docs/README.md) is the index. Layout:
+
+| Directory | Question it answers |
 | --- | --- |
-| `[connection_url]` | MAVLink connection URL (default: `udp://127.0.0.1:14540`) |
-| `--simulator [level\|preset]` | Enable simulator mode; optional signal level or preset (default: `strong`) |
-| `--sim-tx-bearing-deg <deg>` | True bearing of the simulated transmitter from the first vehicle pose (default: 0, i.e. due north). Set it off the first rotation heading to exercise the lock happening partway round and earlier headings being filled in retrospectively. |
-| `--sim-antenna ra2a\|ra23k` | Gain pattern applied to the simulated tag (default: `ra2a`). Independent of the GCS's `antenna_id`, so a mismatch can be reproduced. |
-| `--sim-pri-ppm <ppm>` | Collar crystal offset: scales the simulated PRI by `1 + ppm×10⁻⁶`. Default 43 (a bench RA-2A collar); `0` simulates a perfect crystal. Exercises the detector's whole-rotation PRI fit. |
+| `docs/design/` | How does the current code work? |
+| `docs/analysis/` | What did we measure? (dated, never rewritten) |
+| `docs/proposals/` | What might we change? (each has a status) |
+| `docs/archive/` | Superseded or historical material |
 
-Signal levels (used when a tag is configured; the tag's own frequency/PRI are used): `strong` and `marginal` both lock on the first cycle that clears the lock ratio (there is no same-heading confirmation cycle; a lock sighted on only one heading is confirmed by a controller-requested revisit slice); `below-marginal` never locks; `competing` puts the tag at bearing 135 (weak enough to be below threshold on the first headings) and adds a heading-independent interferer 1 kHz away that takes the provisional lock on the first heading, so the tag is admitted mid-rotation, earlier headings are filled in retrospectively, and the finish-time lock-candidate selection has to pick the tag (see `DETECTOR_AMPLITUDE_ANALYSIS.md`, issue #134).
+Component READMEs answer only "what is this and how do I run it".
 
-Available simulator presets (used only when no tag is configured): `strong`, `weak`, `noise-only`, `two-tags`, `distant`, `dropout`, `gap`. See [simulator/README.md](simulator/README.md) for details.
+## License
 
-In simulator mode the controller bypasses SDR hardware detection, spawns `iq_simulator.py` as the IQ source (ZMQ PUB on port 5555), and runs the decimator with `--shift-khz 0` (no DC-spur offset needed). Tag parameters from the MAVLink tag database are mapped to simulator `--freq-offset-hz`, `--tp`, and `--tip` arguments. If no tags are configured, the selected preset is used.
-
-**Logs and post-flight analysis.** All session directories live under `~/Logs/`. Each detection session gets `~/Logs/Logs-Detectors-<UTC timestamp>/`. Rotations use `~/Logs/Logs-Rotation-<timestamp>/`: the decimator, controller, and detector text logs live at the root (the pipeline persists across headings), while each detector writes its per-slice `detector_<tag>.jsonl` and spectrogram dumps under `heading-NNN/` (a confirmation revisit that lands on an already-flown heading gets `heading-NNN-sSS/`, suffixed with its slice id, so the first slice's records are kept). Python detectors write a machine-readable `detector_<tag>.jsonl` alongside their text log (schema: `shared/log_schema.py`). When a session stops, the controller runs `analyzer/post_flight_analysis.py` on that directory in the background and writes `analysis.md` there. If the GCS sets `dump_spectrogram`, each detection cycle also saves `tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json}` (~0.9 MB per cycle per tag at the defaults — ~0.6 MB power + ~0.3 MB IQ — so roughly 330 MB/hour) and the report embeds spectrogram PNGs (requires `matplotlib` in the venv).
-
-Persistent Python rotations use `StartCollection_t`, `StartCollectionSlice_t`, and `FinishCollection_t`. `StartCollection_t::antenna_id` selects the bearing-fit pattern table (`ANTENNA_ID_RA2A`, `ANTENNA_ID_RA23K`; see `controller/AntennaPattern.cpp`). On `FINISH_COLLECTION`, if the winning lock candidate was sighted by the fold search on only one heading, the controller answers with `COLLECTION_STATUS_REVISIT_REQUESTED` carrying `revisit_heading_deg` instead of a bearing; the GCS flies that heading as one more slice and finishes again (at most one revisit per collection). `BearingResult_t::confirmed` is 1 when the winner was sighted on at least two headings. The tunnel heartbeat advertises `TUNNEL_PROTOCOL_VERSION`, and TagTracker requires an exact version match before sending commands. The controller, TagTracker, and `TagTrackerTunnelProtocol` must therefore be updated in lockstep.
-
-**Dependencies:** libboost (system, filesystem)
-
-### Decimator (airspyhf_decimator)
-
-Consumes complex IQ samples from the `airspyhf_zeromq_rx` ZeroMQ publisher, performs three-stage FIR decimation (8×5×5 = 200× total), frequency-shifts to dodge the HF DC spur, and emits reduced-rate UDP packets for `uavrt_detection`.
-
-**Dependencies:** libzmq
-
-See [decimator usage details](#decimator-usage) below.
-
-### Airspy HF+ ZeroMQ publisher (airspyhf_zeromq_rx)
-
-Streams Airspy HF+ SDR IQ data over ZeroMQ PUB. Each message contains a fixed 40-byte header followed by interleaved float32 IQ payload.
-
-**Dependencies:** system `libairspyhf`, libusb-1.0, libzmq
-
-## Decimator usage
-
-```
-./build/airspyhf_decimator [options]
-```
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--input-rate <Hz>` | `0` | Expected incoming sample rate; `0` auto-learns from first packet |
-| `--strict-input-rate` | off | Exit on sample-rate mismatch beyond `--rate-tol-ppm` |
-| `--shift-khz <kHz>` | `10` | Frequency shift before decimation |
-| `--frame <samples>` | `1024` | Total complex samples per UDP packet (timestamp + payload). Frames are this size except immediately before an upstream hole, when the pending samples are flushed as a shorter frame so the next timestamp can jump past the hole. Consumers must size the payload from the datagram length. |
-| `--zmq-endpoint <uri>` | `tcp://127.0.0.1:5555` | ZeroMQ SUB endpoint |
-| `--rate-tol-ppm <ppm>` | `5000` | Allowed sample-rate error before warning |
-| `--ip <addr>` | `127.0.0.1` | Destination IPv4 address |
-| `--ports <p0,p1>` | `10000,10001` | Comma-separated UDP destination ports |
-
-## ZeroMQ packet format
-
-Each PUB message is a fixed header + IQ payload:
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `magic` | `uint32` | `0x5a514941` |
-| `version` | `uint16` | `1` |
-| `header_size` | `uint16` | `40` |
-| `sequence` | `uint64` | Increments per packet; skips ahead by one per packet's worth of samples the SDR driver dropped, so a gap always means lost IQ |
-| `timestamp_us` | `uint64` | Monotonic clock microseconds |
-| `sample_rate` | `uint32` | Sample rate in Hz |
-| `sample_count` | `uint32` | Number of complex samples |
-| `payload_bytes` | `uint32` | Byte count of IQ payload |
-| `flags` | `uint32` | `0x1` = final chunk |
-
-Wire header is packed little-endian, 40 bytes, no padding.
-
-## Linux / Raspberry Pi setup
-
-```bash
-cd ~/Downloads
-wget https://raw.githubusercontent.com/DonLakeFlyer/MavlinkTagController2/main/setup/install.sh
-bash install.sh
-```
-
-`install.sh` is a small, stable script that installs git, clones or updates
-`~/repos/MavlinkTagController2`, and then runs `setup/full_setup.sh` from the freshly
-pulled checkout. Re-running it therefore always executes the current setup steps, never a
-stale download.
-
-To update an existing install, run `bash ~/repos/MavlinkTagController2/setup/install.sh`.
-
-On a Raspberry Pi `full_setup.sh` also sets the timezone to UTC, enables the hardware serial port (no login shell), enables VNC with desktop autologin, and installs the `@reboot` crontab entry below. Reboot after it finishes.
-
-### Timezone and serial port (manual equivalent)
-
-Set rPi timezone to UTC:
-* `sudo raspi-config` → Localization → Timezone → None of the above → UTC
-
-Enable serial port:
-* `sudo raspi-config` → Interface Options → Serial Port → No login shell → Yes hardware enabled
-
-### Pixhawk serial setup
-
-* `MAV_1_CONFIG`: TELEM2
-* `MAV_1_MODE`: Onboard
-* `MAV_1_FORWARD`: On
-* `SER_TEL2_BAUD`: 921600 8N1
-* Reboot Pixhawk
-
-### Auto-start at boot (manual equivalent)
-
-```bash
-crontab -e
-# Add: @reboot /bin/bash /home/pi/repos/MavlinkTagController2/setup/crontab-start-controller.sh >> /home/pi/MavlinkTagController-boot.log 2>&1
-```
-
-### Remote desktop (VNC)
-
-Flash Raspberry Pi OS **with desktop** (Bookworm or later) and run the setup script from the booted Pi. It enables the built-in `wayvnc` server, sets boot-to-desktop with autologin (so a session exists with no monitor attached), and configures a 1920x1080 headless resolution. Connect from a Mac with the TigerVNC viewer to `raspberrypi.local:5900`; log in with the Pi user's Linux credentials and accept the self-signed certificate on first connect.
-
-Manual equivalent: `sudo raspi-config` → Interface Options → VNC → Yes; System Options → Boot → Desktop; System Options → Auto Login → Desktop; Display Options → VNC Resolution.
-
-### Check if running
-
-```bash
-ps -aux | grep Mav
-```
-
-## Testing with PX4 SITL
-
-1. Follow [PX4 getting started](https://docs.px4.io/main/en/dev_setup/getting_started.html) for SITL.
-2. Start the controller:
-   ```bash
-   ./build/controller/MavlinkTagController2
-   ```
-3. To test without SDR hardware, use simulator mode:
-   ```bash
-   ./build/controller/MavlinkTagController2 --simulator
-   ```
-   This spawns the IQ simulator, decimator, and detectors automatically when
-   detection is started via the MAVLink tunnel. See [simulator/README.md](simulator/README.md).
-
-## Migration from multi-repo
-
-This repo consolidates what were previously three separate repositories:
-
-| Component | Former repo | Now located at |
-| --- | --- | --- |
-| Controller | `MavlinkTagController2` | `controller/` |
-| Decimator | `AirspyHFDecimate` | `decimator/` |
-| ZeroMQ publisher | `airspyhf-zeromq` | `airspyhf_zeromq/` |
-| Wire format | `TagTrackerWireFormat` (submodule) | `shared/tagtracker_wireformat/` |
-| MAVLink headers | `c_library_v2` (submodule) | CPM package (auto-downloaded at configure time) |
-| Tunnel protocol | `TagTrackerTunnelProtocol` (submodule) | CPM package (auto-downloaded at configure time) |
-
-MAVLink headers and `TagTrackerTunnelProtocol` are both fetched automatically via CPM at configure time — no submodules, no manual download. Each is pinned to a commit by `GIT_TAG` in the top-level `CMakeLists.txt`; the tunnel protocol pin must match the one in TagTracker's `custom/CMakeLists.txt`.
+`airspyhf_zeromq/` carries the upstream BSD and GPL-2.0 licences
+(`LICENSE.BSD`, `LICENSE.GPL-2.0`). The rest of the repository has no licence
+file yet.

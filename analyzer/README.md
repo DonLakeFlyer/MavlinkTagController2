@@ -6,7 +6,8 @@ Tools in this folder:
 |------|-------|---------|
 | `signal_analyzer.py` (`run_analyzer.sh`) | live SDR | Characterize an unknown collar: pulse width, PRI, frequency offset |
 | `ipi_analyzer.py` (`run_ipi_analyzer.sh`) | live SDR | Observe rate-switch behaviour: log every inter-pulse gap and classify it as resting / moving / anomalous |
-| `flight_checks.py` | recorded logs | Run the FLIGHT_DATA_ANALYSIS.md checks against flight logs |
+| `flight_checks.py` | recorded logs | Run the [2026-04_FLIGHT_DATA_ANALYSIS.md](../docs/analysis/2026-04_FLIGHT_DATA_ANALYSIS.md) checks against flight logs (reads **both** the current and the legacy Apr-2026 log layouts) |
+| `post_flight_analysis.py` | one session directory | Markdown report per session: decimator/USB continuity, per-detector and per-heading detections, lock candidates, bearing fit, spectrograms. Run automatically by the controller at session stop |
 | `iq_replay.py` | raw IQ capture | Offline detector replay + fixed-offset amplitude (Check 6) |
 | `capture_noise.sh` | live SDR | Capture baseline noise with `airspyhf_rx` (+10 kHz DC-spike offset, writes `.json` sidecar) and run `psd_spectrum.py` |
 | `psd_spectrum.py` | raw IQ capture or detector `_iq.npy` dump | Noise-floor PSD: Welch spectrum, flatness, spikiness, DC-spike height |
@@ -139,7 +140,7 @@ On exit it prints counts and min/max/mean per class.
 # Offline Flight-Data Tools
 
 Both tools are offline: they need no SDR or running pipeline. They implement
-the checks defined in `FLIGHT_DATA_ANALYSIS.md` (results from the April 2026
+the checks defined in [2026-04_FLIGHT_DATA_ANALYSIS.md](../docs/analysis/2026-04_FLIGHT_DATA_ANALYSIS.md) (results from the April 2026
 PDC testing data are recorded in that document).
 
 ## flight_checks.py
@@ -165,13 +166,50 @@ python3 analyzer/flight_checks.py "/path/to/PDC Testing"
 Plain-Python (no venv needed). Controller logs contain ANSI colour codes;
 the parser strips them.
 
+## post_flight_analysis.py
+
+Writes `analysis.md` for one session directory (`~/Logs/Logs-Detectors-*` or
+`Logs-Rotation-*`). The controller runs it in the background when a session
+stops; run it by hand to regenerate or to analyse a copied directory:
+
+```bash
+.venv/bin/python analyzer/post_flight_analysis.py ~/Logs/Logs-Rotation-2026-09-10_14-02-11
+```
+
+Inputs it reads from the directory:
+
+| File | Section of the report |
+|------|-----------------------|
+| `airspyhf_decimator.log` (root, or per `heading-NNN/` for older sessions) | ZMQ/UDP continuity: `dropped`, `malformed`, `out_of_order`, `queue_drops`, rate |
+| `airspyhf_zeromq_rx.log` | USB-level sample loss |
+| `detector*.jsonl` (root, or `heading-NNN/`, `heading-NNN-sSS/`) | Per-detector cycles, detections, no-detections, lock candidates, per-slice measurements (retro-measured records are re-filed to the heading they were measured at), timing, `SESSION_END` |
+| `bearing_result.log`, `bearing_candidates.log` | Bearing fit and candidate table |
+| `tag*_cycle_*_power.npy` (+ `_meta.json`) | Spectrogram PNGs (needs `matplotlib`) |
+
+It requires the structured `.jsonl` logs and `heading-NNN` (hyphen) layout
+introduced in 2026-09. Sessions recorded before that (`heading_NNN`,
+`py_detector_*.log`, `detector_*.config`) produce an empty report — use
+`flight_checks.py` for those.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest analyzer/tests -v
+```
+
+One test module per script (`test_flight_checks.py`,
+`test_post_flight_analysis.py`, `test_iq_replay.py`, `test_psd_spectrum.py`,
+`test_signal_analyzer.py`, `test_ipi_analyzer.py`). The DSP ports in
+`iq_replay.py` / `signal_analyzer.py` are equivalence-tested against literal
+ports of the C++ decimator loops. See [TESTING.md](../TESTING.md).
+
 ## iq_replay.py
 
 Check 6: replays a raw airspy-hf capture (`complex_float32` at 768 kHz)
 through the detector's own processing offline — mixes the tag band to
 baseband, decimates 200× to 3840 Hz, runs the STFT + K-fold max-search
 (the "current metric"), then applies the fixed-offset
-`amplitude_at_known_pulse` estimator from `DETECTOR_AMPLITUDE_ANALYSIS.md`
+`amplitude_at_known_pulse` estimator from [2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](../docs/analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md)
 at the locked (bin, phase).
 
 ```bash

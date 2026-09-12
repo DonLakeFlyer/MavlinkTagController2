@@ -1,5 +1,10 @@
 # CW Interference Rejection via On/Off Contrast Test
 
+**Status: open.** Not implemented; this is Change 2 of
+[CONFIDENCE_IMPROVEMENTS.md](CONFIDENCE_IMPROVEMENTS.md). Note the
+"stateless" framing below predates the persistent, lock-banking detector; the
+per-cycle argument still holds for acquisition reports.
+
 ## Problem
 
 Narrowband CW interference (repeaters, LO spurs, intermodulation products) is the #1 false alarm source for the stateless pulse detector. A continuous tone puts constant power in a frequency bin across all STFT windows. When the K-fold operation sums 5 evenly-spaced windows, it gets `K × signal_power` — indistinguishable from 5 real pulses. Because the detector is stateless (no cross-cycle confirmation), every cycle independently reports the CW signal as a detection.
