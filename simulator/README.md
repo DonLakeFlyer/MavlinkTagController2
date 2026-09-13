@@ -55,26 +55,24 @@ When the controller runs `--simulator <level>` **and a tag is configured**, the
 tag's own frequency, `tp`, `tip` (and secondary rate) come from the GCS and the
 level only sets its SNR. SNR is specified at the 768 kHz simulator output; the
 200× decimator adds ~23 dB of processing gain before the detector. The level
-SNRs are set in `controller/main.cpp` and were chosen around the detector's
-`--lock-score-ratio` of 3.0 at K=20; the per-dwell permutation-null threshold
-(see [DETECTOR_PIPELINE.md](../docs/design/DETECTOR_PIPELINE.md)) moves the
-exact `score_ratio` each level produces, so treat the behaviours below as the
-intent to verify, not a guarantee.
+SNRs are set in `controller/main.cpp`.
 
 The simulated transmitter sits at bearing 135° by default for every level
-(`--sim-tx-bearing-deg` overrides). With TagTracker's clockwise sweep from 0°
-that is the fourth heading, so the first three headings are always measured
-retrospectively once a lock exists.
+(`--sim-tx-bearing-deg` overrides).
 
-| Level | Simulator SNR | ≈ Detector SNR | Interferer | Expected outcome |
+| Level | Simulator SNR | ≈ Detector SNR | Interferer | Exercises |
 |---|---|---|---|---|
-| `strong` (default) | 20 dB | 43 dB | — | Locks on the first heading that sees the tag (0° is 45° off-axis, still tens of dB up); sighted on every heading → **confirmed**, sector 3, bearing ≈ 135°. Bench level: the tag is 50–70 dB over noise, so its spectral sidelobe images are admitted as extra candidates (issue #148) |
-| `moderate` | −8 dB | 15 dB | — | Long-range realistic level: sighted on every heading (deepest pattern null still ≈ 20 dB over noise) → **confirmed**, bearing ≈ 135°, with a single candidate and no sidelobe images |
-| `marginal` | −27 dB | −4 dB | — | Sighted on one heading only (135°, `score_ratio` ≈ 5 against the lock ratio 3; ±45° ≈ 2, below it); `FINISH_COLLECTION` gets `COLLECTION_STATUS_REVISIT_REQUESTED`, the GCS flies that heading again, then **confirmed** if the revisit sights it, otherwise **unconfirmed**. (−21 dB gave three sightings and a confirm without a revisit) |
-| `below-marginal` | −33 dB | −10 dB | — | Never locks (best `score_ratio` ≈ 1.6 at 135°, under the lock ratio 3) but the tag's bin clears the `pf` threshold on the two or three headings nearest 135°. No bearing is fitted from such hits; because they agree in frequency the result is **heard, no bearing** (`bearing_deg` NaN, `n_valid_slices` > 0) |
-| `silent` | no tag | — | — | Runs the `noise-only` preset whatever tags are configured. Expect no lock, `mu` ≈ 68 on every heading (`refined: true` on some — the strongest noise bin passing the train gate — without moving `threshold`), at most a few scattered `pf` hits (≈ 0.4 per rotation), and **nothing heard** (`bearing_deg` NaN, `n_valid_slices` 0). Two noise hits in one bin would wrongly read as *heard*; that is ~1e-3 per rotation |
-| `competing` | −18 dB | 5 dB | flat −18 dB tone at tag +1 kHz (`kSimulatorInterfererOffsetHz`, heading-independent) | Interferer takes the provisional lock (candidate 0) on the first heading; the tag is admitted as an alternate near 135°; every buffered heading is measured at both; the finish-time fit must select the tag (pattern-shaped) over the interferer (flat) |
-| `power-line` | −8 dB | 15 dB | directional Gaussian noise source, 15 dB over the base floor at boresight, bearing 270°, seen through the antenna pattern | Exercises the heading-dependent noise handling. The source adds to the base noise, so the combined floor is ≈ 15 dB up at 270°, ≈ 11–12 dB up at 225°/315° (45° off the source is −3.75 dB on the RA-2A table), ≈ 6 dB up at 90° (back lobe) and near the base floor where the pattern nulls it (`cycle_threshold.mu` and `threshold` stay ≈ 68–75 throughout, the noise PSD column in `analysis.md` shows the swing) with no false detections; the bearing fit down-weights the noisy headings (`bearing_candidates.log` weights ≪ 1 at 225–315°) and the result stays **confirmed** at ≈ 135°. Add `--sim-noise-source-impulsive` for a heavy-tailed (Student-t) source to exercise `--detector-impulse-blank-factor` |
+| `strong` (default) | 20 dB | 43 dB | — | Bench-level tag: lock on first heading, sighted everywhere → **confirmed** |
+| `moderate` | −8 dB | 15 dB | — | Long-range realistic tag: sighted on every heading → **confirmed**, single candidate |
+| `marginal` | −27 dB | −4 dB | — | Single-heading sighting → revisit requested → **confirmed** or **unconfirmed** |
+| `below-marginal` | −33 dB | −10 dB | — | Never locks; frequency-agreeing acquisition hits → **heard, no bearing** |
+| `silent` | no tag | — | — | `noise-only` preset regardless of configured tags → **nothing heard** |
+| `competing` | −18 dB | 5 dB | flat −18 dB tone at tag +1 kHz (`kSimulatorInterfererOffsetHz`) | Interferer takes the provisional lock; finish-time fit must select the pattern-shaped tag |
+| `power-line` | −8 dB | 15 dB | directional Gaussian noise source, +15 dB at boresight, bearing 270° | Heading-dependent noise floor and fit down-weighting; add `--sim-noise-source-impulsive` for a heavy-tailed source |
+
+What each level is expected to produce at the current detector thresholds, and
+why, is in
+[COLLECTION_FLOW.md — Simulator levels](../docs/design/COLLECTION_FLOW.md#simulator-levels).
 
 Any other word after `--simulator` is treated as a preset name. `strong` is
 both a level (20 dB) and a preset (25 dB); which applies depends on whether a

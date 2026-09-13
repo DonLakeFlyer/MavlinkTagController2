@@ -133,8 +133,14 @@ std::vector<BearingCalculator::Result> BearingCalculator::solveCandidates() cons
     return results;
 }
 
-bool BearingCalculator::_isBetterCandidate(const Result& candidate, const Result& incumbent)
+bool BearingCalculator::_isBetterCandidate(const Result& candidate, const Result& incumbent) const
 {
+    // Never let the near-equal tie-break trade a valid bearing for a rejection.
+    const bool candidateClears = candidate.r_squared >= _confidenceFloor;
+    const bool incumbentClears = incumbent.r_squared >= _confidenceFloor;
+    if (candidateClears != incumbentClears) {
+        return candidateClears;
+    }
     const float delta = candidate.r_squared - incumbent.r_squared;
     if (std::fabs(delta) > kCandidateConfidenceTolerance) {
         return delta > 0.0f;
