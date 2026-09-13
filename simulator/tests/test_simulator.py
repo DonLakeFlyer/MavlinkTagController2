@@ -17,7 +17,10 @@ from iq_simulator import (
     TTWF_ZMQ_IQ_HEADER_SIZE,
     TTWF_ZMQ_IQ_MAGIC,
     TTWF_ZMQ_IQ_VERSION,
+    SimConfig,
     TagSignal,
+    directional_noise,
+    directional_noise_db,
     encode_header,
     snr_at_distance,
 )
@@ -232,3 +235,42 @@ class TestSnrAtDistance:
 
     def test_negative_distance_returns_ref(self):
         assert snr_at_distance(20.0, -5.0, 100.0) == 20.0
+
+
+# ---------------------------------------------------------------------------
+# Directional noise source (power line)
+# ---------------------------------------------------------------------------
+
+class TestDirectionalNoise:
+
+    def _cfg(self, **kw):
+        return SimConfig(noise_source_db=15.0, noise_source_bearing_deg=270.0, **kw)
+
+    def test_disabled_adds_nothing(self):
+        assert directional_noise_db(SimConfig(), 270.0) == 0.0
+
+    def test_full_strength_at_boresight(self):
+        assert directional_noise_db(self._cfg(), 270.0) == pytest.approx(15.0)
+
+    def test_follows_antenna_pattern_off_boresight(self):
+        # RA-2A: -27.5 dB relative at 90 deg off, -10 dB at 180.
+        cfg = self._cfg()
+        assert directional_noise_db(cfg, 0.0) == pytest.approx(15.0 - 27.5, abs=0.01)
+        assert directional_noise_db(cfg, 90.0) == pytest.approx(15.0 - 10.0, abs=0.01)
+        assert directional_noise_db(cfg, 180.0) == pytest.approx(15.0 - 27.5, abs=0.01)
+
+    def test_no_pose_is_worst_case(self):
+        assert directional_noise_db(self._cfg(), None) == pytest.approx(15.0)
+
+    def test_power_matches_requested_db(self):
+        rng = np.random.default_rng(0)
+        base_sigma = 0.01
+        n = 200_000
+        gauss = directional_noise(self._cfg(), n, rng, 270.0, base_sigma)
+        heavy = directional_noise(self._cfg(noise_source_impulsive=True), n, rng, 270.0, base_sigma)
+        expected = base_sigma ** 2 * 10 ** 1.5
+        assert np.mean(np.abs(gauss) ** 2) == pytest.approx(expected, rel=0.03)
+        assert np.mean(np.abs(heavy) ** 2) == pytest.approx(expected, rel=0.15)
+        # Heavy tails: far more samples beyond 4 sigma than a Gaussian's ~6e-5.
+        sigma = math.sqrt(expected)
+        assert np.mean(np.abs(heavy) > 4 * sigma) > 10 * np.mean(np.abs(gauss) > 4 * sigma)

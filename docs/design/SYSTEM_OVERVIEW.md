@@ -47,8 +47,8 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
    10 kHz, `airspyhf_decimator`, and one `pulse_detector.py` per tag with
    the tag's parameters. Detectors warm up (5 s), send `READY`, and free-run:
    one report per cycle, forwarded to the GCS (HIGH at Info, LOW/no-detection
-   at Debug). The EVT threshold is loaded or generated on the first cycle, so
-   that cycle is slower.
+   at Debug). The detection threshold is derived from each cycle's own
+   spectrogram, so there is no warm-up cycle and nothing cached on disk.
 4. **START_COLLECTION** (a rotation) → `~/Logs/Logs-Rotation-<UTC>/`. For each
    heading the GCS sends `START_COLLECTION_SLICE`; the controller `ARM`s every
    detector, which reopens its `.jsonl` in `heading-NNN/`, runs one K-fold
@@ -85,7 +85,6 @@ Detector bins are ~33 Hz wide. The simulator has no spur, hence
 | Spectrogram dumps | `heading-NNN/tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json}` when the GCS sets `dump_spectrogram` (~0.9 MB/cycle/tag at K=5, ~3.7 MB at K=20; scales with K) | detector |
 | Bearing CSVs | `<rotation>/bearing_result.log`, `bearing_candidates.log` | controller |
 | Post-flight report | `<session>/analysis.md` | `analyzer/post_flight_analysis.py` |
-| EVT threshold cache | `~/*.pythreshold` (`--threshold-cache-dir` = home) | detector |
 
 The GCS can fetch any of these over MAVLink FTP (`MavlinkFtpServer`).
 

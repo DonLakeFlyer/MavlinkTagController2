@@ -140,6 +140,18 @@ class SimConfig:
     # Collar crystal offset, applied to every TIP by run(). Bench-measured
     # RA-2A collar: +43 ppm; 0 = ideal crystal.
     pri_ppm: float = 43.0
+    # Directional noise source (a power line): an independent noise
+    # component added to the base floor, with power that follows the
+    # receive antenna pattern toward its bearing. noise_source_db is the
+    # source's power relative to the base floor at boresight; 0 = none.
+    # Powers add, so the combined floor rises by
+    # 10*log10(1 + 10^(N/10)): about N dB for N >= 10, and stays within
+    # a fraction of a dB of the base floor when the pattern points away.
+    # With noise_source_impulsive the source is Student-t (3 dof) at the
+    # same power: heavy-tailed, as corona / gap discharge is.
+    noise_source_bearing_deg: float = 270.0
+    noise_source_db: float = 0.0
+    noise_source_impulsive: bool = False
 
 
 @dataclass
@@ -416,6 +428,38 @@ def encode_header(
 # ---------------------------------------------------------------------------
 # Signal generation
 # ---------------------------------------------------------------------------
+def directional_noise_db(cfg: SimConfig, vehicle_yaw_deg: float | None) -> float:
+    """Power of the directional source at this heading, dB relative to the base floor.
+
+    This is the source component alone, not the combined floor (see
+    SimConfig.noise_source_db). The source is a ground fixture, so it is
+    seen through the same receive pattern as the tag. Without a pose the
+    source is heard at boresight (worst case) so an unarmed detector still
+    sees it.
+    """
+    if cfg.noise_source_db <= 0.0:
+        return 0.0
+    if vehicle_yaw_deg is None:
+        return cfg.noise_source_db
+    off = _normalize_angle_deg(cfg.noise_source_bearing_deg - vehicle_yaw_deg)
+    return cfg.noise_source_db + _antenna_attenuation_db(off, cfg.antenna)
+
+
+def directional_noise(cfg: SimConfig, n: int, rng: np.random.Generator,
+                      vehicle_yaw_deg: float | None, noise_sigma: float) -> np.ndarray:
+    """Complex noise from the directional source, at its heading-dependent power."""
+    if cfg.noise_source_db <= 0.0:
+        return np.zeros(n, dtype=np.complex128)
+    extra_db = directional_noise_db(cfg, vehicle_yaw_deg)
+    sigma = noise_sigma * 10.0 ** (extra_db / 20.0)
+    if cfg.noise_source_impulsive:
+        # Student-t with 3 dof has variance dof/(dof-2) = 3; scale to unit power.
+        dof = 3.0
+        draw = rng.standard_t(dof, n) + 1j * rng.standard_t(dof, n)
+        return sigma * draw / math.sqrt(2.0 * dof / (dof - 2.0))
+    return sigma * (rng.standard_normal(n) + 1j * rng.standard_normal(n)) / math.sqrt(2.0)
+
+
 def generate_packet(
     cfg: SimConfig,
     sample_offset: int,
@@ -438,6 +482,14 @@ def generate_packet(
     noise = noise_sigma * (
         rng.standard_normal(n) + 1j * rng.standard_normal(n)
     ) / math.sqrt(2.0)
+
+    if cfg.noise_source_db > 0.0:
+        vehicle_yaw_deg = None
+        if telem_state is not None:
+            with telem_state.lock:
+                if telem_state.has_pose:
+                    vehicle_yaw_deg = telem_state.vehicle_yaw_deg
+        noise += directional_noise(cfg, n, rng, vehicle_yaw_deg, noise_sigma)
 
     # Accumulate tag signals
     signal = np.zeros(n, dtype=np.complex128)
@@ -517,6 +569,11 @@ def run(cfg: SimConfig) -> None:
     apply_pri_offset(cfg.tags, cfg.pri_ppm)
     if cfg.pri_ppm != 0.0:
         print(f"iq_simulator: PRI offset {cfg.pri_ppm:+.0f} ppm applied to {len(cfg.tags)} tag(s)",
+              file=sys.stderr)
+    if cfg.noise_source_db > 0.0:
+        print(f"iq_simulator: directional noise source +{cfg.noise_source_db:.1f} dB at bearing "
+              f"{cfg.noise_source_bearing_deg:.0f} deg "
+              f"({'impulsive' if cfg.noise_source_impulsive else 'gaussian'}, {cfg.antenna} pattern)",
               file=sys.stderr)
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -756,6 +813,16 @@ Examples:
     p.add_argument("--pri-ppm", type=float, default=SimConfig.pri_ppm,
                     help="Collar crystal offset in ppm; scales every tag's TIP by (1 + ppm*1e-6). "
                          f"Default is a bench-measured RA-2A collar ({SimConfig.pri_ppm:+.0f}); 0 = ideal crystal.")
+    p.add_argument("--noise-source-db", type=float, default=0.0,
+                    help="Directional noise source (power line): source power in dB relative to "
+                         "--noise-power-dbfs at boresight, added to the base noise and seen "
+                         "through the --antenna pattern toward --noise-source-bearing-deg. "
+                         "Combined floor rises by 10*log10(1+10^(N/10)), ~N dB for N >= 10 "
+                         "(default: 0 = none)")
+    p.add_argument("--noise-source-bearing-deg", type=float, default=SimConfig.noise_source_bearing_deg,
+                    help=f"True bearing of the noise source (default: {SimConfig.noise_source_bearing_deg:.0f})")
+    p.add_argument("--noise-source-impulsive", action="store_true",
+                    help="Make the noise source heavy-tailed (Student-t, 3 dof) instead of Gaussian")
 
 
     args = p.parse_args()
@@ -766,25 +833,16 @@ Examples:
         p.error(f"--pri-ppm must be finite, got {args.pri_ppm}")
     if 1.0 + args.pri_ppm * 1e-6 <= 0.0:
         p.error(f"--pri-ppm must be > -1000000 to keep TIP positive, got {args.pri_ppm}")
+    if args.noise_source_db < 0.0 or not math.isfinite(args.noise_source_db):
+        p.error(f"--noise-source-db must be >= 0, got {args.noise_source_db}")
+    if not math.isfinite(args.noise_source_bearing_deg):
+        p.error(f"--noise-source-bearing-deg must be finite, got {args.noise_source_bearing_deg}")
 
     # Start from preset or defaults
     if args.preset:
-        cfg = PRESETS[args.preset]
-        # Deep-copy tags so preset isn't mutated
-        cfg = SimConfig(
-            sample_rate=cfg.sample_rate,
-            zmq_host=cfg.zmq_host,
-            zmq_port=cfg.zmq_port,
-            samples_per_packet=cfg.samples_per_packet,
-            noise_power_dbfs=cfg.noise_power_dbfs,
-            tags=[TagSignal(**t.__dict__) for t in cfg.tags],
-            duration=cfg.duration,
-            realtime=cfg.realtime,
-            drop_probability=cfg.drop_probability,
-            gap_seconds=cfg.gap_seconds,
-            gap_interval=cfg.gap_interval,
-            seed=cfg.seed,
-        )
+        # Copy every field; deep-copy tags so the preset isn't mutated.
+        preset = PRESETS[args.preset]
+        cfg = replace(preset, tags=[replace(t) for t in preset.tags])
     else:
         cfg = SimConfig()
 
@@ -813,6 +871,9 @@ Examples:
     cfg.tx_offset_east_m = args.tx_offset_east_m
     cfg.antenna = args.antenna
     cfg.pri_ppm = args.pri_ppm
+    cfg.noise_source_db = args.noise_source_db
+    cfg.noise_source_bearing_deg = args.noise_source_bearing_deg
+    cfg.noise_source_impulsive = args.noise_source_impulsive
 
     # Build tags from CLI if --freq-offset-hz was given
     if args.freq_offset_hz is not None:

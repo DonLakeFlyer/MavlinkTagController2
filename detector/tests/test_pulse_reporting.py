@@ -4,7 +4,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pulse_detector import send_pulse_udp  # noqa: E402
+from pulse_detector import send_pulse_udp, report_frequency_hz  # noqa: E402
+
+
+def test_report_frequency_is_measured_offset_from_channel_center():
+    # The controller clusters these to tell "heard" from scattered noise
+    # hits, so the reported value must move with the detected bin.
+    assert report_frequency_hz(146.0, 146_170_000, 650.0) == 146_000_650
+    assert report_frequency_hz(146.0, 146_170_000, -1200.4) == 145_998_800
+    # No channel centre: fall back to the configured tag frequency.
+    assert report_frequency_hz(0.0, 146_170_000, 650.0) == 146_170_000
+    assert report_frequency_hz(0.0, 0, 650.4) == 650
 
 
 class FakeSocket:
