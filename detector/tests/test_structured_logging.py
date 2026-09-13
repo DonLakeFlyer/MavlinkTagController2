@@ -189,12 +189,13 @@ class TestJsonlSchema:
     def test_no_detection_fields(self, tmp_path):
         log, path = self._make_log(tmp_path)
         log.emit(NO_DETECTION, 'nodet',
-                 cycle=1, proc_ms=50.0, had_gap=False,
+                 cycle=1, proc_ms=50.0, had_gap=False, noise_psd=2e-5,
                  best_candidate={'freq_hz': 10.0, 'snr_db': 5.0,
                                  'score_ratio': 0.3, 'noise_psd': 1e-5})
         log.close()
 
         e = read_jsonl(path)[0]
+        assert e['noise_psd'] == 2e-5
         assert 'best_candidate' in e
         assert e['best_candidate']['freq_hz'] == 10.0
 

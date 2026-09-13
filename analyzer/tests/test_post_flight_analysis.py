@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from post_flight_analysis import (  # noqa: E402
     RATE_WARNING_TRANSIENT_MAX, correlate_holes_with_gaps, generate_report,
     parse_bearing_candidates_log, parse_bearing_log, parse_decimator_log,
-    parse_rx_log,
+    parse_detector_jsonl, parse_rx_log,
 )
 
 
@@ -481,11 +481,92 @@ class TestPersistentRotationSession:
         assert any('045° (revisit, slice 9)' in r and '| 1 | 1 | 12.0 |' in r for r in rows)
         assert '## Detector: Tag 3 @ heading 045° (revisit, slice 9)' in md
 
-    def test_nan_bearing_distinguishes_no_detections_from_floor(self, tmp_path):
+    def test_retro_records_route_by_slice_and_latest_report_wins(self, tmp_path):
+        # A PRI refit during the revisit re-reports every buffered slice into
+        # the revisit's file: the original 045 slice (slice 1) must go back to
+        # heading-045 even though the heading matches, and the revisit's own
+        # slice 9 re-reported later from heading-090 must come back to it.
+        # Among duplicates of one cycle the latest report wins, not the one
+        # in the lexicographically last file (heading-045-s09 sorts first).
+        startup = _detector_entries(3, 0, 0.0)[0]
+
+        def measured(cycle, heading, snr, slice_id, reported_in_cycle):
+            return {'type': 'detection', 'cycle': cycle, 'freq_hz': 0.0,
+                    'snr_db': snr, 'score_ratio': 0.0, 'noise_psd': 1e-6,
+                    'proc_ms': 50.0, 'confidence': 'LOCKED', 'hyp_label': '',
+                    'detection_status': 2, 'heading_deg': float(heading),
+                    'slice_id': slice_id, 'reported_in_cycle': reported_in_cycle}
+        (tmp_path / 'heading-045').mkdir()
+        _jsonl(tmp_path / 'heading-045' / 'detector_3.jsonl',
+               [startup, measured(1, 45, 30.0, 1, 1)])
+        (tmp_path / 'heading-090').mkdir()
+        _jsonl(tmp_path / 'heading-090' / 'detector_3.jsonl',
+               [startup, measured(2, 90, 20.0, 2, 2),
+                measured(9, 45, 14.0, 9, 10)])          # revisit slice, re-reported later
+        (tmp_path / 'heading-045-s09').mkdir()
+        _jsonl(tmp_path / 'heading-045-s09' / 'detector_3.jsonl', [
+            startup,
+            measured(9, 45, 12.0, 9, 9),
+            measured(1, 45, 31.0, 1, 9),                 # original slice, same heading
+            {'type': 'session_end', 'cycles': 3, 'detections': 3, 'elapsed_s': 30.0}])
+        (tmp_path / 'session.json').write_text('{"detection_mode": "python"}')
+        (tmp_path / 'bearing_result.log').write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,'
+            'latitude,longitude\n3,45.0,0.9,3,31.0,38.1,-122.2\n')
+        md = generate_report(str(tmp_path))
+        rows = [line for line in md.splitlines()
+                if line.startswith('| ') and '°' in line and '| 3 |' in line]
+        assert len(rows) == 3
+        assert any('| 045° |' in r and '| 1 | 1 | 31.0 |' in r for r in rows)
+        assert any('| 090° |' in r and '| 1 | 1 | 20.0 |' in r for r in rows)
+        assert any('045° (revisit, slice 9)' in r and '| 1 | 1 | 14.0 |' in r for r in rows)
+
+    def test_noise_vs_median_is_per_tag(self, tmp_path):
+        # Two tags on flat noise at different floors: each heading must read
+        # 0 dB against its own tag's median, not a swing against the pool.
+        for h in (0, 90):
+            hd = tmp_path / f'heading-{h:03d}'
+            hd.mkdir()
+            for tag, noise in ((3, 1e-6), (4, 1e-5)):
+                entries = _detector_entries(tag, 1, 12.0)
+                entries[1]['noise_psd'] = noise
+                _jsonl(hd / f'detector_{tag}.jsonl', entries)
+        (tmp_path / 'session.json').write_text('{"detection_mode": "python"}')
         (tmp_path / 'bearing_result.log').write_text(
             'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude\n'
-            '3,nan,0.000,0,-1000000000.0,0,0\n'   # detector never saw a pulse
-            '4,nan,0.050,1,9.0,0,0\n')            # one detection, fit below floor
+            '3,0.0,0.9,2,12.0,38.1,-122.2\n4,0.0,0.9,2,12.0,38.1,-122.2\n')
         md = generate_report(str(tmp_path))
-        assert '| 3 | none (no detections) |' in md
-        assert '| 4 | none (below confidence floor) |' in md
+        rows = [line for line in md.splitlines()
+                if line.startswith('| ') and '° |' in line]
+        assert len(rows) == 4
+        assert all('| +0.0 dB |' in r for r in rows), rows
+
+    def test_nan_bearing_distinguishes_no_detections_from_floor(self, tmp_path):
+        (tmp_path / 'bearing_result.log').write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed,heard\n'
+            '3,nan,0.000,0,-1000000000.0,0,0\n'   # detector never saw a pulse (old 7-column row)
+            '4,nan,0.050,1,9.0,0,0,1,0,1\n'       # one sighting, fit below floor
+            '5,nan,0,3,20.7,0,0,0,0,1\n')         # no lock; sub-lock hits agree in frequency
+        md = generate_report(str(tmp_path))
+        assert '| 3 | none (nothing heard) |' in md
+        assert '| 4 | none (heard, below confidence floor) |' in md
+        assert '| 5 | none (heard, no lock) |' in md
+
+    def test_no_detection_noise_is_the_cycle_median_not_best_bin(self, tmp_path):
+        # The detector reports the per-cycle median noise to the controller;
+        # the heading's Noise PSD must use that, not the strongest sub-threshold
+        # bin's noise (a spur there would fake a directional swing).
+        entries = _detector_entries(3, 0, 12.0)
+        entries.insert(1, {'type': 'no_detection', 'cycle': 1, 'proc_ms': 100.0,
+                           'noise_psd': 2e-6,
+                           'best_candidate': {'freq_hz': 10.0, 'snr_db': 1.0,
+                                              'score_ratio': 0.5, 'noise_psd': 9e-6}})
+        entries.insert(2, {'type': 'no_detection', 'cycle': 2, 'proc_ms': 100.0,
+                           'best_candidate': {'freq_hz': 10.0, 'snr_db': 1.0,
+                                              'score_ratio': 0.5, 'noise_psd': 9e-6}})
+        path = tmp_path / 'detector_3.jsonl'
+        _jsonl(path, entries)
+        det = parse_detector_jsonl(str(path))
+        noises = {c.cycle: c.noise_psd for c in det.cycles}
+        assert noises[1] == 2e-6
+        assert noises[2] == 9e-6   # pre-field logs: best-bin noise is all there is

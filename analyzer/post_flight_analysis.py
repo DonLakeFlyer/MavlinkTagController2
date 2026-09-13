@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 from log_schema import (read_jsonl, entries_by_type,
                         STARTUP, DETECTION, NO_DETECTION, FOLDS, TIMING,
                         NOISE_ELEVATED, GAP_EVENT,
-                        EVT_THRESHOLD, HYPOTHESIS, SESSION_END)
+                        EVT_THRESHOLD, CYCLE_THRESHOLD, HYPOTHESIS, SESSION_END)
 
 # Decimator rate warnings beyond this count are treated as a sustained mismatch
 # rather than a startup transient (measured-rate check runs ~1/s).
@@ -176,6 +176,8 @@ class DetectionCycle:
     # Heading the record belongs to when it carries one (retro-measured
     # slices are written to the file of the heading that produced the lock).
     heading: Optional[str] = None
+    slice_id: Optional[int] = None
+    reported_in_cycle: Optional[int] = None   # cycle that (re-)reported this measurement
 
 
 @dataclass
@@ -230,6 +232,8 @@ class DetectorSummary:
     gap_events: List[dict] = field(default_factory=list)
     hypothesis_summaries: List[dict] = field(default_factory=list)
     evt_info: List[dict] = field(default_factory=list)
+    # Per-cycle data-derived thresholds (CYCLE_THRESHOLD records)
+    cycle_thresholds: List[dict] = field(default_factory=list)
     heading: Optional[str] = None  # e.g. '000', '045' for rotation headings
     revisit_slice: Optional[int] = None  # heading-NNN-sSS: confirmation revisit of a flown heading
 
@@ -246,6 +250,8 @@ class BearingResult:
     # Trailing columns added with protocol v3; absent in older logs.
     n_sighted_slices: Optional[int] = None
     confirmed: Optional[bool] = None
+    # Added 2026-09: detections attributed to the tag, with or without a bearing.
+    heard: Optional[bool] = None
 
 
 @dataclass
@@ -499,15 +505,26 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
         heading_deg = e.get('heading_deg')
         if heading_deg is not None:
             c.heading = f'{float(heading_deg) % 360.0:03.0f}'
+        if e.get('slice_id') is not None:
+            c.slice_id = int(e['slice_id'])
+        if e.get('reported_in_cycle') is not None:
+            c.reported_in_cycle = int(e['reported_in_cycle'])
         det.cycles.append(c)
 
     # --- NO_DETECTION cycles ---
     for e in entries_by_type(entries, NO_DETECTION):
+        best = e.get('best_candidate') or {}
+        # Top-level noise_psd is the cycle median the controller was sent;
+        # older logs only have the best sub-threshold bin's noise.
+        noise_psd = e.get('noise_psd')
+        if noise_psd is None:
+            noise_psd = best.get('noise_psd')
         c = DetectionCycle(
             cycle=e.get('cycle', 0),
             timestamp_ns=e.get('timestamp_ns'),
             timestamp_str=_ts_str_from_ns(e.get('timestamp_ns')),
             detected=False,
+            noise_psd=float(noise_psd or 0.0),
             proc_ms=e.get('proc_ms', 0.0),
             had_gap=e.get('had_gap', False),
             best_candidate=e.get('best_candidate'),
@@ -536,6 +553,9 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
 
     # --- EVT_THRESHOLD ---
     det.evt_info = entries_by_type(entries, EVT_THRESHOLD)
+
+    # --- CYCLE_THRESHOLD ---
+    det.cycle_thresholds = entries_by_type(entries, CYCLE_THRESHOLD)
 
     # --- SESSION_END ---
     for e in entries_by_type(entries, SESSION_END):
@@ -566,33 +586,58 @@ def _heading_label(det: 'DetectorSummary') -> str:
 
 
 def _refile_retro_cycles(detectors: List['DetectorSummary']) -> None:
-    """Move records that name another heading to that heading's summary.
+    """Move records that name another slice to that slice's summary.
 
     A locked detector re-measures its buffered pre-lock slices and writes
     them to whichever heading file is open at the time; each such record
-    carries the heading it was measured at. A revisit shares its heading
-    with an earlier slice: records stay in the file that wrote them, and
-    records from elsewhere naming that heading go to the first (original)
-    slice.
+    carries the heading and slice it was measured at. A revisit shares its
+    heading with an earlier slice, so a record's slice_id decides between
+    them: the revisit summary when it matches its slice, else the original
+    (first) summary for that heading. Records without a slice_id fall back
+    to heading alone.
+
+    Every PRI refit that moves a pulse re-measures and re-reports all
+    buffered slices, so one cycle can arrive several times. One record is
+    kept per cycle: the detection reported latest (reported_in_cycle; file
+    order when absent), a no-detection only if there is no detection, as in
+    the controller.
     """
     by_key: Dict[Tuple[Optional[int], str], 'DetectorSummary'] = {}
+    by_slice: Dict[Tuple[Optional[int], int], 'DetectorSummary'] = {}
     for d in detectors:
-        if d.heading is not None:
+        if d.heading is None:
+            continue
+        if d.revisit_slice is not None:
+            by_slice[(d.tag_id, d.revisit_slice)] = d
+        else:
             by_key.setdefault((d.tag_id, d.heading), d)
     for det in detectors:
         if det.heading is None:
             continue
         keep = []
         for c in det.cycles:
-            target = (by_key.get((det.tag_id, c.heading))
-                      if c.heading and c.heading != det.heading else None)
+            target = None
+            if c.slice_id is not None and (det.tag_id, c.slice_id) in by_slice:
+                target = by_slice[(det.tag_id, c.slice_id)]
+            elif c.heading and (c.heading != det.heading or
+                                (c.slice_id is not None and det.revisit_slice is not None)):
+                target = by_key.get((det.tag_id, c.heading))
             if target is not None and target is not det:
                 target.cycles.append(c)
             else:
                 keep.append(c)
         det.cycles = keep
     for det in detectors:
-        det.cycles.sort(key=lambda c: c.cycle)
+        latest: Dict[int, DetectionCycle] = {}
+        for c in det.cycles:
+            prior = latest.get(c.cycle)
+            if prior is None or (c.detected and not prior.detected):
+                latest[c.cycle] = c
+            elif c.detected == prior.detected:
+                if (c.reported_in_cycle is None or prior.reported_in_cycle is None
+                        or c.reported_in_cycle >= prior.reported_in_cycle):
+                    latest[c.cycle] = c
+        det.cycles = sorted(latest.values(), key=lambda c: c.cycle)
 
 
 def parse_bearing_log(path: str) -> List[BearingResult]:
@@ -608,11 +653,11 @@ def parse_bearing_log(path: str) -> List[BearingResult]:
                 if not line.strip():
                     continue
                 parts = line.strip().split(',')
-                # 5 = original, 7 = + lat/lon, 9 = protocol v3; anything else is
-                # a truncated write.
-                if len(parts) not in (5, 7, 9):
+                # 5 = original, 7 = + lat/lon, 9 = protocol v3, 10 = + heard;
+                # anything else is a truncated write.
+                if len(parts) not in (5, 7, 9, 10):
                     print(f'Warning: skipping malformed row {line_no} in {path}: '
-                          f'{len(parts)} fields (expected 5, 7 or 9)', file=sys.stderr)
+                          f'{len(parts)} fields (expected 5, 7, 9 or 10)', file=sys.stderr)
                     continue
                 try:
                     br = BearingResult(
@@ -630,6 +675,10 @@ def parse_bearing_log(path: str) -> List[BearingResult]:
                         if parts[8] not in ('0', '1'):
                             raise ValueError(f'confirmed must be 0 or 1, got {parts[8]!r}')
                         br.confirmed = parts[8] == '1'
+                    if len(parts) >= 10:
+                        if parts[9] not in ('0', '1'):
+                            raise ValueError(f'heard must be 0 or 1, got {parts[9]!r}')
+                        br.heard = parts[9] == '1'
                 except ValueError as exc:
                     print(f'Warning: skipping malformed row {line_no} in {path}: {exc}',
                           file=sys.stderr)
@@ -992,9 +1041,24 @@ def generate_report(log_dir: str) -> str:
     if is_rotation and heading_dirs:
         w('## Rotation Overview')
         w()
+        # Noise is per heading (the antenna points at different sources), so
+        # each heading's floor is shown relative to its tag's rotation median;
+        # tags sit at different offsets and need not share a floor.
+        def _heading_noise(det):
+            vals = [c.noise_psd for c in det.cycles if c.noise_psd and c.noise_psd > 0]
+            return statistics.median(vals) if vals else None
+
+        heading_noise = {id(det): _heading_noise(det)
+                         for det in detectors if det.heading is not None}
+        tag_noise: Dict[Optional[int], List[float]] = {}
+        for det in detectors:
+            if det.heading is not None and heading_noise[id(det)]:
+                tag_noise.setdefault(det.tag_id, []).append(heading_noise[id(det)])
+        tag_median = {tag: statistics.median(vals) for tag, vals in tag_noise.items()}
+
         w('| Heading | Tag | Cycles | Detections | '
-          'SNR (dB) | Score Ratio | Gaps |')
-        w('|---|---|---|---|---|---|---|')
+          'SNR (dB) | Score Ratio | Noise PSD | vs median | Threshold | Gaps |')
+        w('|---|---|---|---|---|---|---|---|---|---|')
         for det in detectors:
             if det.heading is None:
                 continue
@@ -1008,11 +1072,31 @@ def generate_report(log_dir: str) -> str:
             else:
                 snr_str = '—'
                 ratio_str = '—'
+            noise = heading_noise.get(id(det))
+            median_noise = tag_median.get(det.tag_id)
+            if noise and median_noise:
+                noise_str = f'{noise:.2e}'
+                rel_str = f'{10.0 * math.log10(noise / median_noise):+.1f} dB'
+            else:
+                noise_str = '—'
+                rel_str = '—'
+            thr = [e.get('threshold') for e in det.cycle_thresholds
+                   if e.get('threshold') is not None]
+            thr_str = f'{statistics.median(thr):.1f}' if thr else '—'
             total_gaps = det.gap_zerofill + det.gap_reset
             gap_str = str(total_gaps) if total_gaps else '0'
             w(f'| {_heading_label(det)} | {det.tag_id} | {n_cyc} | {n_det} '
-              f'| {snr_str} | {ratio_str} | {gap_str} |')
+              f'| {snr_str} | {ratio_str} | {noise_str} | {rel_str} | {thr_str} | {gap_str} |')
         w()
+        for tag, vals in sorted(tag_noise.items(), key=lambda kv: (kv[0] is None, kv[0])):
+            if len(vals) < 2:
+                continue
+            spread_db = 10.0 * math.log10(max(vals) / min(vals))
+            w(f'Tag {tag} noise floor spread across headings: {spread_db:.1f} dB '
+              f'(median {tag_median[tag]:.2e}). The threshold column is the '
+              f'per-dwell permutation-null base threshold (score / noise units), '
+              f'so it stays near constant while the floor moves.')
+            w()
 
         # Bing Maps satellite embed from bearing result lat/lon
         for b in bearings:
@@ -1051,6 +1135,10 @@ def generate_report(log_dir: str) -> str:
                 w()
 
     # ========== Per-Detector Analysis ==========
+    # Written last: the operator-level sections (bearing, anomalies,
+    # observations) come first, per-heading detail is reference material.
+    detector_lines: List[str] = []
+    detector_start = len(lines)
     for det in detectors:
         if not det.cycles and det.total_cycles == 0:
             continue
@@ -1140,6 +1228,32 @@ def generate_report(log_dir: str) -> str:
                     w(f'- Detection margin={e.get("detection_margin", 0):.2f}'
                       f' applied: effective '
                       f'threshold={e.get("effective_threshold", 0):.4e}')
+            w()
+
+        # Per-cycle data-derived thresholds
+        if det.cycle_thresholds:
+            w('### Per-cycle threshold (permutation null)')
+            w()
+            thr = [e.get('threshold') for e in det.cycle_thresholds
+                   if isinstance(e.get('threshold'), (int, float))]
+            if thr:
+                w(f'- **Base threshold:** {_stat_line(thr, "", ".3g")}')
+            n_perm = [e.get('n_perm') for e in det.cycle_thresholds
+                      if isinstance(e.get('n_perm'), (int, float))]
+            if n_perm:
+                w(f'- **Permutations:** min {min(n_perm)}, max {max(n_perm)}')
+            null_ms = [e.get('null_ms') for e in det.cycle_thresholds
+                       if isinstance(e.get('null_ms'), (int, float))]
+            if null_ms:
+                w(f'- **Null time:** {_stat_line(null_ms, "ms", ".0f")}')
+            refined = sum(1 for e in det.cycle_thresholds if e.get('refined'))
+            w(f'- **Refined after a train cleared the first pass:** '
+              f'{refined}/{len(det.cycle_thresholds)} cycles')
+            blanked = [e.get('blanked_fraction') for e in det.cycle_thresholds
+                       if isinstance(e.get('blanked_fraction'), (int, float))]
+            if blanked and max(blanked) > 0:
+                w(f'- **Impulse-blanked IQ:** mean {100 * sum(blanked) / len(blanked):.2f} %, '
+                  f'max {100 * max(blanked):.2f} %')
             w()
 
         # Timing stats
@@ -1266,6 +1380,8 @@ def generate_report(log_dir: str) -> str:
             if len(det.gap_events) > 20:
                 w(f'- ... and {len(det.gap_events) - 20} more')
             w()
+    detector_lines = lines[detector_start:]
+    del lines[detector_start:]
 
     # ========== Bearing / Rotation ==========
     if bearings:
@@ -1283,9 +1399,11 @@ def generate_report(log_dir: str) -> str:
                 if b.confirmed is False:
                     bearing_str += ' (unconfirmed)'
             elif b.n_valid_slices == 0:
-                bearing_str = 'none (no detections)'
+                bearing_str = 'none (nothing heard)'
+            elif b.n_sighted_slices == 0:
+                bearing_str = 'none (heard, no lock)'
             else:
-                bearing_str = 'none (below confidence floor)'
+                bearing_str = 'none (heard, below confidence floor)'
             sighted_str = ('n/a' if b.n_sighted_slices is None
                            else str(b.n_sighted_slices))
             w(f'| {b.tag_id} | {bearing_str} | '
@@ -1451,6 +1569,8 @@ def generate_report(log_dir: str) -> str:
         for i, obs in enumerate(observations, 1):
             w(f'{i}. {obs}')
         w()
+
+    lines.extend(detector_lines)
 
     return '\n'.join(lines)
 

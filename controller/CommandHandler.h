@@ -25,9 +25,19 @@ class LogFileManager;
 
 class CommandHandler {
 public:
+    // Simulated directional noise source (a power line) for --simulator power-line.
+    struct SimulatorNoiseSource {
+        double db = 0.0;               // extra floor at boresight, dB over the base floor; 0 = none
+        double bearingDeg = 270.0;     // true bearing from the first vehicle pose
+        bool   impulsive = false;      // heavy-tailed (Student-t) instead of Gaussian
+        SimulatorNoiseSource() {}      // GCC needs this to use the struct as a default argument below
+    };
+
     explicit CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode = false, const std::string& simulatorPreset = "strong", bool debugDetector = false, double simulatorSnrDb = 20.0,
                             double simulatorTxBearingDeg = 0.0, double simulatorInterfererSnrDb = std::numeric_limits<double>::quiet_NaN(),
-                            const std::string& simulatorAntenna = "ra2a", double simulatorPriPpm = 43.0);
+                            const std::string& simulatorAntenna = "ra2a", double simulatorPriPpm = 43.0,
+                            const SimulatorNoiseSource& simulatorNoiseSource = SimulatorNoiseSource{},
+                            double detectorImpulseBlankFactor = 0.0);
 
     static constexpr int kPulseUdpPort = 50000; // UDP port for pulse/heartbeat reports from detectors
 
@@ -131,9 +141,11 @@ private:
     double                          _simulatorSnrDb = 20.0;
     double                          _simulatorTxBearingDeg = 0.0;       // true bearing of the simulated transmitter from the first vehicle pose
     double                          _simulatorInterfererSnrDb;          // NaN: no interferer; else a flat (pattern-free) pulse train +1 kHz from the tag
+    SimulatorNoiseSource            _simulatorNoiseSource;
     std::string                     _simulatorAntenna;                  // iq_simulator --antenna gain table
     double                          _simulatorPriPpm        = 43.0;     // iq_simulator --pri-ppm collar crystal offset
     bool                            _debugDetector          = false;
+    double                          _detectorImpulseBlankFactor = 0.0;  // pulse_detector.py --impulse-blank-factor; 0 = omit (off)
     uint32_t                        _simPhase               = 0;        // 4-phase cycle: 0=A, 1=A→B, 2=B, 3=B→A
 
     // Rotation detection state — accessed from both MAVLink and UDP threads
@@ -157,9 +169,20 @@ private:
     static constexpr uint32_t kLiveCandidateMinSlices    = 3;
     // A lock sighted independently on this many headings needs no revisit.
     static constexpr uint32_t kConfirmedSightings        = 2;
+    // Without a lock no bearing is reported: acquisition hits (score_ratio
+    // 1..3) are individually inside the per-heading false-alarm rate and do
+    // not constrain the pattern fit. The tag is still "heard" when this many
+    // hits agree in frequency within the detector's locked search band
+    // (LOCKED_SEARCH_HZ in pulse_detector.py); noise hits scatter over ~105
+    // bins, so two in one bin on different headings is ~1e-3 per rotation.
+    static constexpr uint32_t kHeardMinAgreeingHits      = 2;
+    static constexpr double   kHeardFrequencyToleranceHz = 200.0;
     // An ARM within this of the requested revisit heading satisfies the revisit;
     // well inside the 45 deg slice spacing, well outside the GCS heading-hold error.
     static constexpr float    kRevisitHeadingToleranceDeg = 15.0f;
+    // Used when the GCS sends detection_margin = 0. The detector's threshold
+    // is derived from each dwell's own data, so no safety margin is needed.
+    static constexpr double   kDefaultDetectionMargin     = 1.0;
 
     uint8_t _liveCandidateFor(uint32_t tagId) const;
     // Re-fits all candidates of tagId from _rotationSlices; if a different one
