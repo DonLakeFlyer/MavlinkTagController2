@@ -300,7 +300,10 @@ down on its own — the GCS decides whether to cancel.
    therefore inform the fit without dominating it. `r_squared` is a composite confidence
    (weighted fit × angular span × degrees-of-freedom factors). Per-heading
    residuals are kept on the result for diagnostics.
-3. **Select** per tag the candidate with the highest `r_squared`. Candidates
+3. **Select** per tag the candidate with the highest `r_squared`. A
+   candidate that clears `confidenceFloor` always beats one that does not,
+   so the tie-break below can never trade a valid bearing for a rejection.
+   Otherwise, candidates
    within `kCandidateConfidenceTolerance` = 0.05 of each other are not
    separated by the fit (two candidates measuring the same pulses — a
    duplicate lock, a sidelobe image — differ by well under 0.01 from noise
@@ -342,6 +345,57 @@ seen on one heading only), *heard, no bearing* (NaN with `n_valid_slices` > 0),
 *nothing heard* (NaN with `n_valid_slices` = 0) — plus the 45° rose sector the
 bearing falls in; the sector is derived from `bearing_deg` and the flown slice
 count, nothing extra is carried on the wire.
+
+## Simulator levels
+
+`--simulator <level>` with a configured tag drives this flow end to end
+(levels and SNRs: [simulator/README.md](../../simulator/README.md#controller-signal-levels)).
+The SNRs were chosen around the detector's `--lock-score-ratio` of 3.0 at
+K=20; the per-dwell permutation-null threshold
+([DETECTOR_PIPELINE.md](DETECTOR_PIPELINE.md)) moves the exact `score_ratio`
+each level produces, so the outcomes below are the intent to verify, not a
+guarantee. The transmitter sits at 135°; with TagTracker's clockwise sweep
+from 0° that is the fourth heading, so the first three headings are always
+measured retrospectively once a lock exists.
+
+- **`strong`** (20 dB): locks on the first heading that sees the tag (0° is
+  45° off-axis, still tens of dB up); sighted on every heading → *confirmed*,
+  sector 3, bearing ≈ 135°. The tag is 50–70 dB over noise, so its spectral
+  sidelobe images are admitted as extra candidates (#148).
+- **`moderate`** (−8 dB): sighted on every heading (deepest pattern null
+  still ≈ 20 dB over noise) → *confirmed*, bearing ≈ 135°, one candidate, no
+  sidelobe images.
+- **`marginal`** (−27 dB): sighted on one heading only (135°, `score_ratio`
+  ≈ 5 against the lock ratio 3; ±45° ≈ 2, below it). `FINISH_COLLECTION`
+  returns `COLLECTION_STATUS_REVISIT_REQUESTED`, the GCS flies that heading
+  again, then *confirmed* if the revisit sights it, otherwise *unconfirmed*.
+  −21 dB gave three sightings and a confirm without a revisit.
+- **`below-marginal`** (−33 dB): never locks (best `score_ratio` ≈ 1.6 at
+  135°) but the tag's bin clears the `pf` threshold on the two or three
+  headings nearest 135°. No bearing is fitted from such hits; because they
+  agree in frequency the result is *heard, no bearing* (`bearing_deg` NaN,
+  `n_valid_slices` > 0).
+- **`silent`**: `noise-only` preset. No lock, `mu` ≈ 68 on every heading
+  (`refined: true` on some — the strongest noise bin passing the train gate —
+  without moving `threshold`), at most a few scattered `pf` hits (≈ 0.4 per
+  rotation) → *nothing heard* (`bearing_deg` NaN, `n_valid_slices` 0). Two
+  noise hits in one bin would wrongly read as *heard*; ~1e-3 per rotation.
+- **`competing`** (−18 dB tag, flat −18 dB tone at +1 kHz): the interferer
+  takes the provisional lock (candidate 0) on the first heading; the tag is
+  admitted as an alternate near 135°; every buffered heading is measured at
+  both; the finish-time fit must select the tag (pattern-shaped) over the
+  interferer (flat).
+- **`power-line`** (−8 dB tag, directional Gaussian source +15 dB at
+  boresight, bearing 270°, seen through the antenna pattern): the source adds
+  to the base noise, so the combined floor is ≈ 15 dB up at 270°, ≈ 11–12 dB
+  at 225°/315° (45° off the source is −3.75 dB on the RA-2A table), ≈ 6 dB at
+  90° (back lobe) and near the base floor where the pattern nulls it
+  (`cycle_threshold.mu` and `threshold` stay ≈ 68–75 throughout; the noise
+  PSD column in `analysis.md` shows the swing), with no false detections. The
+  bearing fit down-weights the noisy headings (`bearing_candidates.log`
+  weights ≪ 1 at 225–315°) and the result stays *confirmed* at ≈ 135°.
+  `--sim-noise-source-impulsive` makes the source heavy-tailed (Student-t) to
+  exercise `--detector-impulse-blank-factor`.
 
 ## Log artifacts per collection
 

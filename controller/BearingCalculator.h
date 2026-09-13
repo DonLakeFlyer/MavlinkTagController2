@@ -59,9 +59,10 @@ public:
     std::vector<Result> solveCandidates() const;
     // One result per tag: the candidate with the highest confidence, with
     // bearing_deg set to NaN (rejected=true) when it is below the floor.
-    // Confidences within kCandidateConfidenceTolerance do not separate
-    // candidates; the one sighted on more headings wins, then more detected
-    // slices, then higher best_snr.
+    // A candidate that clears the floor always beats one that does not.
+    // Otherwise confidences within kCandidateConfidenceTolerance do not
+    // separate candidates; the one sighted on more headings wins, then more
+    // detected slices, then higher best_snr.
     std::vector<Result> solve() const;
     void setConfidenceFloor(float floor) { _confidenceFloor = floor; }
     float confidenceFloor() const { return _confidenceFloor; }
@@ -94,7 +95,7 @@ public:
 
 private:
     Result _solveForTag(uint32_t tag_id, const std::vector<SliceData>& slices) const;
-    static bool _isBetterCandidate(const Result& candidate, const Result& incumbent);
+    bool _isBetterCandidate(const Result& candidate, const Result& incumbent) const;
     static void _fitAmplitude(const std::vector<double>& g, const std::vector<double>& p,
                               const std::vector<double>& w,
                               bool fitFloor, double& A, double& B);

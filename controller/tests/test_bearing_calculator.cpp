@@ -747,6 +747,41 @@ static void testClearlyBetterFitWinsOverSightings() {
     std::printf("PASS: testClearlyBetterFitWinsOverSightings\n");
 }
 
+// ── Test: the sightings tie-break must not pick a sub-floor candidate ──
+// Two candidates within the confidence tolerance, but the floor sits between
+// them. The below-floor one has more sightings; selecting it would reject the
+// tag even though the other candidate is a valid bearing. Run with the clean
+// candidate as both incumbent (id 0) and challenger (id 1).
+static void testTieBreakPrefersFloorClearingCandidate() {
+    for (uint8_t cleanId : {0, 1}) {
+        const uint8_t noisyId = 1 - cleanId;
+        BearingCalculator calc;
+        auto slices = generateSlices(135.0f, 30.0, 2.0, 8);
+        for (size_t i = 0; i < slices.size(); ++i) {
+            const auto& [hdg, power] = slices[i];
+            // Clean fit, one sighting.
+            calc.addSlice(hdg, power, 2, 40.0, cleanId, hdg == 135.0f, 1e-9);
+            // Same pulses with alternating ±12 % error, sighted everywhere.
+            calc.addSlice(hdg, power * (1.0 + ((i % 2) ? 0.12 : -0.12)), 2, 40.0, noisyId, true, 1e-9);
+        }
+        auto candidates = calc.solveCandidates();
+        CHECK(candidates.size() == 2);
+        const float clean = candidates[cleanId].r_squared;
+        const float noisy = candidates[noisyId].r_squared;
+        CHECK(clean > noisy);
+        CHECK(clean - noisy < 0.05f);   // within kCandidateConfidenceTolerance
+        calc.setConfidenceFloor(0.5f * (clean + noisy));
+
+        auto results = calc.solve();
+        CHECK(results.size() == 1);
+        CHECK(results[0].candidate_id == cleanId);
+        CHECK(!results[0].rejected);
+        assertNear(results[0].bearing_deg, 135.0f, kBearingToleranceDeg, "floor-clearing candidate");
+        std::printf("PASS: testTieBreakPrefersFloorClearingCandidate (clean id %u: clean=%.3f noisy=%.3f)\n",
+                    cleanId, clean, noisy);
+    }
+}
+
 // ── Test: sub-lock hits count as "heard" only when they share a bin ──
 static void testLargestFrequencyCluster() {
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -783,6 +818,7 @@ int main() {
     testRevisitHeadingFor();
     testDuplicateCandidateLosesToSightings();
     testClearlyBetterFitWinsOverSightings();
+    testTieBreakPrefersFloorClearingCandidate();
     testLargestFrequencyCluster();
     testBearingAtZero_8slices();
     testBearingAt90_8slices();
