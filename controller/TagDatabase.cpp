@@ -34,7 +34,7 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
     double  channelCenterFreqMHz        = double(tagInfo.channelizer_channel_center_frequency_hz) / 1000000.0;
     double  tagFreqMHz                  = double(tagInfo.frequency_hz) / 1000000.0;
     auto    tip_msecs                   = secondaryChannel ? tagInfo.intra_pulse2_msecs : tagInfo.intra_pulse1_msecs;
-    auto    portData                    = isHFMode ? (10000 + secondaryChannelIncrement) : (20000 + ((tagInfo.channelizer_channel_number - 1) * 2) + secondaryChannelIncrement);
+    auto    portData                    = detectorDataPort(tagInfo, isHFMode, secondaryChannel);
     auto    sampleRate                  = isHFMode ? 3840 : 3750;
     auto    tip                         = double(tip_msecs) / 1000.0;
     auto    logDir                      = logFileManager->logDir(LogFileManager::DETECTORS);

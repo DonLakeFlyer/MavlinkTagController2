@@ -17,6 +17,7 @@ add_executable(MavlinkTagController2
     formatString.h
     platformHelpers.h
     TagDatabase.cpp TagDatabase.h
+    TagUploadCoordinator.cpp TagUploadCoordinator.h
     TelemetryCache.cpp TelemetryCache.h
     MavlinkOutgoingMessageQueue.cpp MavlinkOutgoingMessageQueue.h
     Connection.cpp Connection.h
@@ -101,4 +102,19 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_python_pulse_mapper PRIVATE mavlink tunnel_protocol)
     add_test(NAME test_python_pulse_mapper COMMAND test_python_pulse_mapper)
+
+    add_executable(test_tag_database
+        tests/test_tag_database.cpp
+    )
+    target_include_directories(test_tag_database PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_tag_database PRIVATE mavlink tunnel_protocol)
+    add_test(NAME test_tag_database COMMAND test_tag_database)
+
+    add_executable(test_tag_upload_coordinator
+        tests/test_tag_upload_coordinator.cpp
+        TagUploadCoordinator.cpp TagUploadCoordinator.h
+    )
+    target_include_directories(test_tag_upload_coordinator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_tag_upload_coordinator PRIVATE mavlink tunnel_protocol)
+    add_test(NAME test_tag_upload_coordinator COMMAND test_tag_upload_coordinator)
 endif()

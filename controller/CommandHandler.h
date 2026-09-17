@@ -2,6 +2,7 @@
 
 #include "TunnelProtocol.h"
 #include "TagDatabase.h"
+#include "TagUploadCoordinator.h"
 #include "BearingCalculator.h"
 #include "CollectionCoordinator.h"
 #include "TelemetryCache.h"
@@ -126,8 +127,8 @@ private:
 
     MavlinkSystem*                  _mavlink                = nullptr;
     TelemetryCache*                 _telemetryCache         = nullptr;
-    TagDatabase                     _tagDatabase;
-    bool                            _receivingTags          = false;
+    TagUploadCoordinator            _tagUpload;
+    const TagDatabase&              _tagDatabase            = _tagUpload.tags();
     const char*                     _homePath               = nullptr;
     std::vector<std::shared_ptr<MonitoredProcess>> _processes;
     bp::pipe*                       _airspyPipe             = nullptr;

@@ -101,25 +101,20 @@ void CommandHandler::_sendCommandAck(uint32_t command, uint32_t result, std::str
 
 bool CommandHandler::_handleStartTags(const mavlink_tunnel_t& tunnel)
 {
-    StartTagsInfo_t startTagsInfo;
-
     if (tunnel.payload_length != sizeof(StartTagsInfo_t)) {
         logError() << "CommandHandler::_handleStartTags ERROR - Payload length incorrect expected:actual" << sizeof(StartTagsInfo_t) << tunnel.payload_length;
         return false;
     }
 
-    if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_IDLE && _mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
-        logError() << "CommandHandler::_handleStartTags ERROR - Controller in incorrect state for start tags - heartbeatStatus:" << _mavlink->heartbeatStatus();
-        return false;
-    }
-
-    memcpy(&startTagsInfo, tunnel.payload, sizeof(startTagsInfo));
+    const auto heartbeatStatus = _mavlink->heartbeatStatus();
+    const bool controllerIdle  = heartbeatStatus == HEARTBEAT_STATUS_IDLE || heartbeatStatus == HEARTBEAT_STATUS_HAS_TAGS;
 
     logDebug() << "_handleStartTags";
 
-    _tagDatabase.clear();
-    _receivingTags = true;
-
+    if (_tagUpload.startTags(controllerIdle) == TagUploadCoordinator::Result::WrongState) {
+        logError() << "CommandHandler::_handleStartTags ERROR - Controller in incorrect state for start tags - heartbeatStatus:" << heartbeatStatus;
+        return false;
+    }
     return true;
 }
 
@@ -134,39 +129,59 @@ bool CommandHandler::_handleTag(const mavlink_tunnel_t& tunnel)
 
     memcpy(&tagInfo, tunnel.payload, sizeof(tagInfo));
 
-    if (tagInfo.id < 2) {
-        logError() << "CommandHandler::_handleTagCommand: invalid tag id of 0/1";
-        return false;
-    }
-    if (tagInfo.k < 2) {
-        logError() << "CommandHandler::_handleTagCommand: tag" << tagInfo.id << "k must be >= 2, got" << tagInfo.k;
-        return false;
-    }
-
     logDebug() << "CommandHandler::handleTagCommand: id:freq:intra_pulse1_msecs "
                 << tagInfo.id
                 << tagInfo.frequency_hz
                 << tagInfo.intra_pulse1_msecs;
 
-    _tagDatabase.push_back(tagInfo);
-
-    return true;
+    switch (_tagUpload.addTag(tagInfo)) {
+    case TagUploadCoordinator::Result::Accepted:
+        return true;
+    case TagUploadCoordinator::Result::Retransmit:
+        // GCS re-sent TAG after a lost ACK; must not become a second detector on the same port.
+        logDebug() << "CommandHandler::_handleTag: duplicate TAG for id" << tagInfo.id << "- treating as retransmit";
+        return true;
+    case TagUploadCoordinator::Result::NotReceiving:
+        logError() << "CommandHandler::_handleTag: TAG" << tagInfo.id << "received outside START_TAGS/END_TAGS";
+        return false;
+    case TagUploadCoordinator::Result::InvalidId:
+        logError() << "CommandHandler::_handleTagCommand: invalid tag id of 0/1";
+        return false;
+    case TagUploadCoordinator::Result::InvalidK:
+        logError() << "CommandHandler::_handleTagCommand: tag" << tagInfo.id << "k must be >= 2, got" << tagInfo.k;
+        return false;
+    case TagUploadCoordinator::Result::Conflict:
+        logError() << "CommandHandler::_handleTag: tag" << tagInfo.id << "already defined with different parameters";
+        return false;
+    case TagUploadCoordinator::Result::WrongState:
+        break;
+    }
+    logError() << "CommandHandler::_handleTag: unexpected result for tag" << tagInfo.id;
+    return false;
 }
 
 bool CommandHandler::_handleEndTags(void)
 {
-    logDebug() << "_handleEndTags _receivingTags" << _receivingTags;
+    logDebug() << "_handleEndTags state" << static_cast<int>(_tagUpload.state()) << "tags" << _tagDatabase.size();
 
-    if (!_receivingTags) {
+    const auto result = _tagUpload.endTags();
+
+    switch (result) {
+    case TagUploadCoordinator::Result::Accepted:
+        // An empty upload must not leave a stale HAS_TAGS from an earlier list.
+        _mavlink->setHeartbeatStatus(_tagUpload.hasTags() ? HEARTBEAT_STATUS_HAS_TAGS : HEARTBEAT_STATUS_IDLE);
+        return true;
+    case TagUploadCoordinator::Result::Retransmit:
+        logDebug() << "CommandHandler::_handleEndTags: duplicate END_TAGS - treating as retransmit";
+        return true;
+    case TagUploadCoordinator::Result::NotReceiving:
+        logError() << "CommandHandler::_handleEndTags: END_TAGS without START_TAGS";
         return false;
+    default:
+        break;
     }
-
-    _receivingTags = false;
-    if (_tagDatabase.size() != 0) {
-        _mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
-    }
-
-    return true;
+    logError() << "CommandHandler::_handleEndTags: unexpected result" << static_cast<int>(result);
+    return false;
 }
 
 void CommandHandler::_startDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel)
@@ -192,7 +207,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
 {
     int     secondaryChannelIncrement   = secondaryChannel ? 1 : 0;
     int     tagId                       = tagInfo.id + secondaryChannelIncrement;
-    int     portData                    = isHFMode ? (10000 + secondaryChannelIncrement) : (20000 + ((tagInfo.channelizer_channel_number - 1) * 2) + secondaryChannelIncrement);
+    int     portData                    = TagDatabase::detectorDataPort(tagInfo, isHFMode, secondaryChannel);
     int     sampleRate                  = isHFMode ? 3840 : 3750;
     double  tip                         = tagInfo.intra_pulse1_msecs / 1000.0;
     double  tp                          = tagInfo.pulse_width_msecs / 1000.0;
@@ -365,12 +380,26 @@ std::string CommandHandler::_handleStartDetection(const mavlink_tunnel_t& tunnel
         return std::string("AirSpy detection failed: ") + airspyError;
     }
 
+    bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
+
+    // Reject here rather than let the second detector die on bind() 5 s later.
+    if (const auto collision = _tagDatabase.findPortCollision(isHFMode)) {
+        const char* pipeline = deviceType == AirSpyDeviceType::SIMULATOR ? "IQ Simulator" : "AirSpy HF";
+        const std::string error = isHFMode
+            ? formatString("%s supports a single tag (one decimator channel); %zu configured", pipeline, _tagDatabase.size())
+            : formatString("Tags %u and %u share channelizer channel %d", collision->tagIdA, collision->tagIdB,
+                           (collision->port - 20000) / 2 + 1);
+        logError() << "COMMAND_ID_START_DETECTION - ERROR:" << error << "- tags" << collision->tagIdA << "and" << collision->tagIdB
+                   << "would both bind UDP port" << collision->port;
+        _detectionStarting.store(false);
+        return error;
+    }
+
     auto logFileManager = LogFileManager::instance();
     // Freeze before the log dir is named and before DETECTING is published, so a
     // concurrent stop cannot unfreeze and then be re-frozen by this start.
     _mavlink->setVehicleTimeFrozen(true);
     logFileManager->detectorsStarted();
-    bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
     StartDetectionInfo_t requestedStart {};
     memcpy(&requestedStart, tunnel.payload, sizeof(requestedStart));
     if (requestedStart.detection_mode == DETECTION_MODE_PYTHON) {

@@ -28,6 +28,8 @@ make test                                         # configure + build + ctest, r
 | `test_detector_protocol` | `controller/tests/test_detector_protocol.cpp` | TTDP header/payload layout (`shared/detector_protocol.h`) | Mirror of `detector/tests/test_detector_protocol.py` |
 | `test_bearing_calculator` | `controller/tests/test_bearing_calculator.cpp` | Pattern fit, weighted headings and residuals, candidate selection, wraparound, noise tolerance, confirmed/revisit semantics; run for both antenna patterns | |
 | `test_python_pulse_mapper` | `controller/tests/test_python_pulse_mapper.cpp` | TTDP pulse → tunnel `PythonPulseInfo_t` mapping | |
+| `test_tag_database` | `controller/tests/test_tag_database.cpp` | `COMMAND_ID_TAG` payload equality (retransmit vs conflict, NaN-aware); detector UDP port formula and START_DETECTION port-collision detection | |
+| `test_tag_upload_coordinator` | `controller/tests/test_tag_upload_coordinator.cpp` | START_TAGS / TAG / END_TAGS state machine, retransmit idempotence, out-of-bracket and validation rejects | Reproduces the 2026-09-17 duplicate-tag collection failure |
 | `zmq_timestamp_test`, `zmq_loss_detection_test` | `airspyhf_zeromq/tests/` | Live SDR timestamp continuity and loss detection | **Hardware**: exit 77 (skipped) without an Airspy HF+ |
 
 ## Python (pytest)
