@@ -34,6 +34,7 @@ it* — see the contract below.
 | [2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md) | Why the max-search SNR compresses front/back contrast; the fixed-offset amplitude estimator; the retrospective-lock design that was then implemented |
 | [2026-09_MULTIPATH_ANALYSIS_REVIEW.md](analysis/2026-09_MULTIPATH_ANALYSIS_REVIEW.md) | Re-analysis of the Apr-11 failures: noise detections, not multipath; corrected two-ray geometry |
 | [2026-09_SIMULATOR_E2E_SESSION.md](analysis/2026-09_SIMULATOR_E2E_SESSION.md) | Simulator end-to-end runs of the 8-heading implementation: results, fixes they prompted, how the rotation logs were read, open items — hand-off note |
+| [2026-09_USB_NOISE_TESTING.md](analysis/2026-09_USB_NOISE_TESTING.md) | Lake-front noise-floor captures (powered / flying / grounded box): +13 dB in flight, box grounding no measurable effect in one A/B, USB common-mode vs antenna path, HS02 isolator + floating 5 V plan, test protocol |
 
 ## proposals/
 
