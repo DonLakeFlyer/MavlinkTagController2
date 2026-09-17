@@ -7,7 +7,7 @@ registered with ctest by `controller/CMakeLists.txt`.
 
 ```bash
 cmake --preset debug && cmake --build --preset debug
-ctest --test-dir build -R 'test_(collection_protocol|collection_coordinator|detector_protocol|bearing_calculator|python_pulse_mapper)' --output-on-failure
+ctest --test-dir build -R 'test_(collection_protocol|collection_coordinator|detector_protocol|bearing_calculator|python_pulse_mapper|tag_database|tag_upload_coordinator)' --output-on-failure
 ```
 
 ## Tests
@@ -19,6 +19,8 @@ ctest --test-dir build -R 'test_(collection_protocol|collection_coordinator|dete
 | `test_detector_protocol` — `test_detector_protocol.cpp` | Layout of `shared/detector_protocol.h`: `sizeof` and `offsetof` for `Header` (20), `ArmPayload` (4), `PulsePayload` (60), `PulseReport` (80). Mirror of `detector/tests/test_detector_protocol.py`; change both together. |
 | `test_bearing_calculator` — `test_bearing_calculator.cpp` | `BearingCalculator` fit against the RA-2A pattern with synthetic slices: empty / single / too-few slices, reset, `best_snr`, pattern symmetry, bearings at 0°, 90°, 225°, 350° (wraparound), 22° (off-grid), two tags at once, ±2 dB noise, 16-slice R². |
 | `test_python_pulse_mapper` — `test_python_pulse_mapper.cpp` | TTDP `PulsePayload` → tunnel `PythonPulseInfo_t`: detection fields forwarded, each `rate_state`, no-detection zeroes pulse fields, telemetry supplied by caller, `candidate_id 0` is the provisional lock. |
+| `test_tag_database` — `test_tag_database.cpp` | `TagDatabase::addTag` under `COMMAND_ID_TAG` retransmission: identical re-send of an id is not appended (`Retransmit`, incl. NaN priors), same id with different payload is `Conflict`, distinct ids all added, `clear()` (new START_TAGS) resets. `detectorDataPort` formula (HF 10000/10001, Mini 20000 + 2·(channel−1)) and `findPortCollision`: two tags in HF mode, two Mini tags on one channel → collision; single HF tag, distinct Mini channels, empty → none. |
+| `test_tag_upload_coordinator` — `test_tag_upload_coordinator.cpp` | `TagUploadCoordinator` START_TAGS / TAG / END_TAGS state machine: `Idle` → `Receiving` → `HasTags` / `Empty`; retransmitted TAG and END_TAGS after a lost ACK are idempotent (`Retransmit`), including END_TAGS after an empty upload; TAG/END_TAGS outside a bracket, id 0/1, `k < 2`, conflicting redefinition and START_TAGS on a busy controller are rejected; START_TAGS clears the previous list. Drives the 15:13 and 15:17 command sequences from the 2026-09-17 controller log. |
 
 Adding a test: add the source under `controller/tests/`, an `add_executable` +
 `add_test(NAME …)` in `controller/CMakeLists.txt`, and a row above.

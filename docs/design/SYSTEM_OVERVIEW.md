@@ -39,9 +39,17 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
 1. **Boot.** `setup/crontab-start-controller.sh` starts the controller on
    `serial:///dev/serial0:921600`. It heartbeats on the tunnel; TagTracker
    checks the protocol version.
-2. **Tags.** The GCS sends tag definitions (frequency, `tp`, `tip`, optional
-   secondary `tip`, K, `pf`, thresholds) → `TagDatabase`.
-3. **START_DETECTION.** The controller creates
+2. **Tags.** The GCS sends `START_TAGS`, one `TAG` per tag definition
+   (frequency, `tp`, `tip`, optional secondary `tip`, K, `pf`, thresholds),
+   then `END_TAGS`. `TagUploadCoordinator` (`Idle` → `Receiving` → `HasTags`,
+   or `Empty` when the list was cleared) validates each command against the
+   bracket state and fills `TagDatabase`. A retransmitted `TAG` or `END_TAGS`
+   after a lost ACK is accepted without effect; a `TAG` outside a bracket or
+   a conflicting redefinition of an id is NACKed.
+3. **START_DETECTION.** The controller probes the SDR, then rejects the
+   command (NACK with message) if two tags would bind the same detector UDP
+   port — AirSpy HF is a single decimator channel, so it supports one tag;
+   Mini tags must have distinct channelizer channels. Otherwise it creates
    `~/Logs/Logs-Detectors-<UTC>/`, starts `airspyhf_zeromq_rx` tuned to the
    requested radio centre (`radio_center_frequency_hz`, normally the tag) +
    10 kHz, `airspyhf_decimator`, and one `pulse_detector.py` per tag with
