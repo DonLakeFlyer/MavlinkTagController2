@@ -37,8 +37,16 @@ public:
 	std::string filename	(LogType_t logType, const char* root, const char* extension);
 	std::string logDir		(LogType_t logType) const;
 	/// Directory the controller log is mirrored into: detectors dir while detecting,
-	/// else the rotation dir so the whole rotation (start through bearing) is captured.
-	std::string controllerLogDir() const { return !_logDirDetectors.empty() ? _logDirDetectors : _logDirRotation; }
+	/// else the rotation dir, else the most recently closed session dir so the
+	/// tail of a session (FINISH ack, STOPPED, outcome replays, the next tag
+	/// upload) is captured too. Empty only before the first session or after the
+	/// logs are deleted.
+	std::string controllerLogDir() const
+	{
+		if (!_logDirDetectors.empty()) return _logDirDetectors;
+		if (!_logDirRotation.empty())  return _logDirRotation;
+		return _logDirClosed;
+	}
 
 private:
 	LogFileManager();
@@ -52,6 +60,7 @@ private:
 	std::string _logDirDetectors;
 	std::string _logDirRawCapture;
 	std::string _logDirRotation;
+	std::string _logDirClosed;      // last detectors/rotation dir after it ended
 
 	static const std::string _logsDirPrefix;
 

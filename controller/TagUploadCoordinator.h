@@ -3,10 +3,15 @@
 #include "TagDatabase.h"
 #include "TunnelProtocol.h"
 
+#include <string>
+#include <vector>
+
 // START_TAGS / TAG / END_TAGS upload state machine. Takes decoded payloads, not
 // tunnel frames, and does no logging so it links into a standalone test;
 // CommandHandler owns MAVLink framing, logging and ACKs. Every command is
-// idempotent under retransmission after a lost ACK.
+// idempotent under retransmission after a lost ACK, and the set is checked
+// for completeness (upload_id / tag_count / tag_index) before END_TAGS is
+// accepted.
 class TagUploadCoordinator {
 public:
     enum class State {
@@ -24,17 +29,30 @@ public:
         InvalidId,      // tag id 0/1 are reserved
         InvalidK,       // k < 2
         Conflict,       // id already uploaded with different parameters
+        StaleUpload,    // TAG/END_TAGS upload_id is not the open bracket's
+        InvalidIndex,   // tag_index >= tag_count, or index already used by another id
+        Incomplete,     // endTags: some tag_index never arrived; see missingIndices()
+        CountMismatch,  // endTags: tag_count differs from START_TAGS
     };
 
-    Result startTags(bool controllerIdle);
+    Result startTags(bool controllerIdle, const TunnelProtocol::StartTagsInfo_t& info);
     Result addTag(const TunnelProtocol::TagInfo_t& tagInfo);
-    Result endTags();
+    Result endTags(const TunnelProtocol::EndTagsInfo_t& info);
 
-    State              state()   const { return _state; }
-    bool               hasTags() const { return _state == State::HasTags; }
-    const TagDatabase& tags()    const { return _tags; }
+    State              state()    const { return _state; }
+    bool               hasTags()  const { return _state == State::HasTags; }
+    const TagDatabase& tags()     const { return _tags; }
+    uint32_t           uploadId() const { return _uploadId; }
+
+    /// Indices in 0..tag_count-1 not yet received (meaningful while Receiving).
+    std::vector<uint32_t> missingIndices() const;
+    /// "2,5" form of missingIndices(), for the NACK message.
+    static std::string formatIndices(const std::vector<uint32_t>& indices);
 
 private:
-    State       _state { State::Idle };
-    TagDatabase _tags;
+    State                 _state { State::Idle };
+    TagDatabase           _tags;
+    uint32_t              _uploadId { 0 };
+    uint32_t              _expectedCount { 0 };
+    std::vector<uint32_t> _indexToId;      // tag_index -> tag id; 0 = not received
 };

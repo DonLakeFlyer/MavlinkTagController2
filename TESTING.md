@@ -29,7 +29,10 @@ make test                                         # configure + build + ctest, r
 | `test_bearing_calculator` | `controller/tests/test_bearing_calculator.cpp` | Pattern fit, weighted headings and residuals, candidate selection, wraparound, noise tolerance, confirmed/revisit semantics; run for both antenna patterns | |
 | `test_python_pulse_mapper` | `controller/tests/test_python_pulse_mapper.cpp` | TTDP pulse → tunnel `PythonPulseInfo_t` mapping | |
 | `test_tag_database` | `controller/tests/test_tag_database.cpp` | `COMMAND_ID_TAG` payload equality (retransmit vs conflict, NaN-aware); detector UDP port formula and START_DETECTION port-collision detection | |
-| `test_tag_upload_coordinator` | `controller/tests/test_tag_upload_coordinator.cpp` | START_TAGS / TAG / END_TAGS state machine, retransmit idempotence, out-of-bracket and validation rejects | Reproduces the 2026-09-17 duplicate-tag collection failure |
+| `test_tag_upload_coordinator` | `controller/tests/test_tag_upload_coordinator.cpp` | START_TAGS / TAG / END_TAGS state machine, retransmit idempotence, upload-set integrity (`upload_id`, `tag_count`, `tag_index`, missing-index NACK), out-of-bracket and validation rejects | Reproduces the 2026-09-17 duplicate-tag collection failure |
+| `test_request_cache` | `controller/tests/test_request_cache.cpp` | Request-id ACK replay cache: miss / replay / command mismatch, eviction, age expiry | |
+| `test_detection_coordinator` | `controller/tests/test_detection_coordinator.cpp` | Idle / HasTags / Starting / Detecting / Stopping transitions, in-flight start/stop idempotence, heartbeat publication | |
+| `test_command_retry` | `controller/tests/test_command_retry.cpp` | Whole controller command/ACK path (`TunnelCommandDispatcher`) under lost ACKs: every command retried, lost TAG, GCS restart mid-upload / mid-start / mid-stop, request-id reuse, malformed frames, controller restart fallback | Fake `CommandActions`; no MAVLink or processes |
 | `zmq_timestamp_test`, `zmq_loss_detection_test` | `airspyhf_zeromq/tests/` | Live SDR timestamp continuity and loss detection | **Hardware**: exit 77 (skipped) without an Airspy HF+ |
 
 ## Python (pytest)

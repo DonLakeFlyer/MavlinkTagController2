@@ -58,7 +58,7 @@ configured. Table of both: [simulator/README.md](../simulator/README.md#controll
 
 | | |
 | --- | --- |
-| GCS ⇄ controller | MAVLink tunnel, messages from `TunnelProtocol.h` (`StartDetection`, `StartCollection_t`, `StartCollectionSlice_t`, `FinishCollection_t`, `BearingResult_t`, pulse reports). The heartbeat advertises `TUNNEL_PROTOCOL_VERSION`; TagTracker requires an exact match |
+| GCS ⇄ controller | MAVLink tunnel, messages from `TunnelProtocol.h` (`StartDetection`, `StartCollection_t`, `StartCollectionSlice_t`, `FinishCollection_t`, `BearingResult_t`, pulse reports). Every GCS command carries a `request_id`; the ACK echoes it and a retried command is answered with the original ACK. The heartbeat advertises `TUNNEL_PROTOCOL_VERSION`; TagTracker requires an exact match |
 | Detector → controller | TTDP over UDP on `CommandHandler::kPulseUdpPort` (see [shared/README.md](../shared/README.md#ttdp-detector-protocol)) |
 | Spawned processes | `airspyhf_zeromq_rx -Z -f <radio_center+0.010> -a 768000 -g off -m on` (centre from `StartDetectionInfo_t::radio_center_frequency_hz`), `airspyhf_decimator --input-rate 768000 --shift-khz 10 --ports 10000,10001`, `pulse_detector.py --tag-id … --k <tag K> …` (one per tag), or `iq_simulator.py` in simulator mode |
 
@@ -66,6 +66,11 @@ configured. Table of both: [simulator/README.md](../simulator/README.md#controll
 
 Everything lives under `~/Logs/`, one directory per session
 (`Logs-Detectors-<UTC>`, `Logs-Rotation-<UTC>`, `Logs-RawCapture-<UTC>`).
+The controller's own log is mirrored into the active session directory as
+`MavlinkTagController.log`, and keeps going into the most recently closed one
+until the next session starts, so the FINISH ack, `STOPPED` status, any
+outcome replay and the following tag upload are captured too. Before the first
+session (or after `CLEAN_LOGS`) it goes to stdout only.
 A rotation directory holds `MavlinkTagController.log`, `airspyhf_decimator.log`,
 `airspyhf_zeromq_rx.log` and the detectors' text logs at the root, plus a
 `heading-NNN/` subdirectory per slice with each detector's structured
@@ -82,7 +87,8 @@ the pattern fit. When a session stops the controller runs
 | File | Role |
 | --- | --- |
 | `main.cpp` | CLI parsing, wiring |
-| `CommandHandler.cpp` | Tunnel command dispatch; starts/stops the pipeline; per-tag detector launch; pulse forwarding; `FinishCollection` |
+| `CommandHandler.cpp` | MAVLink framing and ACK send; starts/stops the pipeline (`CommandActions`); per-tag detector launch; pulse forwarding; `FinishCollection` |
+| `TunnelCommandDispatcher.cpp` | Decodes GCS commands, replays ACKs for retried `request_id`s (`RequestCache.cpp`), drives `TagUploadCoordinator.cpp` and `DetectionCoordinator.cpp`, returns the ACK |
 | `CollectionCoordinator.cpp` | ARM/ARMED/CYCLE_COMPLETE bookkeeping per slice and per detector |
 | `BearingCalculator.cpp` | Levenberg–Marquardt fit of slice SNRs to the antenna pattern; candidate selection; revisit decision |
 | `AntennaPattern.cpp` | RA-2A / RA-23K gain tables and `confidenceFloor` |
@@ -101,7 +107,7 @@ targets first:
 
 ```bash
 cmake --preset debug && cmake --build --preset debug
-ctest --test-dir build -R 'test_(collection_protocol|collection_coordinator|detector_protocol|bearing_calculator|python_pulse_mapper)'
+ctest --test-dir build -R 'test_(collection_protocol|collection_coordinator|detector_protocol|bearing_calculator|python_pulse_mapper|tag_database|tag_upload_coordinator|request_cache|detection_coordinator|command_retry)'
 ```
 
 See [controller/tests/README.md](tests/README.md) and [TESTING.md](../TESTING.md).

@@ -2,7 +2,7 @@
 
 #include "TunnelProtocol.h"
 #include "TagDatabase.h"
-#include "TagUploadCoordinator.h"
+#include "TunnelCommandDispatcher.h"
 #include "BearingCalculator.h"
 #include "CollectionCoordinator.h"
 #include "TelemetryCache.h"
@@ -24,7 +24,10 @@ class MavlinkSystem;
 class MonitoredProcess;
 class LogFileManager;
 
-class CommandHandler {
+// Owns the MAVLink side of GCS commands: framing, ACK transmission, process
+// management and logging. Command semantics live in TunnelCommandDispatcher,
+// which calls back through CommandActions / CommandLog.
+class CommandHandler : public CommandActions, public CommandLog {
 public:
     // Simulated directional noise source (a power line) for --simulator power-line.
     struct SimulatorNoiseSource {
@@ -64,6 +67,24 @@ public:
                                      const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
                                      uint32_t errorCode = 0);
 
+    // CommandActions
+    std::string startDetectionPipeline(const TunnelProtocol::StartDetectionInfo_t& info) override;
+    void        stopDetectionPipeline() override;
+    std::string detectionLogDir() override;
+    bool        captureInProgress() override;
+    std::string rawCapture(const mavlink_tunnel_t& tunnel) override { return _handleRawCapture(tunnel); }
+    bool        saveLogs() override { return _handleSaveLogs(); }
+    bool        cleanLogs() override { return _handleCleanLogs(); }
+    std::string airspyStatus() override;
+    std::string startCollection(const mavlink_tunnel_t& tunnel) override { return _handleStartCollection(tunnel); }
+    std::string startCollectionSlice(const mavlink_tunnel_t& tunnel) override { return _handleStartCollectionSlice(tunnel); }
+    std::string finishCollection(const mavlink_tunnel_t& tunnel) override { return _handleFinishCollection(tunnel); }
+
+    // CommandLog
+    void debug(const std::string& message) override;
+    void info(const std::string& message) override;
+    void error(const std::string& message) override;
+
 private:
     struct RotationSlice {
         uint32_t    slice_id;
@@ -89,12 +110,9 @@ private:
     };
 
 
-    void _sendCommandAck        (uint32_t command, uint32_t result, std::string& ackMessage);
-    bool _handleStartTags       (const mavlink_tunnel_t& tunnel);
-    bool _handleEndTags         (void);
-    bool _handleTag             (const mavlink_tunnel_t& tunnel);
-    std::string _handleStartDetection  (const mavlink_tunnel_t& tunnel);
-    bool _handleStopDetection   (bool waitForCompletion = false);
+    void _sendCommandAck        (const TunnelProtocol::AckInfo_t& ack);
+    // Requests a stop through the dispatcher and blocks until teardown ends (bounded).
+    void _stopDetectionAndWait  (void);
     std::string _handleRawCapture      (const mavlink_tunnel_t& tunnel);
     bool _handleSaveLogs        (void);
     bool _handleCleanLogs       (void);
@@ -111,6 +129,10 @@ private:
                                std::optional<uint32_t> expectedDetectors = std::nullopt,
                                std::optional<uint32_t> completedDetectors = std::nullopt,
                                float revisitHeadingDeg = std::numeric_limits<float>::quiet_NaN());
+    TunnelProtocol::CollectionStatus_t _collectionStatusMessage(uint32_t collectionId, uint32_t sliceId, uint32_t status, uint32_t errorCode = 0,
+                               std::optional<uint32_t> expectedDetectors = std::nullopt,
+                               std::optional<uint32_t> completedDetectors = std::nullopt,
+                               float revisitHeadingDeg = std::numeric_limits<float>::quiet_NaN());
     // Fits every (tag, candidate) from the given slices with the collection's antenna.
     BearingCalculator _bearingCalculatorFor(const std::vector<RotationSlice>& slices) const;
     bool _sendDetectorControl(uint32_t tagId, const TagTrackerDetectorProtocol::ArmMessage& message);
@@ -120,23 +142,20 @@ private:
     std::string _sdrPathStatusText(AirSpyDeviceType deviceType, double frequencyMhz) const;
     std::string _checkForAirSpy  (void);
 
-    std::string _tunnelCommandIdToString    (uint32_t command);
     std::string _tunnelCommandResultToString(uint32_t result);
 
     std::string _simulatorCommand(uint32_t radioCenterFrequencyHz);
 
     MavlinkSystem*                  _mavlink                = nullptr;
     TelemetryCache*                 _telemetryCache         = nullptr;
-    TagUploadCoordinator            _tagUpload;
-    const TagDatabase&              _tagDatabase            = _tagUpload.tags();
+    TunnelCommandDispatcher         _dispatcher;
+    const TagDatabase&              _tagDatabase            = _dispatcher.tags();
     const char*                     _homePath               = nullptr;
     std::vector<std::shared_ptr<MonitoredProcess>> _processes;
     bp::pipe*                       _airspyPipe             = nullptr;
     std::string                     _airspyPath;
     int                            _rawCaptureCount         = 0;
     std::atomic<int>                _analysisJobs           { 0 };      // post-flight analyzers still running
-    std::atomic<bool>               _detectionStarting      { false };  // start worker has not yet published DETECTING
-    std::atomic<bool>               _detectionStopping      { false };  // stop worker owns _processes teardown
     bool                            _simulatorMode          = false;
     std::string                     _simulatorPreset;
     double                          _simulatorSnrDb = 20.0;
@@ -164,6 +183,16 @@ private:
     std::vector<RotationSlice>                  _rotationSlices;
     std::map<uint32_t, uint8_t>                 _liveCandidate;         // tag_id -> lock candidate the GCS is currently shown
 
+    // Everything FINISH_COLLECTION pushed to the GCS (candidate replays,
+    // BEARING_RESULTs, STOPPED), kept so a FINISH retry after those frames were
+    // lost can re-send them; they have no ACK of their own.
+    struct FinishOutcome {
+        uint32_t                          collectionId = 0;
+        std::vector<std::vector<uint8_t>> frames;
+    };
+    FinishOutcome                               _lastFinishOutcome;
+    void _sendFinishFrame(FinishOutcome& outcome, const void* payload, size_t size);
+    void _replayFinishOutcome(uint32_t collectionId);
     // Live view switches to another candidate only when its pattern fit is
     // clearly better, to avoid flip-flopping on a marginal rotation.
     static constexpr float    kLiveCandidateSwitchMargin = 0.15f;

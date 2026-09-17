@@ -338,6 +338,14 @@ down on its own — the GCS decides whether to cancel.
    `residuals` is `;`-separated `heading:residual:weight` per detected heading,
    residual = `measured − fitted` power)
    in the rotation directory.
+6. **Replay on retry.** The candidate replays, `BEARING_RESULT`s and the final
+   `COLLECTION_STATUS_STOPPED` have no ACK of their own, so every frame the
+   finalize pushed is kept (`_lastFinishOutcome`, keyed by `collection_id`). A
+   `FINISH_COLLECTION` for an already-finished id (`CollectionCoordinator`
+   `Duplicate`) re-sends those frames before ACKing. On the GCS,
+   `PythonWaitForFinishOutcomeState` re-enters the FINISH send state (new
+   `request_id`) when neither outcome arrives within 5 s, up to 2 times, and
+   only then aborts the rotation.
 
 On the GCS the finite/NaN bearing, `n_valid_slices` and `confirmed` flag
 become one of four operator-facing states — *confirmed*, *unconfirmed* (lock

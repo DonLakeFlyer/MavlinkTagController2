@@ -8,7 +8,17 @@ using namespace TunnelProtocol;
 
 int main()
 {
-    static_assert(TUNNEL_PROTOCOL_VERSION == 3);
+    static_assert(TUNNEL_PROTOCOL_VERSION == 4);
+    static_assert(sizeof(HeaderInfo_t) == 8);
+    static_assert(offsetof(HeaderInfo_t, request_id) == 4);
+    static_assert(offsetof(AckInfo_t, request_id) == 12);
+    static_assert(sizeof(AckInfo_t) == MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
+    static_assert(sizeof(StartTagsInfo_t) == 16);
+    static_assert(sizeof(EndTagsInfo_t) == 16);
+    static_assert(offsetof(TagInfo_t, upload_id) == 8);
+    static_assert(offsetof(TagInfo_t, tag_index) == 12);
+    static_assert(offsetof(TagInfo_t, id) == 16);
+    static_assert(sizeof(TagInfo_t) <= MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
     static_assert(COMMAND_ID_START_COLLECTION == 15);
     static_assert(COMMAND_ID_START_COLLECTION_SLICE == 16);
     static_assert(COMMAND_ID_FINISH_COLLECTION == 17);
@@ -26,11 +36,11 @@ int main()
     static_assert(sizeof(BearingResult_t) <= MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
     static_assert(sizeof(PulseInfo_t) <= MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
     static_assert(sizeof(PythonPulseInfo_t) <= MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
-    static_assert(sizeof(Heartbeat_t) == 16);
+    static_assert(sizeof(Heartbeat_t) == 20);
 
     Heartbeat_t heartbeat {};
     heartbeat.protocol_version = TUNNEL_PROTOCOL_VERSION;
-    CHECK(heartbeat.protocol_version == 3);
+    CHECK(heartbeat.protocol_version == 4);
 
     StartCollection_t collection {};
     collection.antenna_id = ANTENNA_ID_RA23K;
