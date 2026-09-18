@@ -8,6 +8,9 @@ pkg_check_modules(CONTROLLER_ZMQ REQUIRED IMPORTED_TARGET libzmq)
 add_executable(MavlinkTagController2
     main.cpp
     CollectionCoordinator.cpp CollectionCoordinator.h
+    DetectionCoordinator.cpp DetectionCoordinator.h
+    RequestCache.cpp RequestCache.h
+    TunnelCommandDispatcher.cpp TunnelCommandDispatcher.h
     channelizerTuner.cpp channelizerTuner.h
     CommandHandler.cpp CommandHandler.h
     PythonPulseMapper.cpp PythonPulseMapper.h
@@ -117,4 +120,31 @@ if(BUILD_TESTING)
     target_include_directories(test_tag_upload_coordinator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_tag_upload_coordinator PRIVATE mavlink tunnel_protocol)
     add_test(NAME test_tag_upload_coordinator COMMAND test_tag_upload_coordinator)
+
+    add_executable(test_request_cache
+        tests/test_request_cache.cpp
+        RequestCache.cpp RequestCache.h
+    )
+    target_include_directories(test_request_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME test_request_cache COMMAND test_request_cache)
+
+    add_executable(test_detection_coordinator
+        tests/test_detection_coordinator.cpp
+        DetectionCoordinator.cpp DetectionCoordinator.h
+    )
+    target_include_directories(test_detection_coordinator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_detection_coordinator PRIVATE tunnel_protocol)
+    add_test(NAME test_detection_coordinator COMMAND test_detection_coordinator)
+
+    # Whole command/ack path with lost-ACK retries, no MAVLink or processes.
+    add_executable(test_command_retry
+        tests/test_command_retry.cpp
+        TunnelCommandDispatcher.cpp TunnelCommandDispatcher.h
+        DetectionCoordinator.cpp DetectionCoordinator.h
+        RequestCache.cpp RequestCache.h
+        TagUploadCoordinator.cpp TagUploadCoordinator.h
+    )
+    target_include_directories(test_command_retry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_command_retry PRIVATE mavlink tunnel_protocol)
+    add_test(NAME test_command_retry COMMAND test_command_retry)
 endif()

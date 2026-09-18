@@ -39,14 +39,39 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
 1. **Boot.** `setup/crontab-start-controller.sh` starts the controller on
    `serial:///dev/serial0:921600`. It heartbeats on the tunnel; TagTracker
    checks the protocol version.
-2. **Tags.** The GCS sends `START_TAGS`, one `TAG` per tag definition
-   (frequency, `tp`, `tip`, optional secondary `tip`, K, `pf`, thresholds),
-   then `END_TAGS`. `TagUploadCoordinator` (`Idle` → `Receiving` → `HasTags`,
-   or `Empty` when the list was cleared) validates each command against the
-   bracket state and fills `TagDatabase`. A retransmitted `TAG` or `END_TAGS`
-   after a lost ACK is accepted without effect; a `TAG` outside a bracket or
-   a conflicting redefinition of an id is NACKed.
-3. **START_DETECTION.** The controller probes the SDR, then rejects the
+   Every GCS command carries `HeaderInfo_t::request_id`, unique per command and
+   repeated byte-for-byte on retry. `TunnelCommandDispatcher` answers a
+   repeated id from `RequestCache` (16 entries, 120 s — longer than the
+   GCS's slowest retry window, START_COLLECTION's second retry at ~70 s) with the original ACK
+   instead of re-executing, and NACKs an id reused for a different command
+   or with a different payload.
+   Below that, each state machine is also idempotent on its own. A controller
+   restart mid-upload is not transparent — the outstanding `TAG`/`END_TAGS`
+   retry meets a fresh coordinator and is NACKed `outside START_TAGS/END_TAGS`,
+   and the heartbeat drops to `IDLE` — but the re-upload the operator then
+   sends is clean.
+2. **Tags.** The GCS sends `START_TAGS` (`upload_id`, `tag_count`), one `TAG`
+   per tag definition (`tag_index`, frequency, `tp`, `tip`, optional secondary
+   `tip`, K, `pf`, thresholds), then `END_TAGS` (`upload_id`, `tag_count`).
+   `TagUploadCoordinator` (`Idle` → `Receiving` → `HasTags`, or `Empty` when
+   the list was cleared) validates each command against the bracket state and
+   fills `TagDatabase`. An accepted `START_TAGS` clears the previous list and
+   drops `DetectionCoordinator` to `Idle`, so `START_DETECTION` is NACKed
+   until `END_TAGS` completes the new one; a `tag_count` above
+   `TagUploadCoordinator::kMaxTagCount` (5) is NACKed before anything is
+   cleared. A retransmitted `TAG` or `END_TAGS` after a lost ACK is
+   accepted without effect; a `TAG` outside a bracket, one carrying another
+   `upload_id`, or a conflicting redefinition of an id is NACKed. `END_TAGS`
+   is NACKed `incomplete: missing i,j` until every `tag_index` has arrived, so
+   a `TAG` lost in flight cannot silently shorten the list.
+3. **START_DETECTION.** `DetectionCoordinator` (`HasTags` → `Starting` →
+   `Detecting` → `Stopping` → `HasTags`) admits one start; a retry or a
+   restarted GCS sending START while `Starting`, or STOP while `Stopping`, is
+   ACKed success because the intent is already being carried out. Raw capture
+   is a state of the same machine (`HasTags` → `Capturing` → `HasTags`,
+   claimed synchronously before the RAW_CAPTURE ACK), so START and RAW_CAPTURE
+   cannot both hold the SDR. The
+   controller probes the SDR, then rejects the
    command (NACK with message) if two tags would bind the same detector UDP
    port — AirSpy HF is a single decimator channel, so it supports one tag;
    Mini tags must have distinct channelizer channels. Otherwise it creates

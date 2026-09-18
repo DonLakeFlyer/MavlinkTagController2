@@ -87,3 +87,6 @@ singlecomplex2double.m
 # Python
 __pycache__/
 *.pyc
+
+# Leftover TunnelProtocol submodule worktree; the header comes via CPM.
+tunnel-protocol/

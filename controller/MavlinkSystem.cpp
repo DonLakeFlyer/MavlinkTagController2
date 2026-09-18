@@ -216,7 +216,7 @@ void MavlinkSystem::startTunnelHeartbeatSender()
         int heartbeatCount = 0;
 
         while (true) {
-            TunnelProtocol::Heartbeat_t heartbeat;
+            TunnelProtocol::Heartbeat_t heartbeat {};
 
             heartbeat.header.command    = COMMAND_ID_HEARTBEAT;
             heartbeat.protocol_version  = TUNNEL_PROTOCOL_VERSION;
