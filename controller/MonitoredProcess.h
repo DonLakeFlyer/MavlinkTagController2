@@ -37,7 +37,8 @@ public:
 	/// Asks the child to exit without waiting. Pair with waitForExit().
 	void terminate(void);
 	/// Blocks until _run() has logged the exit, or timeout (then warns).
-	void waitForExit(std::chrono::milliseconds timeout = std::chrono::seconds(5));
+	/// Returns true if the process has exited.
+	bool waitForExit(std::chrono::milliseconds timeout = std::chrono::seconds(5));
 
 private:
 	void _run(void);

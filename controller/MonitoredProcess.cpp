@@ -61,14 +61,16 @@ void MonitoredProcess::terminate(void)
 	}
 }
 
-void MonitoredProcess::waitForExit(std::chrono::milliseconds timeout)
+bool MonitoredProcess::waitForExit(std::chrono::milliseconds timeout)
 {
 	// Callers tear down the log directory right after this; wait so the
 	// "Process stopped" line from _run() lands in it instead of racing it.
 	std::unique_lock<std::mutex> lock(_exitMutex);
-	if (!_exitCondition.wait_for(lock, timeout, [this]() { return _exited; })) {
+	const bool exited = _exitCondition.wait_for(lock, timeout, [this]() { return _exited; });
+	if (!exited) {
 		logWarn() << "MonitoredProcess::waitForExit timed out:" << _name;
 	}
+	return exited;
 }
 
 void MonitoredProcess::_run(void)
@@ -146,7 +148,6 @@ void MonitoredProcess::_run(void)
     }
 
 	if (_rawCaptureProcess) {
-		_mavlink->setHeartbeatStatus(HEARTBEAT_STATUS_HAS_TAGS);
 		_mavlink->sendStatusText("#Capture complete", MAV_SEVERITY_INFO);
 	}
 

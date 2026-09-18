@@ -87,6 +87,7 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
     case DETECTORS:
         logDebug() << "Created new detectors log directory:" << logDir;
         _logDirDetectors = logDir;
+        _logDirClosed.clear();
         break;
     case RAW_CAPTURE:
         logDebug() << "Created new raw capture log directory:" << logDir;
@@ -95,6 +96,7 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
     case ROTATION:
         logDebug() << "Created new rotation log directory:" << logDir;
         _logDirRotation = logDir;
+        _logDirClosed.clear();
         break;
     }
 
@@ -113,6 +115,10 @@ void LogFileManager::detectorsStarted()
 
 void LogFileManager::detectorsStopped()
 {
+    // Inside a rotation the detectors dir is the rotation dir, which stays open.
+    if (_logDirRotation.empty() && !_logDirDetectors.empty()) {
+        _logDirClosed = _logDirDetectors;
+    }
     _logDirDetectors.clear();
 }
 
@@ -128,6 +134,9 @@ void LogFileManager::rotationStarted()
 
 void LogFileManager::rotationStopped()
 {
+    if (!_logDirRotation.empty()) {
+        _logDirClosed = _logDirRotation;
+    }
     _logDirRotation.clear();
 }
 
@@ -287,6 +296,8 @@ void LogFileManager::saveLogsToSDCard()
 void LogFileManager::cleanLocalLogs()
 {
     logInfo() << "Cleaning local logs";
+    // The closed session dir is about to be deleted; stop mirroring into it.
+    _logDirClosed.clear();
 
     auto logDirs = _listLogFileDirs();
     if (logDirs.empty()) {
@@ -370,6 +381,9 @@ unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double t
         if (dirPath.string() == _logDirDetectors || dirPath.string() == _logDirRawCapture) {
             logDirs.pop_front();
             continue;
+        }
+        if (dirPath.string() == _logDirClosed) {
+            _logDirClosed.clear();
         }
 
         logInfo() << "LogRetention: removing " << logDirs.front()
