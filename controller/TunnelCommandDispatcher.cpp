@@ -5,11 +5,12 @@
 
 using namespace TunnelProtocol;
 
-TunnelCommandDispatcher::TunnelCommandDispatcher(CommandActions& actions, CommandLog& log,
+TunnelCommandDispatcher::TunnelCommandDispatcher(CommandActions& actions, CommandLog& log, OperationProgressReporter& progress,
                                                  DetectionCoordinator::HeartbeatSink onHeartbeatStatus,
                                                  RequestCache requestCache)
     : _actions(actions)
     , _log(log)
+    , _progress(progress)
     , _requestCache(std::move(requestCache))
     , _detection(std::move(onHeartbeatStatus))
 {
@@ -49,6 +50,7 @@ std::string TunnelCommandDispatcher::commandName(uint32_t command)
     case COMMAND_ID_BEARING_RESULT:         return "BEARING_RESULT";
     case COMMAND_ID_COLLECTION_STATUS:      return "COLLECTION_STATUS";
     case COMMAND_ID_PYTHON_PULSE:           return "PYTHON_PULSE";
+    case COMMAND_ID_OPERATION_PROGRESS:     return "OPERATION_PROGRESS";
     }
     return formatString("UNKNOWN(%u)", command);
 }
@@ -120,19 +122,34 @@ TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_dispatch(const Header
         _log.error(formatString("%s rejected: controller not idle", commandName(header.command).c_str()));
         return {false, "Controller in incorrect state"};
     }
+    // Idle in the detection sense still allows a log save/delete or the
+    // post-flight analysis to be running; only one such operation at a time.
+    if (header.command == COMMAND_ID_SAVE_LOGS || header.command == COMMAND_ID_CLEAN_LOGS || header.command == COMMAND_ID_RAW_CAPTURE) {
+        const std::string busy = _progress.busyMessage();
+        if (!busy.empty()) {
+            _log.error(formatString("%s rejected: %s", commandName(header.command).c_str(), busy.c_str()));
+            return {false, busy};
+        }
+    }
 
     switch (header.command) {
     case COMMAND_ID_START_TAGS:      return _startTags(tunnel);
     case COMMAND_ID_TAG:             return _tag(tunnel);
     case COMMAND_ID_END_TAGS:        return _endTags(tunnel);
     case COMMAND_ID_START_DETECTION: return _startDetection(tunnel);
-    case COMMAND_ID_STOP_DETECTION:  return _stopDetection();
+    case COMMAND_ID_STOP_DETECTION:  return _stopDetection(header.request_id);
     case COMMAND_ID_RAW_CAPTURE: {
         const std::string error = _actions.rawCapture(tunnel);
         return {error.empty(), error};
     }
-    case COMMAND_ID_SAVE_LOGS:       return {_actions.saveLogs(), ""};
-    case COMMAND_ID_CLEAN_LOGS:      return {_actions.cleanLogs(), ""};
+    case COMMAND_ID_SAVE_LOGS: {
+        const std::string error = _actions.saveLogs(header.request_id);
+        return {error.empty(), error};
+    }
+    case COMMAND_ID_CLEAN_LOGS: {
+        const std::string error = _actions.cleanLogs(header.request_id);
+        return {error.empty(), error};
+    }
     case COMMAND_ID_AIRSPY_STATUS: {
         const std::string error = _actions.airspyStatus();
         return {error.empty(), error};
@@ -304,6 +321,13 @@ std::string TunnelCommandDispatcher::startDetection(const StartDetectionInfo_t& 
     using R = DetectionCoordinator::Result;
     switch (_detection.requestStart()) {
     case R::Accepted: {
+        // HasTags is compatible with a running log save/delete or analysis.
+        const std::string busy = _progress.busyMessage();
+        if (!busy.empty()) {
+            _detection.startFinished(false);
+            _log.error("START_DETECTION rejected: " + busy);
+            return busy;
+        }
         const std::string error = _actions.startDetectionPipeline(info);
         if (!error.empty()) {
             _detection.startFinished(false);
@@ -344,12 +368,12 @@ TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_startDetection(const 
     return error.empty() ? Outcome{true, _actions.detectionLogDir()} : Outcome{false, error};
 }
 
-bool TunnelCommandDispatcher::stopDetection(std::string* error)
+bool TunnelCommandDispatcher::stopDetection(std::string* error, uint32_t requestId)
 {
     using R = DetectionCoordinator::Result;
     switch (_detection.requestStop()) {
     case R::Accepted:
-        _actions.stopDetectionPipeline();
+        _actions.stopDetectionPipeline(requestId);
         return true;
     case R::AlreadyStopping:
         _log.info("STOP_DETECTION while stop in progress; treating as satisfied");
@@ -369,9 +393,9 @@ bool TunnelCommandDispatcher::stopDetection(std::string* error)
     return false;
 }
 
-TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_stopDetection()
+TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_stopDetection(uint32_t requestId)
 {
     std::string error;
-    const bool ok = stopDetection(&error);
+    const bool ok = stopDetection(&error, requestId);
     return {ok, error};
 }
