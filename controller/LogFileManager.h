@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <list>
 
@@ -7,6 +9,9 @@ class LogFileManager
 {
 public:
 	static LogFileManager* instance();
+
+	/// (completed, total, message) as an operation advances; total is fixed for the call.
+	using ProgressFn = std::function<void(uint32_t, uint32_t, const std::string&)>;
 
 	typedef enum {
 		DETECTORS,
@@ -24,8 +29,17 @@ public:
 	void rotationStopped();
 	bool rotationActive() const { return !_logDirRotation.empty(); }
 
-	void saveLogsToSDCard();
-	void cleanLocalLogs();
+	enum class LogOpResult {
+		Failed,
+		Done,
+		NothingToDo
+	};
+
+	/// Copies every log directory to the flash drive, one file per progress step,
+	/// then unmounts it on the rPi.
+	LogOpResult saveLogsToSDCard(const ProgressFn& progress = {});
+	/// Deletes every log directory, one directory per progress step.
+	LogOpResult cleanLocalLogs(const ProgressFn& progress = {});
 
 	/// Check disk free space and prune oldest log directories if below threshold.
 	/// @param minFreePercent  Trigger cleanup when free space falls below this (default 25%)

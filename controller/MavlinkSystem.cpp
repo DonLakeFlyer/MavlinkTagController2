@@ -210,9 +210,9 @@ float MavlinkSystem::_cpuTemp()
 	return temp;
 }
 
-void MavlinkSystem::startTunnelHeartbeatSender()
+void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
 {
-    std::thread heartbeatSenderThread([this]() {
+    std::thread heartbeatSenderThread([this, tick = std::move(tick)]() {
         int heartbeatCount = 0;
 
         while (true) {
@@ -225,6 +225,10 @@ void MavlinkSystem::startTunnelHeartbeatSender()
             heartbeat.cpu_temp_c         = _cpuTemp();
 
             sendTunnelMessage(&heartbeat, sizeof(heartbeat));
+
+            if (tick) {
+                tick();
+            }
 
             if (++heartbeatCount >= 60) {
                 logInfo() << "Sent" << heartbeatCount << "tunnel heartbeats, status:" << _heartbeatStatus << " cpu_temp:" << heartbeat.cpu_temp_c;

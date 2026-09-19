@@ -8,7 +8,9 @@ using namespace TunnelProtocol;
 
 int main()
 {
-    static_assert(TUNNEL_PROTOCOL_VERSION == 4);
+    static_assert(TUNNEL_PROTOCOL_VERSION == 5);
+    static_assert(COMMAND_ID_OPERATION_PROGRESS == 21);
+    static_assert(offsetof(OperationProgress_t, message) == 28);
     static_assert(sizeof(HeaderInfo_t) == 8);
     static_assert(offsetof(HeaderInfo_t, request_id) == 4);
     static_assert(offsetof(AckInfo_t, request_id) == 12);
@@ -36,11 +38,12 @@ int main()
     static_assert(sizeof(BearingResult_t) <= MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
     static_assert(sizeof(PulseInfo_t) <= MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
     static_assert(sizeof(PythonPulseInfo_t) <= MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
+    static_assert(sizeof(OperationProgress_t) == MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
     static_assert(sizeof(Heartbeat_t) == 20);
 
     Heartbeat_t heartbeat {};
     heartbeat.protocol_version = TUNNEL_PROTOCOL_VERSION;
-    CHECK(heartbeat.protocol_version == 4);
+    CHECK(heartbeat.protocol_version == 5);
 
     StartCollection_t collection {};
     collection.antenna_id = ANTENNA_ID_RA23K;

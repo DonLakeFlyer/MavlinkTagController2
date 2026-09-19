@@ -5,14 +5,50 @@
 #include "platformHelpers.h"
 
 #include <chrono>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <iomanip>
 #include <ctime>
 #include <filesystem>
+#include <vector>
 
+#include <spawn.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
+extern char **environ;
+
 namespace fs = std::filesystem;
+
+namespace {
+
+// No shell: the mount point is the flash drive's volume label, which may hold
+// spaces or metacharacters. Returns the exit status, 128+signal, or -errno.
+int runNoShell(std::vector<const char*> argv)
+{
+    std::vector<char*> args;
+    for (const char* a : argv) {
+        args.push_back(const_cast<char*>(a));
+    }
+    args.push_back(nullptr);
+
+    pid_t pid = 0;
+    const int spawnErr = posix_spawnp(&pid, args[0], nullptr, nullptr, args.data(), environ);
+    if (spawnErr != 0) {
+        return -spawnErr;
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return -errno;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1;
+}
+
+} // namespace
 
 LogFileManager* LogFileManager::_instance = nullptr;
 
@@ -248,52 +284,93 @@ std::string LogFileManager::_getSDCardPath()
     return sdCardPath;
 }
 
-void LogFileManager::saveLogsToSDCard()
+LogFileManager::LogOpResult LogFileManager::saveLogsToSDCard(const ProgressFn& progress)
 {
     logInfo() << "Saving logs to SD card";
 
     std::string sdCardPath = _getSDCardPath();
     if (sdCardPath.empty()) {
-        return;
+        return LogOpResult::Failed;
     }
 
     auto logDirs = _listLogFileDirs();
     if (logDirs.empty()) {
         logInfo() << "No log directories found";
-        MavlinkSystem::instance()->sendStatusText("#No logs to save", MAV_SEVERITY_INFO);
-        return;
+        return LogOpResult::NothingToDo;
     }
 
-    MavlinkSystem::instance()->sendStatusText("#Saving logs", MAV_SEVERITY_INFO);
-
-    // Copy all directories in logDirs to //media/pi/LOGS
+    // Count first so the GCS can show a fraction; the unmount is the last step.
+    std::vector<fs::path> files;
+    bool allOk = true;
     for (const auto& logDir: logDirs) {
-        fs::path srcDir = _logsRoot + "/" + logDir;
-        fs::path dstDir = sdCardPath + "/" + logDir;
-        std::error_code errorCode;
-        logInfo() << "Copying directory " << srcDir << " to " << dstDir;
-        fs::copy(srcDir, dstDir, fs::copy_options::overwrite_existing | fs::copy_options::recursive, errorCode);
-        if (errorCode) {
-            logError() << "Failed to copy directory " << srcDir << " to " << dstDir << ": " << errorCode.message();
-            MavlinkSystem::instance()->sendStatusText("#Error during log save", MAV_SEVERITY_ERROR);
+        std::error_code ec;
+        for (fs::recursive_directory_iterator it(_logsRoot + "/" + logDir, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code statEc;
+            if (it->is_regular_file(statEc)) {
+                files.push_back(it->path());
+            } else if (statEc) {
+                logError() << "Cannot stat " << it->path() << ": " << statEc.message();
+                allOk = false;
+            }
+        }
+        // A truncated walk must not be reported as a complete save.
+        if (ec) {
+            logError() << "Failed to walk " << logDir << ": " << ec.message();
+            allOk = false;
         }
     }
+    const bool     onRPi   = isRunningOnRPi();
+    const uint32_t total   = static_cast<uint32_t>(files.size()) + (onRPi ? 1 : 0);
+    uint32_t       done    = 0;
 
-    if (!isRunningOnRPi()) {
-        MavlinkSystem::instance()->sendStatusText("#Log save complete", MAV_SEVERITY_INFO);
-        return;
+    for (const auto& src: files) {
+        // Pure string op: src came from an iterator rooted at _logsRoot, and fs::relative can throw.
+        const fs::path relative = src.lexically_relative(_logsRoot);
+        const fs::path dst      = fs::path(sdCardPath) / relative;
+        std::error_code ec;
+        fs::create_directories(dst.parent_path(), ec);
+        if (!ec) {
+            fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+        }
+        if (ec) {
+            logError() << "Failed to copy " << src << " to " << dst << ": " << ec.message();
+            allOk = false;
+        }
+        if (progress) {
+            progress(++done, total, relative.string());
+        }
+    }
+    if (!allOk) {
+        MavlinkSystem::instance()->sendStatusText("#Error during log save", MAV_SEVERITY_ERROR);
     }
 
-    auto unmountCommand = formatString("sudo umount %s", sdCardPath.c_str());
-    int unmountResult = std::system(unmountCommand.c_str());
+    if (!onRPi) {
+        MavlinkSystem::instance()->sendStatusText("#Log save complete", MAV_SEVERITY_INFO);
+        return allOk ? LogOpResult::Done : LogOpResult::Failed;
+    }
+
+    if (progress) {
+        progress(done, total, "Unmounting flash drive");
+    }
+    // -n: fail instead of prompting when the passwordless sudoers rule is missing.
+    const int unmountResult = runNoShell({"sudo", "-n", "umount", sdCardPath.c_str()});
     if (unmountResult == 0) {
+        if (progress) {
+            progress(++done, total, "Flash drive unmounted");
+        }
         MavlinkSystem::instance()->sendStatusText("#Log save complete", MAV_SEVERITY_INFO);
-    } else {
-        MavlinkSystem::instance()->sendStatusText("#Unmount failed", MAV_SEVERITY_ERROR);
+        return allOk ? LogOpResult::Done : LogOpResult::Failed;
     }
+    if (unmountResult < 0) {
+        logError() << "umount " << sdCardPath << " could not be run: " << strerror(-unmountResult);
+    } else {
+        logError() << "umount " << sdCardPath << " failed with status " << unmountResult;
+    }
+    MavlinkSystem::instance()->sendStatusText("#Unmount failed", MAV_SEVERITY_ERROR);
+    return LogOpResult::Failed;
 }
 
-void LogFileManager::cleanLocalLogs()
+LogFileManager::LogOpResult LogFileManager::cleanLocalLogs(const ProgressFn& progress)
 {
     logInfo() << "Cleaning local logs";
     // The closed session dir is about to be deleted; stop mirroring into it.
@@ -302,10 +379,12 @@ void LogFileManager::cleanLocalLogs()
     auto logDirs = _listLogFileDirs();
     if (logDirs.empty()) {
         logInfo() << "No log directories found";
-        return;
+        return LogOpResult::NothingToDo;
     }
 
-    // Delete all directories in logDirs
+    const uint32_t total = static_cast<uint32_t>(logDirs.size());
+    uint32_t       done  = 0;
+    bool           allOk = true;
     for (const auto& logDir: logDirs) {
         fs::path dirPath = _logsRoot + "/" + logDir;
         std::error_code errorCode;
@@ -314,10 +393,15 @@ void LogFileManager::cleanLocalLogs()
         if (errorCode) {
             logError() << "Failed to remove directory " << dirPath << ": " << errorCode.message();
             MavlinkSystem::instance()->sendStatusText("#Error during log delete", MAV_SEVERITY_ERROR);
+            allOk = false;
+        }
+        if (progress) {
+            progress(++done, total, logDir);
         }
     }
 
     logInfo() << "Local logs deleted";
+    return allOk ? LogOpResult::Done : LogOpResult::Failed;
 }
 
 unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double targetFreePercent, unsigned int minKeepDirs)

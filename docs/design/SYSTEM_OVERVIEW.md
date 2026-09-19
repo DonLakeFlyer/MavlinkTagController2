@@ -97,6 +97,31 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
 Steps 3–5 in detail: [COLLECTION_FLOW.md](COLLECTION_FLOW.md). Inside one
 cycle: [DETECTOR_PIPELINE.md](DETECTOR_PIPELINE.md).
 
+### Long-running commands and progress
+
+The ACK for `START_DETECTION`, `STOP_DETECTION`, `RAW_CAPTURE`, `SAVE_LOGS`
+and `CLEAN_LOGS` means *accepted*; the work runs on a worker thread. Its
+state reaches the GCS as `OPERATION_PROGRESS` frames
+(`OperationProgressReporter`, `controller/OperationProgress.cpp`) carrying the
+originating command and `request_id`, `RUNNING` / `COMPLETE` / `FAILED`,
+`step` of `step_count` (0 = indeterminate) and a short message. A frame is
+sent on begin, on every step change and on finish, and the RUNNING frame is
+re-sent from the 1 Hz heartbeat thread so a lost frame cannot strand the GCS
+indicator. Steps: one per pipeline process for start/stop, one per elapsed
+second of the 13 s raw capture, one per file for save logs (plus the unmount
+on the rPi), one per session directory for clean logs; the post-flight
+analysis that follows a stop is reported indeterminate under
+`STOP_DETECTION` with `request_id` 0.
+
+The reporter is also the concurrency gate: `TunnelCommandDispatcher` NACKs a
+second long-running command with `Busy: <operation> in progress` while one is
+running (`STOP_DETECTION` is exempt — `DetectionCoordinator` already refuses
+it while `Starting`, and it must be able to interrupt detection). Every
+transition is logged as `operation_progress command=… request_id=… state=…
+step=x/y msg=…`. Spoken status texts remain only for completion and failure
+(`#Log save complete`, `#Logs deleted`, `#Capture complete`, the hung-process
+alerts).
+
 ## Frequency plan
 
 The HF+ has a DC spur. The radio is tuned 10 kHz **above** the tag, so the tag
