@@ -8,9 +8,16 @@ Documents are filed by the question they answer, not by component.
 | [analysis/](analysis/) | What did we **measure**? | Dated (`YYYY-MM_` prefix). Never rewritten after the fact; at most a "superseded by" line is added. |
 | [proposals/](proposals/) | What might we **change**? | Every proposal has a `Status:` line and a row in [proposals/README.md](proposals/README.md). When built, the design doc is updated and the proposal moves to `archive/`. |
 | [archive/](archive/) | What is **no longer true**? | Banner at the top; otherwise frozen. |
+| [hardware/](hardware/) | What does the pipeline **fly on**? | Current airframe/avionics reference, kept up to date as parts change; not dated. |
 
 Component READMEs (beside the code) answer only *what is this and how do I run
 it* — see the contract below.
+
+## hardware/
+
+| Doc | Scope |
+| --- | --- |
+| [PDC_VHF_DRONE.md](hardware/PDC_VHF_DRONE.md) | The PDC wild-dog tracking quad: frame, motors/ESCs/props, batteries, power chain, Pixhawk 6X + CM4, SDR, antenna, GCS, tags |
 
 ## design/
 
