@@ -9,6 +9,7 @@ add_executable(MavlinkTagController2
     main.cpp
     CollectionCoordinator.cpp CollectionCoordinator.h
     DetectionCoordinator.cpp DetectionCoordinator.h
+    OperationProgress.cpp OperationProgress.h
     RequestCache.cpp RequestCache.h
     TunnelCommandDispatcher.cpp TunnelCommandDispatcher.h
     channelizerTuner.cpp channelizerTuner.h
@@ -141,10 +142,19 @@ if(BUILD_TESTING)
         tests/test_command_retry.cpp
         TunnelCommandDispatcher.cpp TunnelCommandDispatcher.h
         DetectionCoordinator.cpp DetectionCoordinator.h
+        OperationProgress.cpp OperationProgress.h
         RequestCache.cpp RequestCache.h
         TagUploadCoordinator.cpp TagUploadCoordinator.h
     )
     target_include_directories(test_command_retry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_command_retry PRIVATE mavlink tunnel_protocol)
     add_test(NAME test_command_retry COMMAND test_command_retry)
+
+    add_executable(test_operation_progress
+        tests/test_operation_progress.cpp
+        OperationProgress.cpp OperationProgress.h
+    )
+    target_include_directories(test_operation_progress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_operation_progress PRIVATE tunnel_protocol)
+    add_test(NAME test_operation_progress COMMAND test_operation_progress)
 endif()

@@ -36,13 +36,17 @@ public:
 	void stop	(std::chrono::milliseconds timeout = std::chrono::seconds(5));
 	/// Asks the child to exit without waiting. Pair with waitForExit().
 	void terminate(void);
-	/// Blocks until _run() has logged the exit, or timeout (then warns).
+	/// Blocks until _run() has logged the exit, or timeout (then warns unless quiet).
 	/// Returns true if the process has exited.
-	bool waitForExit(std::chrono::milliseconds timeout = std::chrono::seconds(5));
+	bool waitForExit(std::chrono::milliseconds timeout = std::chrono::seconds(5), bool quiet = false);
+
+	const std::string& name() const { return _name; }
+	/// Valid once waitForExit() has returned true; 255 if the child never ran.
+	int  exitCode() const { std::lock_guard<std::mutex> lock(_exitMutex); return _exitCode; }
 
 private:
 	void _run(void);
-	void _signalExited(void);
+	void _signalExited(int exitCode);
 
 	MavlinkSystem*					_mavlink;
 	std::string						_name;
@@ -50,9 +54,10 @@ private:
 	std::string						_logPath;
 	bp::child*						_childProcess 	= NULL;
 	bool							_stopped		= false;
-	std::mutex						_exitMutex;
+	mutable std::mutex				_exitMutex;
 	std::condition_variable			_exitCondition;
-	bool							_exited			= false;
+	bool							_exited			= false;	// guarded by _exitMutex
+	int								_exitCode		= 255;		// guarded by _exitMutex
 	IntermediatePipeType			_intermediatePipeType;
 	bp::pipe*						_intermediatePipe;
 	bool							_rawCaptureProcess;

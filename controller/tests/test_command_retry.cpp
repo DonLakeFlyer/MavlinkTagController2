@@ -31,16 +31,18 @@ struct FakeActions : CommandActions {
     int          finishCalls = 0;
     int          replayCalls = 0;
     uint32_t     lastReplayId = 0;
+    uint32_t     lastStopRequestId = 0;
+    uint32_t     lastSaveRequestId = 0;
     std::string  startError;            // returned by startDetectionPipeline
     std::string  collectionError;
     StartDetectionInfo_t lastStart {};
 
     std::string startDetectionPipeline(const StartDetectionInfo_t& info) override { ++startCalls; lastStart = info; return startError; }
-    void        stopDetectionPipeline() override { ++stopCalls; }
+    void        stopDetectionPipeline(uint32_t requestId) override { ++stopCalls; lastStopRequestId = requestId; }
     std::string detectionLogDir() override { return "/logs/det"; }
     std::string rawCapture(const mavlink_tunnel_t&) override { ++rawCaptureCalls; return ""; }
-    bool        saveLogs() override { ++saveLogsCalls; return true; }
-    bool        cleanLogs() override { ++cleanLogsCalls; return true; }
+    std::string saveLogs(uint32_t requestId) override { ++saveLogsCalls; lastSaveRequestId = requestId; return ""; }
+    std::string cleanLogs(uint32_t) override { ++cleanLogsCalls; return ""; }
     std::string airspyStatus() override { ++airspyStatusCalls; return ""; }
     std::string startCollection(const mavlink_tunnel_t&) override { ++startCollectionCalls; return collectionError; }
     std::string startCollectionSlice(const mavlink_tunnel_t&) override { ++sliceCalls; return ""; }
@@ -64,7 +66,9 @@ struct Gcs {
     FakeActions           actions;
     VectorLog             log;
     std::vector<uint16_t> heartbeats;
-    TunnelCommandDispatcher dispatcher { actions, log, [this](uint16_t s) { heartbeats.push_back(s); } };
+    std::vector<OperationProgress_t> progressFrames;
+    OperationProgressReporter progress { [this](const OperationProgress_t& f) { progressFrames.push_back(f); } };
+    TunnelCommandDispatcher dispatcher { actions, log, progress, [this](uint16_t s) { heartbeats.push_back(s); } };
     uint32_t              nextRequestId = 1000;
 
     template <typename T>
@@ -601,6 +605,73 @@ void testLegacyRequestIdZeroIsNeverDeduped()
     CHECK(g.dispatcher.requestCache().size() == 0);
 }
 
+// One long-running operation at a time. While one is RUNNING (here a log
+// delete, as the real action would have begun it) every other long-running
+// command is NACKed "Busy", a retry of an already-accepted command still gets
+// its replayed ACK, and finish() reopens the gate.
+void testLongRunningCommandsRefusedWhileBusy()
+{
+    Gcs g;
+    uploadTags(g, 100, {2});
+    StopDetectionInfo_t bare {};
+
+    const auto tClean = g.prepare(bare, COMMAND_ID_CLEAN_LOGS);
+    CHECK(ok(g.resend(tClean)));
+    CHECK(g.progress.begin(COMMAND_ID_CLEAN_LOGS, 1, "Deleting logs", 3));
+    CHECK(g.progress.busy());
+
+    auto a = g.send(bare, COMMAND_ID_SAVE_LOGS);
+    CHECK(nack(a) && std::string(a.message) == "Busy: Deleting logs in progress");
+    CHECK(g.actions.saveLogsCalls == 0);
+    a = g.send(bare, COMMAND_ID_CLEAN_LOGS);
+    CHECK(nack(a) && g.actions.cleanLogsCalls == 1);
+    RawCaptureInfo_t rc {};
+    a = g.send(rc, COMMAND_ID_RAW_CAPTURE);
+    CHECK(nack(a) && g.actions.rawCaptureCalls == 0);
+    StartDetectionInfo_t sd {}; sd.radio_center_frequency_hz = 147970000;
+    a = g.send(sd, COMMAND_ID_START_DETECTION);
+    CHECK(nack(a) && std::string(a.message) == "Busy: Deleting logs in progress");
+    CHECK(g.actions.startCalls == 0);
+    CHECK(g.dispatcher.detection().state() == DState::HasTags);   // Starting was released
+    CHECK(g.log.contains("Busy: Deleting logs in progress"));
+
+    // Short commands and retries are unaffected.
+    CHECK(ok(g.send(bare, COMMAND_ID_AIRSPY_STATUS)));
+    CHECK(ok(g.resend(tClean)));
+    CHECK(g.actions.cleanLogsCalls == 1);
+
+    g.progress.finish(true);
+    CHECK(!g.progress.busy());
+    CHECK(ok(g.send(bare, COMMAND_ID_SAVE_LOGS)));
+    CHECK(g.actions.saveLogsCalls == 1);
+    CHECK(ok(g.send(sd, COMMAND_ID_START_DETECTION)));
+    CHECK(g.actions.startCalls == 1);
+}
+
+// Stop is never gated by the reporter: the start it interrupts is the only
+// operation that can be running while Detecting.
+void testStopDetectionNotGatedAndCarriesRequestId()
+{
+    Gcs g;
+    uploadTags(g, 110, {2});
+    StartDetectionInfo_t sd {}; sd.radio_center_frequency_hz = 147970000;
+    CHECK(ok(g.send(sd, COMMAND_ID_START_DETECTION)));
+    g.dispatcher.detection().startFinished(true);
+    CHECK(g.progress.begin(COMMAND_ID_START_DETECTION, 1, "Starting detection", 3));
+
+    StopDetectionInfo_t stop {};
+    const uint32_t id = g.nextRequestId;
+    CHECK(ok(g.send(stop, COMMAND_ID_STOP_DETECTION)));
+    CHECK(g.actions.stopCalls == 1 && g.actions.lastStopRequestId == id);
+
+    // Request ids reach the log actions too.
+    g.progress.finish(true);
+    g.dispatcher.detection().stopFinished();
+    const uint32_t saveId = g.nextRequestId;
+    CHECK(ok(g.send(stop, COMMAND_ID_SAVE_LOGS)));
+    CHECK(g.actions.lastSaveRequestId == saveId);
+}
+
 } // namespace
 
 int main()
@@ -623,6 +694,8 @@ int main()
     testMalformedFrames();
     testControllerRestartFallsBackToStateMachines();
     testLegacyRequestIdZeroIsNeverDeduped();
+    testLongRunningCommandsRefusedWhileBusy();
+    testStopDetectionNotGatedAndCarriesRequestId();
     std::printf("test_command_retry: all tests passed\n");
     return 0;
 }

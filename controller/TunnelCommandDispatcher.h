@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DetectionCoordinator.h"
+#include "OperationProgress.h"
 #include "RequestCache.h"
 #include "TagUploadCoordinator.h"
 #include "TunnelProtocol.h"
@@ -21,13 +22,15 @@ public:
     /// detection().startFinished(true) from its worker.
     virtual std::string startDetectionPipeline(const TunnelProtocol::StartDetectionInfo_t& info) = 0;
     /// Tear the pipeline down; must later call detection().stopFinished().
-    virtual void        stopDetectionPipeline() = 0;
+    /// requestId is the STOP_DETECTION request, 0 for controller-initiated stops.
+    virtual void        stopDetectionPipeline(uint32_t requestId) = 0;
     /// Payload of the START_DETECTION success ACK.
     virtual std::string detectionLogDir() = 0;
 
     virtual std::string rawCapture(const mavlink_tunnel_t& tunnel) = 0;
-    virtual bool        saveLogs() = 0;
-    virtual bool        cleanLogs() = 0;
+    /// "" on success or an error message for the NACK.
+    virtual std::string saveLogs(uint32_t requestId) = 0;
+    virtual std::string cleanLogs(uint32_t requestId) = 0;
     virtual std::string airspyStatus() = 0;
     virtual std::string startCollection(const mavlink_tunnel_t& tunnel) = 0;
     virtual std::string startCollectionSlice(const mavlink_tunnel_t& tunnel) = 0;
@@ -48,10 +51,12 @@ public:
 // Decodes GCS tunnel commands, dedupes retries via RequestCache, drives the
 // tag-upload and detection state machines, and returns the ACK to send.
 // Collection commands are validated here and delegated whole; their state
-// lives in CollectionCoordinator inside CommandHandler.
+// lives in CollectionCoordinator inside CommandHandler. Long-running commands
+// (START/STOP_DETECTION, RAW_CAPTURE, SAVE/CLEAN_LOGS) are NACKed "Busy"
+// while the OperationProgressReporter has one running.
 class TunnelCommandDispatcher {
 public:
-    TunnelCommandDispatcher(CommandActions& actions, CommandLog& log,
+    TunnelCommandDispatcher(CommandActions& actions, CommandLog& log, OperationProgressReporter& progress,
                             DetectionCoordinator::HeartbeatSink onHeartbeatStatus = {},
                             RequestCache requestCache = RequestCache());
 
@@ -61,10 +66,12 @@ public:
     /// collection path. Returns "" on success (including an in-flight start).
     std::string startDetection(const TunnelProtocol::StartDetectionInfo_t& info);
     /// Returns true if detection is stopping or already stopped as a result.
-    bool stopDetection(std::string* error = nullptr);
+    /// requestId: the STOP_DETECTION request, 0 for controller-initiated stops.
+    bool stopDetection(std::string* error = nullptr, uint32_t requestId = 0);
 
     DetectionCoordinator&       detection()          { return _detection; }
     const DetectionCoordinator& detection()    const { return _detection; }
+    OperationProgressReporter&  progress()           { return _progress; }
     TagUploadCoordinator&       tagUpload()          { return _tagUpload; }
     const TagUploadCoordinator& tagUpload()    const { return _tagUpload; }
     const TagDatabase&          tags()         const { return _tagUpload.tags(); }
@@ -86,12 +93,13 @@ private:
     Outcome _tag(const mavlink_tunnel_t& tunnel);
     Outcome _endTags(const mavlink_tunnel_t& tunnel);
     Outcome _startDetection(const mavlink_tunnel_t& tunnel);
-    Outcome _stopDetection();
+    Outcome _stopDetection(uint32_t requestId);
     bool    _controllerIdle();
 
-    CommandActions&      _actions;
-    CommandLog&          _log;
-    RequestCache         _requestCache;
-    TagUploadCoordinator _tagUpload;
-    DetectionCoordinator _detection;
+    CommandActions&            _actions;
+    CommandLog&                _log;
+    OperationProgressReporter& _progress;
+    RequestCache               _requestCache;
+    TagUploadCoordinator       _tagUpload;
+    DetectionCoordinator       _detection;
 };

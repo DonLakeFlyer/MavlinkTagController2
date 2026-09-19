@@ -9,7 +9,6 @@
 #include "boost_process_compat.h"
 #include "detector_protocol.h"
 
-#include <atomic>
 #include <condition_variable>
 #include <limits>
 #include <map>
@@ -63,17 +62,19 @@ public:
 
     // uavrt_detection pulses: forwarded to the GCS as PulseInfo_t, never part of a collection.
     void handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo);
+    // For the 1 Hz heartbeat thread: re-sends the RUNNING operation frame.
+    void heartbeatTick() { _progress.resendIfRunning(); }
     void handlePythonDetectorMessage(const TagTrackerDetectorProtocol::Header& header,
                                      const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
                                      uint32_t errorCode = 0);
 
     // CommandActions
     std::string startDetectionPipeline(const TunnelProtocol::StartDetectionInfo_t& info) override;
-    void        stopDetectionPipeline() override;
+    void        stopDetectionPipeline(uint32_t requestId) override;
     std::string detectionLogDir() override;
     std::string rawCapture(const mavlink_tunnel_t& tunnel) override { return _handleRawCapture(tunnel); }
-    bool        saveLogs() override { return _handleSaveLogs(); }
-    bool        cleanLogs() override { return _handleCleanLogs(); }
+    std::string saveLogs(uint32_t requestId) override { return _handleSaveLogs(requestId); }
+    std::string cleanLogs(uint32_t requestId) override { return _handleCleanLogs(requestId); }
     std::string airspyStatus() override;
     std::string startCollection(const mavlink_tunnel_t& tunnel) override { return _handleStartCollection(tunnel); }
     std::string startCollectionSlice(const mavlink_tunnel_t& tunnel) override { return _handleStartCollectionSlice(tunnel); }
@@ -115,12 +116,14 @@ private:
     // Returns false if detection is still Stopping when the wait expires.
     bool _stopDetectionAndWait  (void);
     std::string _handleRawCapture      (const mavlink_tunnel_t& tunnel);
-    bool _handleSaveLogs        (void);
-    bool _handleCleanLogs       (void);
+    std::string _handleSaveLogs        (uint32_t requestId);
+    std::string _handleCleanLogs       (uint32_t requestId);
     void _handleTunnelMessage   (const mavlink_message_t& message);
     void _handlePythonPulse     (const TagTrackerDetectorProtocol::Header& header, const TagTrackerDetectorProtocol::PulsePayload& payload);
     void _sendPythonHeartbeat   (uint32_t tagId);
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
+    // Adds a started pipeline process and reports it as one start-detection step.
+    void _trackProcess          (std::shared_ptr<MonitoredProcess> process);
     void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort = 0);
     bool _writeSessionInfo      (const TunnelProtocol::StartDetectionInfo_t& startDetection, AirSpyDeviceType deviceType, bool isHFMode);
     std::string _handleStartCollection      (const mavlink_tunnel_t& tunnel);
@@ -149,6 +152,7 @@ private:
 
     MavlinkSystem*                  _mavlink                = nullptr;
     TelemetryCache*                 _telemetryCache         = nullptr;
+    OperationProgressReporter       _progress;                          // must precede _dispatcher, which holds a reference
     TunnelCommandDispatcher         _dispatcher;
     const TagDatabase&              _tagDatabase            = _dispatcher.tags();
     const char*                     _homePath               = nullptr;
@@ -156,7 +160,6 @@ private:
     bp::pipe*                       _airspyPipe             = nullptr;
     std::string                     _airspyPath;
     int                            _rawCaptureCount         = 0;
-    std::atomic<int>                _analysisJobs           { 0 };      // post-flight analyzers still running
     bool                            _simulatorMode          = false;
     std::string                     _simulatorPreset;
     double                          _simulatorSnrDb = 20.0;

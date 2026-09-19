@@ -270,7 +270,7 @@ int main(int argc, char** argv)
 	while (true) {
 		if (!tunnelHeartbeatsStarted && mavlink->gcsSystemId().has_value()) {
 			tunnelHeartbeatsStarted = true;
-			mavlink->startTunnelHeartbeatSender();
+			mavlink->startTunnelHeartbeatSender([&commandHandler]() { commandHandler.heartbeatTick(); });
 			// Create status text message to indicate ready. Include IP of the rPi for user reference.
 			std::string ipAddress = "Unknown IP";
 

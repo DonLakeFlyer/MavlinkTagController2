@@ -50,7 +50,9 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetry
                                const SimulatorNoiseSource& simulatorNoiseSource, double detectorImpulseBlankFactor)
     : _mavlink          (mavlink)
     , _telemetryCache   (telemetryCache)
-    , _dispatcher       (*this, *this, [mavlink](uint16_t status) { mavlink->setHeartbeatStatus(status); })
+    , _progress         ([mavlink](const OperationProgress_t& frame) { OperationProgress_t copy = frame; mavlink->sendTunnelMessage(&copy, sizeof(copy)); },
+                         [](const std::string& line) { logInfo() << line; })
+    , _dispatcher       (*this, *this, _progress, [mavlink](uint16_t status) { mavlink->setHeartbeatStatus(status); })
     , _homePath         (homeDir().c_str())
     , _simulatorMode    (simulatorMode)
     , _simulatorPreset  (simulatorPreset)
@@ -113,6 +115,12 @@ bool CommandHandler::_stopDetectionAndWait()
     return _dispatcher.detection().waitWhile(DetectionCoordinator::State::Stopping, std::chrono::seconds(15));
 }
 
+void CommandHandler::_trackProcess(std::shared_ptr<MonitoredProcess> process)
+{
+    _processes.push_back(process);
+    _progress.update(static_cast<uint32_t>(_processes.size()), process->name());
+}
+
 void CommandHandler::_startDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel)
 {
     std::string commandStr  = formatString("%s/repos/uavrt_detection/uavrt_detection %s",
@@ -129,7 +137,7 @@ void CommandHandler::_startDetector(LogFileManager* logFileManager, const Tunnel
                                                 MonitoredProcess::NoPipe,
                                                 nullptr);
     detectorProc->start();
-    _processes.push_back(detectorProc);
+    _trackProcess(detectorProc);
 }
 
 void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort)
@@ -205,7 +213,7 @@ void CommandHandler::_startPythonDetector(LogFileManager* logFileManager, const 
                                                     _handleDetectorProcessFailure(tagId, exitCode);
                                                 });
     detectorProc->start();
-    _processes.push_back(detectorProc);
+    _trackProcess(detectorProc);
 }
 
 // session.json: the GCS request as received plus the rates/thresholds the
@@ -308,6 +316,19 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
     }
 
     auto logFileManager = LogFileManager::instance();
+
+    // Claim the operation before any side effect so a refusal needs no undo.
+    // SDR path processes + one detector per tag (uavrt: one more per dual-rate tag).
+    uint32_t stepCount = deviceType == AirSpyDeviceType::MINI ? 3 : 2;
+    for (const TunnelProtocol::TagInfo_t& tagInfo: _tagDatabase) {
+        stepCount += (requestedStart.detection_mode != DETECTION_MODE_PYTHON && tagInfo.intra_pulse2_msecs != 0) ? 2 : 1;
+    }
+    if (!_progress.begin(COMMAND_ID_START_DETECTION, requestedStart.header.request_id, "Starting detection", stepCount)) {
+        const std::string busy = _progress.busyMessage();
+        logError() << "COMMAND_ID_START_DETECTION refused:" << busy;
+        return busy;
+    }
+
     // Freeze before the log dir is named and before DETECTING is published, so a
     // concurrent stop cannot unfreeze and then be re-frozen by this start.
     _mavlink->setVehicleTimeFrozen(true);
@@ -359,7 +380,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
                                                         MonitoredProcess::NoPipe,
                                                         nullptr);
                 simProc->start();
-                _processes.push_back(simProc);
+                _trackProcess(simProc);
 
                 // Start airspyhf_decimator (subscribes to ZMQ, decimates by 200 to get 3840 Hz)
                 // --shift-khz 0 because the simulator generates tags at DC (no hardware DC spur to avoid)
@@ -374,7 +395,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
                                                         MonitoredProcess::NoPipe,
                                                         nullptr);
                 decimatorProc->start();
-                _processes.push_back(decimatorProc);
+                _trackProcess(decimatorProc);
             } else if (deviceType == AirSpyDeviceType::HF) {
                 // HF Pipeline: airspyhf_zeromq_rx --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
                 airspyReceiverProcessName = "airspyhf_zeromq_rx";
@@ -399,7 +420,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
                                                         MonitoredProcess::NoPipe,
                                                         nullptr);
                 airspyProc->start();
-                _processes.push_back(airspyProc);
+                _trackProcess(airspyProc);
 
                 // Start airspyhf_decimator (subscribes to ZMQ, decimates by 200 to get 3840 Hz)
                 // --shift-khz 10 compensates for the +10 kHz receiver tune offset with this shifter convention.
@@ -416,7 +437,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
                                                         MonitoredProcess::NoPipe,
                                                         nullptr);
                 decimatorProc->start();
-                _processes.push_back(decimatorProc);
+                _trackProcess(decimatorProc);
             } else {
                 _airspyPipe = new bp::pipe();
                 // Mini Pipeline: airspy_rx -> csdr-uavrt -> channelizer -> UDP 20000+ -> detectors
@@ -443,7 +464,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
                                                         MonitoredProcess::OutputPipe,
                                                         _airspyPipe);
                 airspyProc->start();
-                _processes.push_back(airspyProc);
+                _trackProcess(airspyProc);
 
                 logPath = logFileManager->filename(LogFileManager::DETECTORS, "csdr-uavrt", "log");
                 auto csdrProc = std::make_shared<MonitoredProcess>(
@@ -454,7 +475,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
                                                         MonitoredProcess::InputPipe,
                                                         _airspyPipe);
                 csdrProc->start();
-                _processes.push_back(csdrProc);
+                _trackProcess(csdrProc);
 
                 commandStr  = formatString("%s/repos/%s/%s %s",
                                     _homePath,
@@ -470,7 +491,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
                                                             MonitoredProcess::NoPipe,
                                                             nullptr);
                 channelizeProc->start();
-                _processes.push_back(channelizeProc);
+                _trackProcess(channelizeProc);
             }
 
         bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
@@ -515,6 +536,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
 
         std::string startedStr = formatString("All processes started at center hz: %.3f", (double)startDetection.radio_center_frequency_hz / 1000000.0);
         _mavlink->sendStatusText(startedStr.c_str(), MAV_SEVERITY_INFO);
+        _progress.finish(true, "Detection running");
 
         _dispatcher.detection().startFinished(true);
     }).detach();
@@ -537,14 +559,12 @@ void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
     logInfo() << "Running post-flight analysis:" << pythonCmd << "-u" << script << logDir;
 
     // posix_spawnp with an argv array: no shell, and exec failures come back as errno.
-    // _analysisJobs keeps SAVE/CLEAN_LOGS from touching the directory mid-run.
-    _analysisJobs.fetch_add(1);
+    // The running operation keeps SAVE/CLEAN_LOGS from touching the directory mid-run.
+    if (!_progress.begin(COMMAND_ID_STOP_DETECTION, 0, "Post-flight analysis")) {
+        logWarn() << "Post-flight analysis skipped: another operation is running";
+        return;
+    }
     std::thread([this, pythonCmd, script, logDir]() {
-        struct JobGuard {
-            std::atomic<int>& n;
-            ~JobGuard() { n.fetch_sub(1); }
-        } guard{_analysisJobs};
-
         char* const argv[] = {
             const_cast<char*>(pythonCmd.c_str()),
             const_cast<char*>("-u"),
@@ -557,28 +577,34 @@ void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
         int spawnErr = posix_spawnp(&pid, pythonCmd.c_str(), nullptr, nullptr, argv, environ);
         if (spawnErr != 0) {
             logWarn() << "Post-flight analysis: failed to launch" << pythonCmd << ":" << strerror(spawnErr);
+            _progress.finish(false, "Analysis failed to launch");
             return;
         }
 
         int rc = 0;
         if (waitpid(pid, &rc, 0) == -1) {
             logWarn() << "Post-flight analysis: waitpid() failed:" << strerror(errno);
+            _progress.finish(false, "Analysis failed");
         } else if (WIFEXITED(rc)) {
             int exitCode = WEXITSTATUS(rc);
             if (exitCode == 0) {
                 logInfo() << "Post-flight analysis completed successfully";
+                _progress.finish(true, "Analysis complete");
             } else {
                 logWarn() << "Post-flight analysis failed with exit code" << exitCode;
+                _progress.finish(false, formatString("Analysis failed (exit %d)", exitCode));
             }
         } else if (WIFSIGNALED(rc)) {
             logWarn() << "Post-flight analysis killed by signal" << WTERMSIG(rc);
+            _progress.finish(false, "Analysis killed");
         } else {
             logWarn() << "Post-flight analysis exited abnormally (wait status" << rc << ")";
+            _progress.finish(false, "Analysis failed");
         }
     }).detach();
 }
 
-void CommandHandler::stopDetectionPipeline()
+void CommandHandler::stopDetectionPipeline(uint32_t requestId)
 {
     // DetectionCoordinator has already claimed Stopping, so exactly one worker
     // walks and clears _processes and deletes _airspyPipe.
@@ -593,6 +619,11 @@ void CommandHandler::stopDetectionPipeline()
         inRotation = _inRotation;
     }
 
+    // Stop cannot be refused once the coordinator is Stopping; at worst it goes unreported.
+    if (!_progress.begin(COMMAND_ID_STOP_DETECTION, requestId, "Stopping detection", static_cast<uint32_t>(_processes.size()))) {
+        logError() << "COMMAND_ID_STOP_DETECTION progress unreported:" << _progress.busyMessage();
+    }
+
     std::thread([this, inRotation]() {
         // Signal all first so the exits overlap, then share one deadline so
         // several hung children cost one timeout total, not one each.
@@ -601,10 +632,15 @@ void CommandHandler::stopDetectionPipeline()
         }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         bool allExited = true;
+        uint32_t exited = 0;
         for (const auto& process : _processes) {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now());
-            allExited = process->waitForExit(std::max(remaining, std::chrono::milliseconds(0))) && allExited;
+            const bool ok = process->waitForExit(std::max(remaining, std::chrono::milliseconds(0)));
+            allExited = ok && allExited;
+            if (ok) {
+                _progress.update(++exited, process->name());
+            }
         }
         _processes.clear();
 
@@ -627,6 +663,14 @@ void CommandHandler::stopDetectionPipeline()
         std::string detLogDir = logFileManager->logDir(LogFileManager::DETECTORS);
 
         logFileManager->detectorsStopped();
+
+        // Finish before analysis begins and before HAS_TAGS is published, so
+        // SAVE/CLEAN_LOGS see either "not idle" or the analysis as busy.
+        if (allExited) {
+            _progress.finish(true, "Detection stopped");
+        } else {
+            _progress.finish(false, "Detector process hung");
+        }
 
         if (!inRotation && !detLogDir.empty()) {
             _runPostFlightAnalysis(detLogDir);
@@ -1776,7 +1820,15 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
         return "No frequency specified and no tags configured";
     }
 
-    std::thread([this, rawCaptureCmd, deviceType]() {
+    const int sampleDurationSeconds = 13;
+    if (!_progress.begin(COMMAND_ID_RAW_CAPTURE, rawCaptureCmd.header.request_id, "Raw capture", sampleDurationSeconds)) {
+        const std::string busy = _progress.busyMessage();
+        logError() << "COMMAND_ID_RAW_CAPTURE refused:" << busy;
+        _dispatcher.detection().captureFinished();
+        return busy;
+    }
+
+    std::thread([this, rawCaptureCmd, deviceType, sampleDurationSeconds]() {
         RawCaptureInfo_t    rawCapture = rawCaptureCmd;
         double              frequencyMhz = rawCapture.frequency_hz != 0
                                             ? (double)rawCapture.frequency_hz / 1000000.0
@@ -1799,7 +1851,6 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
         double      tuneFreqMhz = 0;
         double      dcOffsetHz = 0;
 
-        const int sampleDurationSeconds = 13;
         if (deviceType == AirSpyDeviceType::HF) {
             // AGC off, LNA on
             sampleRate = 768000; // 768 ksps is the default sample rate for AirSpy HF
@@ -1886,13 +1937,24 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
         // Capture is 13 s; the margin covers a slow device open. The SDR is
         // released only once the process is known to be gone; a child that
         // survives SIGTERM still owns the device, so stay Capturing.
-        if (!airspyProcess->waitForExit(std::chrono::seconds(60))) {
+        const auto captureStart = std::chrono::steady_clock::now();
+        const auto captureDeadline = captureStart + std::chrono::seconds(60);
+        bool exited = false;
+        while (!exited && std::chrono::steady_clock::now() < captureDeadline) {
+            exited = airspyProcess->waitForExit(std::chrono::seconds(1), true /* quiet */);
+            const auto elapsedS = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - captureStart).count();
+            _progress.update(static_cast<uint32_t>(std::min<long>(elapsedS, sampleDurationSeconds)), "Capturing");
+        }
+        if (!exited) {
             airspyProcess->stop();
         }
         if (airspyProcess->waitForExit(std::chrono::seconds(0))) {
+            const int exitCode = airspyProcess->exitCode();
+            _progress.finish(exitCode == 0, exitCode == 0 ? "Capture complete" : formatString("Capture failed (exit %d)", exitCode));
             _dispatcher.detection().captureFinished();
         } else {
             logError() << "COMMAND_ID_RAW_CAPTURE - ERROR: capture process did not exit; SDR stays reserved until controller restart";
+            _progress.finish(false, "Capture process hung");
             _mavlink->sendStatusText("#Capture process hung; restart controller", MAV_SEVERITY_ALERT);
         }
     }).detach();
@@ -1900,51 +1962,69 @@ std::string CommandHandler::_handleRawCapture(const mavlink_tunnel_t& tunnel)
     return ""; // Return empty string to indicate success
 }
 
-bool CommandHandler::_handleSaveLogs(void)
+std::string CommandHandler::_handleSaveLogs(uint32_t requestId)
 {
     logDebug() << "COMMAND_ID_SAVE_LOGS";
 
     if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_IDLE && _mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
         logError() << "COMMAND_ID_SAVE_LOGS called when not idle";
         _mavlink->sendStatusText("Command failed. Controller is not idle", MAV_SEVERITY_ALERT);
-        return false;
-    }
-    if (_analysisJobs.load() > 0) {
-        logError() << "COMMAND_ID_SAVE_LOGS called while post-flight analysis is running";
-        _mavlink->sendStatusText("Command failed. Post-flight analysis still running", MAV_SEVERITY_ALERT);
-        return false;
+        return "Controller in incorrect state";
     }
 
-    std::thread([]() {
+    if (!_progress.begin(COMMAND_ID_SAVE_LOGS, requestId, "Saving logs")) {
+        const std::string busy = _progress.busyMessage();
+        logError() << "COMMAND_ID_SAVE_LOGS refused:" << busy;
+        return busy;
+    }
+
+    std::thread([this]() {
         auto logFileManager = LogFileManager::instance();
-        logFileManager->saveLogsToSDCard();
+        const auto result = logFileManager->saveLogsToSDCard([this](uint32_t done, uint32_t total, const std::string& item) {
+            _progress.update(done, total, item);
+        });
+        switch (result) {
+        case LogFileManager::LogOpResult::Done:        _progress.finish(true,  "Logs saved");      break;
+        case LogFileManager::LogOpResult::NothingToDo: _progress.finish(true,  "No logs to save"); break;
+        case LogFileManager::LogOpResult::Failed:      _progress.finish(false, "Log save failed"); break;
+        }
     }).detach();
 
-    return true;
+    return "";
 }
 
-bool CommandHandler::_handleCleanLogs(void)
+std::string CommandHandler::_handleCleanLogs(uint32_t requestId)
 {
     logDebug() << "COMMAND_ID_CLEAN_LOGS";
 
     if (_mavlink->heartbeatStatus() != HEARTBEAT_STATUS_IDLE && _mavlink->heartbeatStatus() != HEARTBEAT_STATUS_HAS_TAGS) {
         logError() << "COMMAND_ID_CLEAN_LOGS called when not idle";
         _mavlink->sendStatusText("Command failed. Controller is not idle", MAV_SEVERITY_ALERT);
-        return false;
-    }
-    if (_analysisJobs.load() > 0) {
-        logError() << "COMMAND_ID_CLEAN_LOGS called while post-flight analysis is running";
-        _mavlink->sendStatusText("Command failed. Post-flight analysis still running", MAV_SEVERITY_ALERT);
-        return false;
+        return "Controller in incorrect state";
     }
 
-    std::thread([]() {
+    if (!_progress.begin(COMMAND_ID_CLEAN_LOGS, requestId, "Deleting logs")) {
+        const std::string busy = _progress.busyMessage();
+        logError() << "COMMAND_ID_CLEAN_LOGS refused:" << busy;
+        return busy;
+    }
+
+    std::thread([this]() {
         auto logFileManager = LogFileManager::instance();
-        logFileManager->cleanLocalLogs();
-        MavlinkSystem::instance()->sendStatusText("#Logs deleted", MAV_SEVERITY_INFO);
+        const auto result = logFileManager->cleanLocalLogs([this](uint32_t done, uint32_t total, const std::string& item) {
+            _progress.update(done, total, item);
+        });
+        switch (result) {
+        case LogFileManager::LogOpResult::Done:
+            _progress.finish(true, "Logs deleted");
+            MavlinkSystem::instance()->sendStatusText("#Logs deleted", MAV_SEVERITY_INFO);
+            break;
+        case LogFileManager::LogOpResult::NothingToDo: _progress.finish(true,  "No logs to delete"); break;
+        case LogFileManager::LogOpResult::Failed:      _progress.finish(false, "Log delete failed"); break;
+        }
     }).detach();
 
-    return true;
+    return "";
 }
 
 void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
