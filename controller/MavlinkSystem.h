@@ -39,7 +39,8 @@ public:
 	const std::string& 			connectionUrl				() const { return _connectionUrl; }
 	void 						subscribeToMessage			(uint16_t message_id, const MessageCallback& callback);
 	void 						handleMessage				(const mavlink_message_t& message);
-	void 						startTunnelHeartbeatSender	();
+	/// tick runs on the heartbeat thread after each 1 Hz tunnel heartbeat; it must not throw.
+	void 						startTunnelHeartbeatSender	(std::function<void()> tick = {});
 	bool 						connected					();
 	void 						sendHeartbeat				();
 	void 						sendStatusText				(std::string& message, MAV_SEVERITY severity = MAV_SEVERITY_INFO);
