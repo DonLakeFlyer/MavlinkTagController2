@@ -21,7 +21,7 @@ re-deriving the setup. Kept current; not dated.
 | --- | --- | --- |
 | FC | Holybro Pixhawk 6X | Mounted on the Holybro Pixhawk RPi CM4 Baseboard together with the companion CM4 |
 | Firmware | PX4 v1.17 (stable) | |
-| GPS / compass | | |
+| GPS / compass | Holybro M9N GPS ([product page](https://holybro.com/collections/standard-gps-module/products/m9n-m10-gps-v2)) | u-blox M9N; module includes compass |
 | RC link | | |
 | Telemetry | | |
 
@@ -73,17 +73,17 @@ second turn of the leads used here.
 
 | Item | Part | Notes |
 | --- | --- | --- |
-| Receiver | Airspy HF+ Discovery | |
-| Mounting | | |
-| USB cable | | |
+| Receiver | Airspy HF+ Discovery ([product page](https://airspy.com/airspy-hf-discovery/)) | 0.5 kHz–31 MHz HF, 60–260 MHz VHF; covers 146 MHz |
+| Mounting | Directly on the antenna connector | No coax between antenna and SDR; the SDR sits at the antenna on the landing legs |
+| USB cable | SDR → CM4 (baseboard USB) | Runs from the landing legs up to the avionics box |
 
 ## Antenna
 
 | Item | Part | Notes |
 | --- | --- | --- |
-| Antenna | | |
-| Feed | | |
-| Mounting | | |
+| Antenna | Telonics RA-2AHS or Telonics RA-23K | Both under test; one flown at a time |
+| Feed | None | Airspy HF+ Discovery connects directly to the antenna |
+| Mounting | Landing legs | |
 
 ## Ground station
 
