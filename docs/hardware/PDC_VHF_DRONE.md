@@ -45,20 +45,26 @@ re-deriving the setup. Kept current; not dated.
 | What | How | Notes |
 | --- | --- | --- |
 | Avionics box | 3D-printed box wrapped in Titan RF fabric | Contains the Pixhawk 6X + CM4 baseboard and the UBEC DUO. Outside the box: CAN-L4-BM, PDB, ESCs, SDR. Bench A/B 2026-09-19: 7.4 dB. |
-| UBEC DUO | Individually wrapped in Titan RF tape over an insulating layer, inside the avionics box | Bench 2026-09-19: the DUO was the only avionics component raising the SDR floor (+11 dB bare, +3 dB and two ~6 dB humps in the box). Wrap + input-pair ferrite (below) brings it within 0.5 dB of a battery-powered reference. |
+| UBEC DUO | Individually wrapped in Titan RF tape over an insulating layer, inside the avionics box | Bench 2026-09-19: the DUO was the only avionics component raising the SDR floor (+11 dB bare, +3 dB and two ~6 dB humps in the box). Bench 2026-09-20 (SDR captured through the RPi): with the wrap, input and output ferrites below and the USB cable cores, its harmonics no longer appear above the floor. |
 
 ## Ferrites
 
-All ferrites on the vehicle are **Fair-Rite 0443178181**
-([Digi-Key](https://www.digikey.com/en/products/detail/fair-rite-products-corp/0443178181/8594076)):
-round-cable snap-on (clip-on) cores in **mix 43** (NiZn, suppression band
-≈25 MHz–1 GHz, covers 146 MHz). Single pass only — the bore does not take a
-second turn of the leads used here.
+Ferrites on the vehicle are Fair-Rite round-cable snap-on (clip-on) cores in
+**mix 43** (NiZn, suppression band ≈25–300 MHz, covers 146 MHz), in two
+sizes:
+
+- **0443178181** ([Digi-Key](https://www.digikey.com/en/products/detail/fair-rite-products-corp/0443178181/8594076))
+  on the power leads. Single pass only — the bore does not take a second turn.
+- **0443164251** ([Digi-Key](https://www.digikey.com/en/products/detail/fair-rite-products-corp/0443164251/8594062))
+  on the USB cable. 6.6 mm bore, 32 mm long; takes two turns of the cable.
 
 | Location | Notes |
 | --- | --- |
 | Matek CAN-L4-BM CAN output lead | Right at the module's CAN connector, on the lead to the Pixhawk 6X. Bench 2026-09-19: leaving this lead disconnected and un-ferrited raised the floor 12 dB. |
 | Matek UBEC DUO input pair | Clip-on, single pass, at the exit of the DUO's Titan-tape wrap. |
+| Matek UBEC DUO output pairs (both) | Clip-on, single pass, at the wrap exit. Bench 2026-09-20: took 4 dB off the flat floor when the SDR is captured through the RPi. |
+| USB cable, Discovery end | Two stacked cores, two turns of the cable through each. Bench 2026-09-20: the DUO's residual humps reach the SDR as common-mode on the USB cable; one 2-turn core cut them 9 → 3 dB, the second to ~2 dB. |
+| USB cable, RPi end | One core, two turns. Bench 2026-09-20: removed the last ~2 dB of hump. |
 | ESC power lines | At the exit of each motor arm (added for the 2026-09-16 lake-front flights). |
 
 ## Companion computer
@@ -75,7 +81,7 @@ second turn of the leads used here.
 | --- | --- | --- |
 | Receiver | Airspy HF+ Discovery ([product page](https://airspy.com/airspy-hf-discovery/)) | 0.5 kHz–31 MHz HF, 60–260 MHz VHF; covers 146 MHz |
 | Mounting | Directly on the antenna connector | No coax between antenna and SDR; the SDR sits at the antenna on the landing legs |
-| USB cable | SDR → CM4 (baseboard USB) | Runs from the landing legs up to the avionics box |
+| USB cable | SDR → CM4 (baseboard USB) | Runs from the landing legs up to the avionics box. Mix-43 cores at both ends, see [Ferrites](#ferrites). Bench 2026-09-20: the cable is the path by which the UBEC DUO's switching harmonics reached the SDR. |
 
 ## Antenna
 
