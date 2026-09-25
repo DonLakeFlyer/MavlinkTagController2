@@ -23,7 +23,7 @@ make test                                         # configure + build + ctest, r
 | --- | --- | --- | --- |
 | `tagtracker_wireformat_tests` | `shared/tests/test_zmq_iq_packet.c` | ZMQ IQ header layout, magic, version, sizes | Must be updated with any wire-format change |
 | `airspyhf_decimator_tests` | `decimator/tests/test_main.cpp` | CLI parsing, FIR/decimation, frequency shift, ZMQ frame handling, rate tracking | |
-| `test_collection_protocol` | `controller/tests/test_collection_protocol.cpp` | `TunnelProtocol.h` command ids and struct sizes the controller depends on | Guards the CPM pin |
+| `test_collection_protocol` | `controller/tests/test_collection_protocol.cpp` | `TunnelProtocol.h` version, command ids and struct sizes the controller depends on (`SetLogLevel_t`, `OperationProgress_t`, collection structs) | Guards the CPM pin |
 | `test_collection_coordinator` | `controller/tests/test_collection_coordinator.cpp` | ARM/ARMED/CYCLE_COMPLETE state machine, duplicates, cancel/finalize | |
 | `test_detector_protocol` | `controller/tests/test_detector_protocol.cpp` | TTDP header/payload layout (`shared/detector_protocol.h`) | Mirror of `detector/tests/test_detector_protocol.py` |
 | `test_bearing_calculator` | `controller/tests/test_bearing_calculator.cpp` | Pattern fit, weighted headings and residuals, candidate selection, wraparound, noise tolerance, confirmed/revisit semantics; run for both antenna patterns | |
@@ -34,6 +34,8 @@ make test                                         # configure + build + ctest, r
 | `test_detection_coordinator` | `controller/tests/test_detection_coordinator.cpp` | Idle / HasTags / Starting / Detecting / Stopping / Capturing transitions, in-flight start/stop idempotence, start–capture exclusion, heartbeat publication | |
 | `test_command_retry` | `controller/tests/test_command_retry.cpp` | Whole controller command/ACK path (`TunnelCommandDispatcher`) under lost ACKs: every command retried, lost TAG, GCS restart mid-upload / mid-start / mid-stop, request-id reuse, malformed frames, controller restart fallback, `Busy` NACK of long-running commands while an operation runs | Fake `CommandActions`; no MAVLink or processes |
 | `test_operation_progress` | `controller/tests/test_operation_progress.cpp` | `OperationProgressReporter`: begin/update/finish frame sequence, busy gate, indeterminate → counted, 1 Hz re-send while RUNNING and bounded re-send of the terminal frame, clamped-step and truncated-message dedup, stable log line | |
+| `test_rotation_progress` | `controller/tests/test_rotation_progress.cpp` | `RotationProgress`: step layout across startup/slices/finalize, dwell length = longest segment reported by any detector, step driven by the least-credited detector, segment restarts add extra steps (single, simultaneous and asymmetric detectors), mid-slice segment-length change rejected, bounded compute ticks after the segment fills, monotonic step within a layout, revisit grows `step_count`, ARM-retry and stale-slice dedup, FAILED/COMPLETE and reporter release | |
+| `test_tunnel_protocol_log` | `controller/tests/test_tunnel_protocol_log.cpp` | `TunnelProtocolLog::describe()`: command/status names, every wire struct decoded to its log fields in both directions (ACK, tag upload, START_DETECTION, RAW_CAPTURE, START_COLLECTION/slice, collection status, bearing, operation progress, heartbeats, pulses, header-only commands), header-too-small and wrong-length fallbacks, non-NUL-terminated messages | |
 | `zmq_timestamp_test`, `zmq_loss_detection_test` | `airspyhf_zeromq/tests/` | Live SDR timestamp continuity and loss detection | **Hardware**: exit 77 (skipped) without an Airspy HF+ |
 
 ## Python (pytest)
@@ -50,7 +52,7 @@ separately.
 
 | Directory | Files | Covers |
 | --- | --- | --- |
-| `detector/tests/` | `test_end_to_end.py`, `test_rate_switch.py`, `test_threshold_null.py`, `test_iq_stream.py`, `test_udp_receiver.py`, `test_collection_control.py`, `test_detector_protocol.py`, `test_pulse_reporting.py`, `test_structured_logging.py` | Full STFT→fold→threshold pipeline on synthetic IQ, dual-rate hypotheses, permutation-null threshold and impulse blanking, gap handling, ARM handling, TTDP encode/decode, `.jsonl` schema |
+| `detector/tests/` | `test_end_to_end.py`, `test_rate_switch.py`, `test_threshold_null.py`, `test_iq_stream.py`, `test_udp_receiver.py`, `test_collection_control.py`, `test_detector_protocol.py`, `test_pulse_reporting.py`, `test_structured_logging.py` | Full STFT→fold→threshold pipeline on synthetic IQ, dual-rate hypotheses, permutation-null threshold and impulse blanking, gap handling, ARM handling and `SLICE_PROGRESS` send policy, TTDP encode/decode, `.jsonl` schema |
 | `simulator/tests/` | `test_simulator.py` | Pulse timing (fixed and rate-switch), ZMQ header encoding, SNR-vs-distance model |
 | `analyzer/tests/` | `test_flight_checks.py`, `test_post_flight_analysis.py`, `test_iq_replay.py`, `test_psd_spectrum.py`, `test_signal_analyzer.py`, `test_ipi_analyzer.py` | Log parsers (legacy and `.jsonl` layouts), report generation, offline replay, PSD, live analyzers' DSP |
 

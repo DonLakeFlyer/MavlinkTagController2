@@ -12,6 +12,7 @@ _HEADER = struct.Struct('<IHHIII')
 # at the same slices so the controller can pick the best pattern fit.
 _PULSE_PAYLOAD = struct.Struct('<IIBBBB6d')
 _ARM_PAYLOAD = struct.Struct('<f')
+_SLICE_PROGRESS_PAYLOAD = struct.Struct('<III')  # samples_have, samples_needed, sample_rate_hz
 HEADER_SIZE = _HEADER.size
 PULSE_REPORT_SIZE = HEADER_SIZE + _PULSE_PAYLOAD.size
 
@@ -25,6 +26,7 @@ class MessageType(IntEnum):
     ARM = 6
     HEARTBEAT = 7
     ARMED = 8
+    SLICE_PROGRESS = 9
 
 
 class ErrorCode(IntEnum):
@@ -99,6 +101,7 @@ def decode_header(packet):
         MessageType.ARM: _ARM_PAYLOAD.size,
         MessageType.HEARTBEAT: 0,
         MessageType.ARMED: 0,
+        MessageType.SLICE_PROGRESS: _SLICE_PROGRESS_PAYLOAD.size,
     }[message_type]
     if payload_length != expected_payload_length:
         raise ProtocolError('detector message has the wrong payload size')
@@ -167,6 +170,25 @@ def decode_failed_report(packet):
     if header.message_type != MessageType.FAILED:
         raise ProtocolError('packet is not a failed report')
     return header, struct.unpack_from('<I', packet, HEADER_SIZE)[0]
+
+
+def encode_slice_progress(collection_id, slice_id, tag_id, samples_have, samples_needed, sample_rate_hz):
+    payload = _SLICE_PROGRESS_PAYLOAD.pack(samples_have, samples_needed, sample_rate_hz)
+    return encode_header(
+        MessageType.SLICE_PROGRESS,
+        len(payload),
+        collection_id,
+        slice_id,
+        tag_id,
+    ) + payload
+
+
+def decode_slice_progress(packet):
+    header = decode_header(packet)
+    if header.message_type != MessageType.SLICE_PROGRESS:
+        raise ProtocolError('packet is not a slice progress report')
+    samples_have, samples_needed, sample_rate_hz = _SLICE_PROGRESS_PAYLOAD.unpack_from(packet, HEADER_SIZE)
+    return header, samples_have, samples_needed, sample_rate_hz
 
 
 def decode_pulse_report(packet):

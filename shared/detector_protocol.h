@@ -16,6 +16,7 @@ enum class MessageType : uint16_t {
     Arm = 6,
     Heartbeat = 7,
     Armed = 8,
+    SliceProgress = 9,   // armed detector, ~1 Hz: IQ accumulated toward the slice's segment
 };
 
 enum class ValidationResult {
@@ -56,6 +57,12 @@ struct ArmMessage {
     ArmPayload payload;
 };
 
+struct SliceProgressPayload {
+    uint32_t samples_have;    // IQ samples buffered since ARM
+    uint32_t samples_needed;  // segment length that ends the slice's cycle
+    uint32_t sample_rate_hz;
+};
+
 struct PulsePayload {
     uint32_t frequency_hz;
     uint32_t group_seq_counter;
@@ -80,7 +87,7 @@ struct PulseReport {
 constexpr bool isKnownMessageType(uint16_t value)
 {
     return value >= static_cast<uint16_t>(MessageType::Ready)
-        && value <= static_cast<uint16_t>(MessageType::Armed);
+        && value <= static_cast<uint16_t>(MessageType::SliceProgress);
 }
 
 constexpr uint16_t expectedPayloadLength(MessageType type)
@@ -93,6 +100,8 @@ constexpr uint16_t expectedPayloadLength(MessageType type)
         return sizeof(uint32_t);
     case MessageType::Arm:
         return sizeof(ArmPayload);
+    case MessageType::SliceProgress:
+        return sizeof(SliceProgressPayload);
     case MessageType::Ready:
     case MessageType::CycleComplete:
     case MessageType::Heartbeat:
@@ -124,6 +133,7 @@ static_assert(sizeof(Header) == 20);
 static_assert(sizeof(FailedPayload) == 4);
 static_assert(sizeof(ArmPayload) == 4);
 static_assert(sizeof(ArmMessage) == 24);
+static_assert(sizeof(SliceProgressPayload) == 12);
 static_assert(sizeof(PulsePayload) == 60);
 static_assert(sizeof(PulseReport) == 80);
 

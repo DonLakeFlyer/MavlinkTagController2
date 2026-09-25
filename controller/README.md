@@ -42,6 +42,7 @@ make controller           # or: cmake --preset controller && cmake --build --pre
 | `--sim-noise-source-impulsive` | off | Make the noise source heavy-tailed (Student-t) |
 | `--sim-telemetry-endpoint <uri>` | internal default | TCP endpoint the simulator reads vehicle pose from |
 | `--debug-detector` | off | Pass the verbose flag to `pulse_detector.py` |
+| `--verbose` | off | Also write `|V]` log lines: per-pulse reports, pulse tunnel frames, detector heartbeats. The GCS can toggle this at runtime with `SET_LOG_LEVEL` |
 | `--detector-impulse-blank-factor <x>` | `0` (off) | Pass `--impulse-blank-factor <x>` to every `pulse_detector.py` |
 
 ```bash

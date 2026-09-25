@@ -101,17 +101,20 @@ void UDPPulseReceiver::_receive()
                 const auto validation = TagTrackerDetectorProtocol::validateHeader(
                     header, static_cast<size_t>(cBytesReceived));
                 if (validation != TagTrackerDetectorProtocol::ValidationResult::Valid) {
-                    logWarn() << "Rejected malformed Python detector packet, validation:"
+                    logDebug() << "Rejected malformed Python detector packet, validation:"
                               << static_cast<int>(validation) << "bytes:" << cBytesReceived;
                     continue;
                 }
 
                 TagTrackerDetectorProtocol::PulsePayload pulsePayload {};
                 TagTrackerDetectorProtocol::FailedPayload failedPayload {};
+                TagTrackerDetectorProtocol::SliceProgressPayload progressPayload {};
                 const auto messageType = static_cast<TagTrackerDetectorProtocol::MessageType>(header.message_type);
                 const bool hasPulsePayload =
                     messageType == TagTrackerDetectorProtocol::MessageType::Pulse
                     || messageType == TagTrackerDetectorProtocol::MessageType::NoDetection;
+                const bool hasProgressPayload =
+                    messageType == TagTrackerDetectorProtocol::MessageType::SliceProgress;
                 if (hasPulsePayload) {
                     std::memcpy(&pulsePayload,
                                 buffer.data() + sizeof(header),
@@ -120,16 +123,21 @@ void UDPPulseReceiver::_receive()
                     std::memcpy(&failedPayload,
                                 buffer.data() + sizeof(header),
                                 sizeof(failedPayload));
+                } else if (hasProgressPayload) {
+                    std::memcpy(&progressPayload,
+                                buffer.data() + sizeof(header),
+                                sizeof(progressPayload));
                 }
                 _commandHandler->handlePythonDetectorMessage(
                     header, hasPulsePayload ? &pulsePayload : nullptr,
-                    failedPayload.error_code);
+                    failedPayload.error_code,
+                    hasProgressPayload ? &progressPayload : nullptr);
                 continue;
             }
         }
 
         if (cBytesReceived % sizeof(CommandHandler::UDPPulseInfo_T) != 0) {
-            logWarn() << "Rejected malformed legacy detector packet, bytes:" << cBytesReceived;
+            logDebug() << "Rejected malformed legacy detector packet, bytes:" << cBytesReceived;
             continue;
         }
 

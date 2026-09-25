@@ -14,6 +14,7 @@ int main()
     static_assert(sizeof(FailedPayload) == 4);
     static_assert(sizeof(ArmPayload) == 4);
     static_assert(sizeof(ArmMessage) == 24);
+    static_assert(sizeof(SliceProgressPayload) == 12);
     static_assert(sizeof(PulsePayload) == 60);
     static_assert(sizeof(PulseReport) == 80);
     static_assert(offsetof(Header, collection_id) == 8);
@@ -65,6 +66,13 @@ int main()
     CHECK(validateHeader(header, sizeof(Header)) == ValidationResult::BadPayloadLength);
     header.payload_length = sizeof(ArmPayload);
     CHECK(validateHeader(header, sizeof(ArmMessage)) == ValidationResult::Valid);
+
+    header.message_type = static_cast<uint16_t>(MessageType::SliceProgress);
+    CHECK(validateHeader(header, sizeof(Header) + sizeof(ArmPayload)) == ValidationResult::BadPayloadLength);
+    header.payload_length = sizeof(SliceProgressPayload);
+    CHECK(validateHeader(header, sizeof(Header) + sizeof(SliceProgressPayload)) == ValidationResult::Valid);
+    static_assert(offsetof(SliceProgressPayload, samples_needed) == 4);
+    static_assert(offsetof(SliceProgressPayload, sample_rate_hz) == 8);
 
     return 0;
 }

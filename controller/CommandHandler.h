@@ -5,11 +5,13 @@
 #include "TunnelCommandDispatcher.h"
 #include "BearingCalculator.h"
 #include "CollectionCoordinator.h"
+#include "RotationProgress.h"
 #include "TelemetryCache.h"
 #include "boost_process_compat.h"
 #include "detector_protocol.h"
 
 #include <condition_variable>
+#include <atomic>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -63,22 +65,23 @@ public:
     // uavrt_detection pulses: forwarded to the GCS as PulseInfo_t, never part of a collection.
     void handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo);
     // For the 1 Hz heartbeat thread: re-sends the RUNNING operation frame.
-    void heartbeatTick() { _progress.resendIfRunning(); }
+    void heartbeatTick() { _progress.resendIfRunning(); _rotationProgress.computeTick(); }
     void handlePythonDetectorMessage(const TagTrackerDetectorProtocol::Header& header,
                                      const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
-                                     uint32_t errorCode = 0);
+                                     uint32_t errorCode = 0,
+                                     const TagTrackerDetectorProtocol::SliceProgressPayload* progressPayload = nullptr);
 
     // CommandActions
     std::string startDetectionPipeline(const TunnelProtocol::StartDetectionInfo_t& info) override;
     void        stopDetectionPipeline(uint32_t requestId) override;
     std::string detectionLogDir() override;
-    std::string rawCapture(const mavlink_tunnel_t& tunnel) override { return _handleRawCapture(tunnel); }
-    std::string saveLogs(uint32_t requestId) override { return _handleSaveLogs(requestId); }
-    std::string cleanLogs(uint32_t requestId) override { return _handleCleanLogs(requestId); }
+    std::string rawCapture(const mavlink_tunnel_t& tunnel) override;
+    std::string saveLogs(uint32_t requestId) override;
+    std::string cleanLogs(uint32_t requestId) override;
     std::string airspyStatus() override;
-    std::string startCollection(const mavlink_tunnel_t& tunnel) override { return _handleStartCollection(tunnel); }
-    std::string startCollectionSlice(const mavlink_tunnel_t& tunnel) override { return _handleStartCollectionSlice(tunnel); }
-    std::string finishCollection(const mavlink_tunnel_t& tunnel) override { return _handleFinishCollection(tunnel); }
+    std::string startCollection(const mavlink_tunnel_t& tunnel) override;
+    std::string startCollectionSlice(const mavlink_tunnel_t& tunnel) override;
+    std::string finishCollection(const mavlink_tunnel_t& tunnel) override;
     void        replayFinishOutcome(uint32_t collectionId) override;
 
     // CommandLog
@@ -115,20 +118,14 @@ private:
     // Requests a stop through the dispatcher and blocks until teardown ends (bounded).
     // Returns false if detection is still Stopping when the wait expires.
     bool _stopDetectionAndWait  (void);
-    std::string _handleRawCapture      (const mavlink_tunnel_t& tunnel);
-    std::string _handleSaveLogs        (uint32_t requestId);
-    std::string _handleCleanLogs       (uint32_t requestId);
     void _handleTunnelMessage   (const mavlink_message_t& message);
     void _handlePythonPulse     (const TagTrackerDetectorProtocol::Header& header, const TagTrackerDetectorProtocol::PulsePayload& payload);
-    void _sendPythonHeartbeat   (uint32_t tagId);
+    void _sendDetectorHeartbeat (uint32_t tagId, uint32_t detectionMode);
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
     // Adds a started pipeline process and reports it as one start-detection step.
     void _trackProcess          (std::shared_ptr<MonitoredProcess> process);
     void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort = 0);
     bool _writeSessionInfo      (const TunnelProtocol::StartDetectionInfo_t& startDetection, AirSpyDeviceType deviceType, bool isHFMode);
-    std::string _handleStartCollection      (const mavlink_tunnel_t& tunnel);
-    std::string _handleStartCollectionSlice (const mavlink_tunnel_t& tunnel);
-    std::string _handleFinishCollection     (const mavlink_tunnel_t& tunnel);
     void _sendCollectionStatus(uint32_t collectionId, uint32_t sliceId, uint32_t status, uint32_t errorCode = 0,
                                std::optional<uint32_t> expectedDetectors = std::nullopt,
                                std::optional<uint32_t> completedDetectors = std::nullopt,
@@ -146,13 +143,14 @@ private:
     std::string _sdrPathStatusText(AirSpyDeviceType deviceType, double frequencyMhz) const;
     std::string _checkForAirSpy  (void);
 
-    std::string _tunnelCommandResultToString(uint32_t result);
 
     std::string _simulatorCommand(uint32_t radioCenterFrequencyHz);
 
     MavlinkSystem*                  _mavlink                = nullptr;
     TelemetryCache*                 _telemetryCache         = nullptr;
     OperationProgressReporter       _progress;                          // must precede _dispatcher, which holds a reference
+    RotationProgress                _rotationProgress { _progress };    // drives _progress for the span of a collection
+    int                             _detectorSampleRate { 0 };          // --fs the detectors were launched with; SLICE_PROGRESS must agree
     TunnelCommandDispatcher         _dispatcher;
     const TagDatabase&              _tagDatabase            = _dispatcher.tags();
     const char*                     _homePath               = nullptr;
@@ -178,7 +176,9 @@ private:
     CollectionCoordinator                       _collectionCoordinator;
     std::map<uint32_t, int>                     _detectorControlPorts;
     bool                                        _inRotation             = false;
+    std::atomic<bool>                           _rotationTeardown       { false };  // stopDetectionPipeline runs on behalf of a collection
     uint32_t                                    _antennaId              = 0;        // StartCollection_t::antenna_id
+    uint32_t                                    _collectionNSlices      = 0;        // StartCollection_t::n_slices, for session.json
     bool                                        _revisitRequested       = false;    // one confirmation revisit per collection
     std::optional<float>                        _pendingRevisitHeadingDeg;          // requested but its slice not yet armed
     float                                       _currentHeadingDeg      = 0;

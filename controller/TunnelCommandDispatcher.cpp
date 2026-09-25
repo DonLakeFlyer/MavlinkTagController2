@@ -1,5 +1,7 @@
 #include "TunnelCommandDispatcher.h"
+#include "TunnelProtocolLog.h"
 #include "formatString.h"
+#include "logLevel.h"
 
 #include <cstring>
 
@@ -31,28 +33,7 @@ AckInfo_t TunnelCommandDispatcher::makeAck(uint32_t requestId, uint32_t command,
 
 std::string TunnelCommandDispatcher::commandName(uint32_t command)
 {
-    switch (command) {
-    case COMMAND_ID_ACK:                    return "ACK";
-    case COMMAND_ID_START_TAGS:             return "START_TAGS";
-    case COMMAND_ID_END_TAGS:               return "END_TAGS";
-    case COMMAND_ID_TAG:                    return "TAG";
-    case COMMAND_ID_START_DETECTION:        return "START_DETECTION";
-    case COMMAND_ID_STOP_DETECTION:         return "STOP_DETECTION";
-    case COMMAND_ID_PULSE:                  return "PULSE";
-    case COMMAND_ID_RAW_CAPTURE:            return "RAW_CAPTURE";
-    case COMMAND_ID_HEARTBEAT:              return "HEARTBEAT";
-    case COMMAND_ID_SAVE_LOGS:              return "SAVE_LOGS";
-    case COMMAND_ID_CLEAN_LOGS:             return "CLEAN_LOGS";
-    case COMMAND_ID_AIRSPY_STATUS:          return "AIRSPY_STATUS";
-    case COMMAND_ID_START_COLLECTION:       return "START_COLLECTION";
-    case COMMAND_ID_START_COLLECTION_SLICE: return "START_COLLECTION_SLICE";
-    case COMMAND_ID_FINISH_COLLECTION:      return "FINISH_COLLECTION";
-    case COMMAND_ID_BEARING_RESULT:         return "BEARING_RESULT";
-    case COMMAND_ID_COLLECTION_STATUS:      return "COLLECTION_STATUS";
-    case COMMAND_ID_PYTHON_PULSE:           return "PYTHON_PULSE";
-    case COMMAND_ID_OPERATION_PROGRESS:     return "OPERATION_PROGRESS";
-    }
-    return formatString("UNKNOWN(%u)", command);
+    return TunnelProtocolLog::commandName(command);
 }
 
 AckInfo_t TunnelCommandDispatcher::handle(const mavlink_tunnel_t& tunnel)
@@ -165,6 +146,21 @@ TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_dispatch(const Header
     case COMMAND_ID_FINISH_COLLECTION: {
         const std::string error = _actions.finishCollection(tunnel);
         return {error.empty(), error};
+    }
+    case COMMAND_ID_SET_LOG_LEVEL: {
+        if (tunnel.payload_length != sizeof(SetLogLevel_t)) {
+            _log.error(formatString("SET_LOG_LEVEL payload length incorrect expected:%zu actual:%u", sizeof(SetLogLevel_t), tunnel.payload_length));
+            return {false, "Payload length incorrect"};
+        }
+        SetLogLevel_t info {};
+        memcpy(&info, tunnel.payload, sizeof(info));
+        if (info.level != LOG_LEVEL_DEBUG && info.level != LOG_LEVEL_VERBOSE) {
+            _log.error(formatString("SET_LOG_LEVEL rejected: unknown level %u", info.level));
+            return {false, "Unknown log level"};
+        }
+        setVerboseLogging(info.level == LOG_LEVEL_VERBOSE);
+        _log.info(formatString("Verbose logging %s", info.level == LOG_LEVEL_VERBOSE ? "enabled" : "disabled"));
+        return {true, ""};
     }
     }
     _log.error(formatString("Unknown tunnel command %u", header.command));
@@ -316,13 +312,13 @@ TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_endTags(const mavlink
     return {false, "internal error"};
 }
 
-std::string TunnelCommandDispatcher::startDetection(const StartDetectionInfo_t& info)
+std::string TunnelCommandDispatcher::startDetection(const StartDetectionInfo_t& info, bool checkBusy)
 {
     using R = DetectionCoordinator::Result;
     switch (_detection.requestStart()) {
     case R::Accepted: {
         // HasTags is compatible with a running log save/delete or analysis.
-        const std::string busy = _progress.busyMessage();
+        const std::string busy = checkBusy ? _progress.busyMessage() : std::string();
         if (!busy.empty()) {
             _detection.startFinished(false);
             _log.error("START_DETECTION rejected: " + busy);

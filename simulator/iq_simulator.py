@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import struct
 import signal
 import sys
@@ -919,6 +920,9 @@ def _pad_list(lst: list | None, n: int, default: float) -> list:
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared'))
+    from utc_log_stream import install_utc_line_prefix
+    install_utc_line_prefix()
     cfg = parse_args()
     if cfg.telemetry_sub_endpoint:
         print(

@@ -6,6 +6,7 @@
 
 #include <tagtracker_wireformat/zmq_iq_packet.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -40,6 +41,20 @@ constexpr double kTwoPi = 6.28318530717958647692;
 [[maybe_unused]] constexpr uint16_t kZmqVersion = TTWF_ZMQ_IQ_VERSION;
 constexpr uint16_t kZmqHeaderSizeBytes = TTWF_ZMQ_IQ_HEADER_SIZE;
 constexpr std::size_t kMaxQueuePackets = 64;
+
+// "HH:MM:SS.mmm " in UTC, matching the controller log clock so post-flight the
+// two files can be lined up.
+std::string utcStamp() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t secs = std::chrono::system_clock::to_time_t(now);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+    struct tm tmBuf;
+    gmtime_r(&secs, &tmBuf);
+    char buf[32];
+    const std::size_t n = std::strftime(buf, sizeof(buf), "%H:%M:%S", &tmBuf);
+    std::snprintf(buf + n, sizeof(buf) - n, ".%03lld ", static_cast<long long>(ms));
+    return buf;
+}
 
 struct Options {
     double inputRate = 0.0;
@@ -449,7 +464,7 @@ class UdpStreamer {
         const std::size_t bytes = frame.size() * sizeof(std::complex<float>);
         ++packetsSent_;
         if (packetsSent_ == 1 || (packetsSent_ % 500) == 0) {
-            std::cerr << "airspyhf_decimator: sent packets=" << packetsSent_
+            std::cerr << utcStamp() << "airspyhf_decimator: sent packets=" << packetsSent_
                       << " send_errors=" << sendErrors_ << "\n";
         }
         for (const auto &socket : sockets_) {
@@ -458,15 +473,16 @@ class UdpStreamer {
                          reinterpret_cast<const sockaddr *>(&socket.addr),
                          sizeof(sockaddr_in));
             if (sent < 0) {
+                const int err = errno;
                 ++sendErrors_;
-                std::perror("sendto");
+                std::cerr << utcStamp() << "airspyhf_decimator: sendto: " << std::strerror(err) << "\n";
                 if (sendErrors_ == 1 || (sendErrors_ % 100) == 0) {
-                    std::cerr << "UDP send failures: " << sendErrors_ << " of "
+                    std::cerr << utcStamp() << "airspyhf_decimator: UDP send failures: " << sendErrors_ << " of "
                               << packetsSent_ << " packets\n";
                 }
             } else if (static_cast<std::size_t>(sent) != bytes) {
                 ++sendErrors_;
-                std::cerr << "Partial UDP send: sent " << sent
+                std::cerr << utcStamp() << "airspyhf_decimator: partial UDP send: sent " << sent
                           << " bytes, expected " << bytes << "\n";
             }
         }
@@ -791,7 +807,7 @@ int main(int argc, char **argv) {
         std::signal(SIGPIPE, SIG_IGN);
         auto opts = parseArgs(argc, argv);
 
-        std::cerr << "airspyhf_decimator: zmq=" << opts.zmqEndpoint
+        std::cerr << utcStamp() << "airspyhf_decimator: zmq=" << opts.zmqEndpoint
                   << " inputRateExpected=" << opts.inputRate
                   << " strictInputRate="
                   << (opts.strictInputRate ? "true" : "false")
@@ -848,7 +864,7 @@ int main(int argc, char **argv) {
                         }
                         if (receiver.malformedPackets() == 1 ||
                             (receiver.malformedPackets() % 100) == 0) {
-                            std::cerr << "airspyhf_decimator: malformed ZMQ packets="
+                            std::cerr << utcStamp() << "airspyhf_decimator: malformed ZMQ packets="
                                       << receiver.malformedPackets() << "\n";
                         }
                         continue;
@@ -856,13 +872,13 @@ int main(int argc, char **argv) {
                     if (!queue.push(std::move(pkt))) {
                         auto drops = queue.dropped();
                         if (drops == 1 || (drops % 100) == 0) {
-                            std::cerr << "airspyhf_decimator: queue full, packet dropped"
+                            std::cerr << utcStamp() << "airspyhf_decimator: queue full, packet dropped"
                                          " total_queue_drops=" << drops << "\n";
                         }
                     }
                 }
             } catch (const std::exception &e) {
-                std::cerr << "airspyhf_decimator: reader thread fatal: " << e.what() << "\n";
+                std::cerr << utcStamp() << "airspyhf_decimator: reader thread fatal: " << e.what() << "\n";
                 gShouldStop = 1;
             }
             queue.stop();
@@ -908,7 +924,7 @@ int main(int argc, char **argv) {
                     newlyDropped * static_cast<uint64_t>(packet.sampleCount);
                 const uint64_t missingOutput =
                     holeOutputSamples(newlyDropped, packet.sampleCount);
-                std::cerr << "airspyhf_decimator: dropped " << newlyDropped
+                std::cerr << utcStamp() << "airspyhf_decimator: dropped " << newlyDropped
                           << " packet(s) before sequence=" << packet.sequence
                           << " missing_input_samples=" << missingInput
                           << " skipped_output_samples=" << missingOutput
@@ -931,7 +947,7 @@ int main(int argc, char **argv) {
                 stage3.reset();
             } else if (packet.sequence <= prevSequence) {
                 ++outOfOrderPackets;
-                std::cerr << "airspyhf_decimator: out-of-order/duplicate "
+                std::cerr << utcStamp() << "airspyhf_decimator: out-of-order/duplicate "
                              "packet sequence="
                           << packet.sequence << " previous=" << prevSequence
                           << " count=" << outOfOrderPackets << "\n";
@@ -957,7 +973,7 @@ int main(int argc, char **argv) {
                     }
                     ++sampleRateFieldWarnings;
                     std::cerr
-                        << "airspyhf_decimator: bad incoming sample_rate field="
+                        << utcStamp() << "airspyhf_decimator: bad incoming sample_rate field="
                         << packet.sampleRate
                         << " expected=" << effectiveInputRate
                         << " error_ppm=" << firstPacketRateErrorPpm
@@ -970,7 +986,7 @@ int main(int argc, char **argv) {
                 frequencyShifter = std::make_unique<FrequencyShifter>(
                     effectiveInputRate, opts.shiftKhz * 1000.0);
 
-                std::cerr << "airspyhf_decimator: locked input rate="
+                std::cerr << utcStamp() << "airspyhf_decimator: locked input rate="
                           << effectiveInputRate
                           << " outputRate=" << effectiveOutputRate << " source="
                           << ((opts.inputRate > 0.0) ? "--input-rate"
@@ -992,7 +1008,7 @@ int main(int argc, char **argv) {
                 if (sampleRateFieldWarnings <= 10 ||
                     (sampleRateFieldWarnings % 100) == 0) {
                     std::cerr
-                        << "airspyhf_decimator: bad incoming sample_rate field="
+                        << utcStamp() << "airspyhf_decimator: bad incoming sample_rate field="
                         << packet.sampleRate
                         << " expected=" << effectiveInputRate
                         << " error_ppm=" << rateErrorPpm
@@ -1004,7 +1020,7 @@ int main(int argc, char **argv) {
             inputSamplesProcessed += stageInput.size();
 
             if (!frequencyShifter || !assembler) {
-                std::cerr << "airspyhf_decimator: internal initialization "
+                std::cerr << utcStamp() << "airspyhf_decimator: internal initialization "
                              "incomplete, skipping packet sequence="
                           << packet.sequence << "\n";
                 continue;
@@ -1078,7 +1094,7 @@ int main(int argc, char **argv) {
                     ++measuredRateWarnings;
                     if (measuredRateWarnings <= 10 ||
                         (measuredRateWarnings % 100) == 0) {
-                        std::cerr << "airspyhf_decimator: bad incoming "
+                        std::cerr << utcStamp() << "airspyhf_decimator: bad incoming "
                                      "measured sample rate="
                                   << zmqComplexPerSec
                                   << " expected=" << effectiveInputRate
@@ -1088,7 +1104,7 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                std::cerr << "airspyhf_decimator: perf zmq_Bps="
+                std::cerr << utcStamp() << "airspyhf_decimator: perf zmq_Bps="
                           << zmqBytesPerSec
                           << " zmq_complex_sps=" << zmqComplexPerSec
                           << " in_sps=" << inputRate
@@ -1113,7 +1129,7 @@ int main(int argc, char **argv) {
                             ? (static_cast<double>(inputSamplesProcessed) /
                                streamDurationSec)
                             : 0.0;
-                    std::cerr << "airspyhf_decimator: zmq_timestamp_rate_sps="
+                    std::cerr << utcStamp() << "airspyhf_decimator: zmq_timestamp_rate_sps="
                               << timestampRate
                               << " first_ts_us=" << firstZmqTimestampUs
                               << " last_ts_us=" << lastZmqTimestampUs << "\n";
@@ -1124,7 +1140,7 @@ int main(int argc, char **argv) {
 
         readerGuard.join();
 
-        std::cerr << "airspyhf_decimator: stopping packets="
+        std::cerr << utcStamp() << "airspyhf_decimator: stopping packets="
                   << zmqPacketsReceived
                   << " malformed=" << receiver.malformedPackets()
                   << " dropped=" << droppedPackets
@@ -1133,11 +1149,11 @@ int main(int argc, char **argv) {
                   << " measured_rate_warnings=" << measuredRateWarnings
                   << " queue_drops=" << queue.dropped() << "\n";
     } catch (const ArgsError &err) {
-        std::cerr << "Argument error: " << err.what() << "\n";
+        std::cerr << utcStamp() << "airspyhf_decimator: argument error: " << err.what() << "\n";
         printUsage(argv[0]);
         return 64;
     } catch (const std::exception &err) {
-        std::cerr << "Fatal error: " << err.what() << "\n";
+        std::cerr << utcStamp() << "airspyhf_decimator: fatal error: " << err.what() << "\n";
         return 1;
     }
 

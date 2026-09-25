@@ -10,14 +10,17 @@ add_executable(MavlinkTagController2
     CollectionCoordinator.cpp CollectionCoordinator.h
     DetectionCoordinator.cpp DetectionCoordinator.h
     OperationProgress.cpp OperationProgress.h
+    RotationProgress.cpp RotationProgress.h
     RequestCache.cpp RequestCache.h
     TunnelCommandDispatcher.cpp TunnelCommandDispatcher.h
+    TunnelProtocolLog.cpp TunnelProtocolLog.h
     channelizerTuner.cpp channelizerTuner.h
     CommandHandler.cpp CommandHandler.h
     PythonPulseMapper.cpp PythonPulseMapper.h
     UDPPulseReceiver.cpp UDPPulseReceiver.h
     MonitoredProcess.cpp MonitoredProcess.h
     log.cpp log.h
+    logLevel.cpp logLevel.h
     formatString.h
     platformHelpers.h
     TagDatabase.cpp TagDatabase.h
@@ -68,6 +71,14 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_collection_protocol PRIVATE tunnel_protocol)
     add_test(NAME test_collection_protocol COMMAND test_collection_protocol)
+
+    add_executable(test_tunnel_protocol_log
+        tests/test_tunnel_protocol_log.cpp
+        TunnelProtocolLog.cpp TunnelProtocolLog.h
+    )
+    target_include_directories(test_tunnel_protocol_log PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_tunnel_protocol_log PRIVATE mavlink tunnel_protocol)
+    add_test(NAME test_tunnel_protocol_log COMMAND test_tunnel_protocol_log)
 
     add_executable(test_collection_coordinator
         tests/test_collection_coordinator.cpp
@@ -141,6 +152,8 @@ if(BUILD_TESTING)
     add_executable(test_command_retry
         tests/test_command_retry.cpp
         TunnelCommandDispatcher.cpp TunnelCommandDispatcher.h
+        TunnelProtocolLog.cpp TunnelProtocolLog.h
+        logLevel.cpp logLevel.h
         DetectionCoordinator.cpp DetectionCoordinator.h
         OperationProgress.cpp OperationProgress.h
         RequestCache.cpp RequestCache.h
@@ -157,4 +170,13 @@ if(BUILD_TESTING)
     target_include_directories(test_operation_progress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_operation_progress PRIVATE tunnel_protocol)
     add_test(NAME test_operation_progress COMMAND test_operation_progress)
+
+    add_executable(test_rotation_progress
+        tests/test_rotation_progress.cpp
+        OperationProgress.cpp OperationProgress.h
+        RotationProgress.cpp RotationProgress.h
+    )
+    target_include_directories(test_rotation_progress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_rotation_progress PRIVATE tunnel_protocol)
+    add_test(NAME test_rotation_progress COMMAND test_rotation_progress)
 endif()

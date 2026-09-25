@@ -38,7 +38,7 @@ void Connection::_checkForLostHeartbeats()
 {
 	if (_started && _autopilotFound && _lastReceivedHeartbeatAutopilotMSecs + HEARTBEAT_INTERVAL_MSECS < msecsSinceEpoch()) {
 		_heartbeatsLost = true;
-		logInfo() << "Heartbeats lost from autopilot";
+		logDebug() << "Heartbeats lost from autopilot";
 	}
 }
 
@@ -56,7 +56,7 @@ bool Connection::_parseMavlinkBuffer(uint8_t* buffer, size_t cBuffer)
 					if (message.sysid == _sysidAutopilot) {
 						if (_heartbeatsLost) {
 							_heartbeatsLost = false;
-							logInfo() << "Heartbeats regained from autopilot";
+							logDebug() << "Heartbeats regained from autopilot";
 						}
 						_lastReceivedHeartbeatAutopilotMSecs = msecsSinceEpoch();
 					}
@@ -64,7 +64,7 @@ bool Connection::_parseMavlinkBuffer(uint8_t* buffer, size_t cBuffer)
 					_autopilotFound = true;
 					_sysidAutopilot = message.sysid;
 					_lastReceivedHeartbeatAutopilotMSecs = msecsSinceEpoch();
-					logInfo() << "Found autopilot - sysid:" << message.sysid;
+					logDebug() << "Found autopilot - sysid:" << message.sysid;
 				}
 			} else {
 			    mavlink_heartbeat_t heartbeat;
@@ -77,7 +77,7 @@ bool Connection::_parseMavlinkBuffer(uint8_t* buffer, size_t cBuffer)
 						}
 					} else if (message.sysid == 255) {
 						// We were getting strange GCS connections on other sysids, so we only accept sysid 255 to prevent
-						logInfo() << "Found gcs - sysid:" << message.sysid;
+						logDebug() << "Found gcs - sysid:" << message.sysid;
 						_gcsFound = true;
 						_sysidGcs = message.sysid;
 						_lastReceivedHeartbeatGcsMSecs = msecsSinceEpoch();
@@ -98,7 +98,7 @@ bool Connection::_parseMavlinkBuffer(uint8_t* buffer, size_t cBuffer)
 
 void Connection::_receiveThreadMain()
 {
-	logInfo() << "Starting receive thread";
+	logDebug() << "Starting receive thread";
 
 	while (!_shouldExit) {
 		if (_started) {
@@ -125,5 +125,5 @@ void Connection::_receiveThreadMain()
 		}
 	}
 
-	logInfo() << "Exiting send thread";
+	logDebug() << "Exiting send thread";
 }

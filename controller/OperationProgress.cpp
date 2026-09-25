@@ -43,7 +43,7 @@ bool OperationProgressReporter::begin(uint32_t command, uint32_t requestId, cons
     _current.step           = 0;
     _current.step_count     = stepCount;
     setMessage(_current, title);
-    _send();
+    _send(true);
     return true;
 }
 
@@ -79,7 +79,7 @@ void OperationProgressReporter::_updateLocked(uint32_t step, uint32_t stepCount,
     if (messageChanged) {
         setMessage(_current, message);
     }
-    _send();
+    _send(messageChanged);
 }
 
 void OperationProgressReporter::finish(bool success, const std::string& message)
@@ -95,7 +95,7 @@ void OperationProgressReporter::finish(bool success, const std::string& message)
     if (!message.empty()) {
         setMessage(_current, message);
     }
-    _send();
+    _send(true);
     _running = false;
     _title.clear();
     _terminalResends = kTerminalResends;
@@ -135,9 +135,9 @@ std::string OperationProgressReporter::_busyMessageLocked() const
     return formatString("Busy: %s in progress", _title.c_str());
 }
 
-void OperationProgressReporter::_send()
+void OperationProgressReporter::_send(bool log)
 {
-    if (_logFn) {
+    if (log && _logFn) {
         _logFn(formatString("operation_progress command=%u request_id=%u state=%u step=%u/%u msg=%s",
                             _current.command, _current.request_id, _current.state,
                             _current.step, _current.step_count, _current.message));

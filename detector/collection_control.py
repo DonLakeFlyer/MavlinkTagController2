@@ -50,6 +50,37 @@ class CollectionControl:
         self._completed_ids = None
 
 
+class SliceProgressPolicy:
+    """When a SLICE_PROGRESS report goes out while a slice is armed.
+
+    The controller turns these into the GCS stall watchdog's evidence, so the
+    rules matter: at most one periodic report per INTERVAL_S, and only when the
+    caller has just received IQ (a stalled stream must go quiet); one final
+    report the moment the segment is full, regardless of the interval, because
+    the detector is then silent while it computes.
+    """
+
+    INTERVAL_S = 1.0
+
+    def __init__(self):
+        self._last_sent = float('-inf')
+
+    def reset(self):
+        """New slice armed: the first periodic report is not throttled."""
+        self._last_sent = float('-inf')
+
+    def periodic_due(self, now):
+        """Returns True (and records the send) if a periodic report is due at *now*."""
+        if now - self._last_sent < self.INTERVAL_S:
+            return False
+        self._last_sent = now
+        return True
+
+    def final_sent(self, now):
+        """The full-segment report was sent at *now*."""
+        self._last_sent = now
+
+
 def handle_control_packet(control, packet, expected_tag_id=None):
     """Decode an ARM and apply it. If *expected_tag_id* is given, a packet
     addressed to another detector is rejected before touching state."""

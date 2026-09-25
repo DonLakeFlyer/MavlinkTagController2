@@ -63,8 +63,10 @@ public:
     TunnelProtocol::AckInfo_t handle(const mavlink_tunnel_t& tunnel);
 
     /// START_DETECTION semantics without the tunnel framing; also used by the
-    /// collection path. Returns "" on success (including an in-flight start).
-    std::string startDetection(const TunnelProtocol::StartDetectionInfo_t& info);
+    /// collection path, which already owns the progress reporter for the whole
+    /// rotation and so passes checkBusy = false. Returns "" on success
+    /// (including an in-flight start).
+    std::string startDetection(const TunnelProtocol::StartDetectionInfo_t& info, bool checkBusy = true);
     /// Returns true if detection is stopping or already stopped as a result.
     /// requestId: the STOP_DETECTION request, 0 for controller-initiated stops.
     bool stopDetection(std::string* error = nullptr, uint32_t requestId = 0);

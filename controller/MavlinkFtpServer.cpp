@@ -38,7 +38,7 @@ void MavlinkFtpServer::_handleFileTransferProtocol(const mavlink_message_t& msg)
 
     // Basic sanity check: validate length before use.
     if (payload.size > maxRequestHeaderDataLength) {
-        logWarn() << "FTP: Nak - Invalid incoming data size size:max" << payload.size << ":" << maxRequestHeaderDataLength;
+        logDebug() << "FTP: Nak - Invalid incoming data size size:max" << payload.size << ":" << maxRequestHeaderDataLength;
         auto response = PayloadHeader{};
         response.seq_number = payload.seq_number + 1;
         response.req_opcode = payload.opcode;
@@ -167,7 +167,7 @@ void MavlinkFtpServer::_workList(const PayloadHeader& payload)
 
     std::error_code ec;
     if (!fs::exists(path, ec)) {
-        logWarn() << "FTP: can't open path " << path;
+        logDebug() << "FTP: can't open path " << path;
         // this is not an FTP error, abort directory by simulating eof
         response.opcode = Opcode::RSP_NAK;
         response.size = 1;
@@ -189,14 +189,14 @@ void MavlinkFtpServer::_workList(const PayloadHeader& payload)
 
         const auto is_regular_file = entry.is_regular_file(ec);
         if (ec) {
-            logWarn() << "Could not determine whether '" << entry.path().string()
+            logDebug() << "Could not determine whether '" << entry.path().string()
                       << "' is a file: " << ec.message();
             continue;
         }
 
         const auto is_directory = entry.is_directory(ec);
         if (ec) {
-            logWarn() << "Could not determine whether '" << entry.path().string()
+            logDebug() << "Could not determine whether '" << entry.path().string()
                       << "' is a directory: " << ec.message();
             continue;
         }
@@ -204,7 +204,7 @@ void MavlinkFtpServer::_workList(const PayloadHeader& payload)
         if (is_regular_file) {
             const auto filesize = fs::file_size(entry.path(), ec);
             if (ec) {
-                logWarn() << "Could not get file size of '" << entry.path().string()
+                logDebug() << "Could not get file size of '" << entry.path().string()
                           << "': " << ec.message();
                 continue;
             }
@@ -285,9 +285,9 @@ void MavlinkFtpServer::_workOpenFileReadOnly(const PayloadHeader& payload)
         }
     }
 
-    logInfo() << "Finding " << path << " in " << _homePath;
+    logDebug() << "Finding " << path << " in " << _homePath;
     if (path.rfind(_homePath, 0) != 0) {
-        logWarn() << "FTP: invalid path " << path;
+        logDebug() << "FTP: invalid path " << path;
         response.opcode = Opcode::RSP_NAK;
         response.size = 1;
         response.data[0] = ServerResult::ERR_FAIL;
@@ -319,7 +319,7 @@ void MavlinkFtpServer::_workOpenFileReadOnly(const PayloadHeader& payload)
     ifstream.open(path, std::ios::in | std::ios::binary);
 
     if (!ifstream.is_open()) {
-        logWarn() << "FTP: Open failed";
+        logDebug() << "FTP: Open failed";
         response.opcode = Opcode::RSP_NAK;
         response.size = 1;
         response.data[0] = ServerResult::ERR_FAIL;
@@ -429,7 +429,7 @@ void MavlinkFtpServer::_makeBurstPacket(PayloadHeader& packet)
         packet.opcode = Opcode::RSP_NAK;
         packet.size = 1;
         packet.data[0] = ServerResult::ERR_FAIL;
-        logWarn() << "Burst read failed";
+        logDebug() << "Burst read failed";
         return;
     }
 

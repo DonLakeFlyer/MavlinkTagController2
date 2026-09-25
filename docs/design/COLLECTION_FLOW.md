@@ -17,8 +17,8 @@ GCS (TagTracker)
    ▼
 MavlinkTagController2
    │  TTDP over UDP (shared/detector_protocol.h):
-   │     → ARM(heading_deg)          ← READY, ARMED, PULSE, NO_DETECTION,
-   │                                    CYCLE_COMPLETE, FAILED, HEARTBEAT (1 Hz)
+   │     → ARM(heading_deg)          ← READY, ARMED, SLICE_PROGRESS (≤ 1 Hz while armed),
+   │                                    PULSE, NO_DETECTION, CYCLE_COMPLETE, FAILED, HEARTBEAT (1 Hz)
    ▼
 pulse_detector.py  (one process per tag, alive for the whole collection)
 ```
@@ -44,7 +44,7 @@ stateDiagram-v2
         [*] --> Yawing : GCS yaws aircraft to heading N (clockwise sweep, 45° steps at 8 slices)
         Yawing --> Arming : GCS START_COLLECTION_SLICE(slice N, heading_deg)
         Arming --> Dwelling : controller sends ARM(heading) to every detector, all reply ARMED
-        Dwelling --> Blanking : K·PRI of IQ accumulated (about 40 s at K=20, tip 2 s)
+        Dwelling --> Blanking : K·PRI of IQ accumulated (about 40 s at K=20, tip 2 s); detector sends SLICE_PROGRESS once a second on IQ arrival
         Blanking --> Folding : optional impulse blanking (--impulse-blank-factor), then STFT
         Folding --> Thresholding : full-K fold search over the acquisition band
         Thresholding --> Reporting : permutation null of this dwell's own windows gives the threshold at pf, re-derived without a detected train's windows. Up to 4 frequency-separated peaks
@@ -87,6 +87,37 @@ already-completed slice re-sends `CYCLE_COMPLETE` (`collection_control.py`).
 Nothing on the control plane clears IQ: an ARM only records the stream index
 at which the slice begins (`iq_stream.py`), so a slice starts at the first
 sample after the aircraft has settled on the heading.
+
+### Rotation progress
+
+The whole collection is reported to the GCS as one `OPERATION_PROGRESS`
+operation with `command = START_COLLECTION` (`controller/RotationProgress.cpp`
+driving the shared `OperationProgressReporter`, so it also holds the busy gate
+for the rotation's duration). Steps advance only on evidence of work: one per
+pipeline process started, one per detector `READY`, then per slice one for
+`ARMED`, one per second of dwell (from `SLICE_PROGRESS`, governed by the
+detector credited with the least work — seconds received plus seconds its own
+restarts discarded — so a short-segment detector that has finished does not
+hold the step, and a restart on one detector cannot move it while another has
+received nothing), up to 12 compute steps
+ticked at 1 Hz from the heartbeat once every detector's segment is full (the
+detector sends a final `samples_have == samples_needed` report and is then
+silent while it runs the STFT, fold and permutation null; the bound means a
+detector hung in compute still trips the watchdog), one for the slice's
+`CYCLE_COMPLETE`, and finally three finalize stages (stopping detectors,
+computing bearing, sending results). `step_count` is sized at `START_COLLECTION`
+from `n_slices` and a `(K+1)·PRI` dwell estimate, then corrected from
+`SLICE_PROGRESS` (the longest segment reported by any detector) and grown by one slice on
+`REVISIT_REQUESTED`. When a detector restarts its segment after an IQ gap
+(`samples_have` drops by more than 2 s), the discarded seconds are added to the
+current slice as extra steps, so the step keeps advancing on resumed input
+instead of holding until the detector regains its old count. The step never
+moves backwards within one layout. The
+operation ends `COMPLETE` after `COLLECTION_STATUS_STOPPED` on finalize and
+`FAILED` on cancel, detector `FAILED`, detector process exit or startup timeout.
+Because `SLICE_PROGRESS` is only sent when IQ arrives, a stalled stream stops
+the step, which is the signal the GCS uses to cancel a hung rotation instead of
+per-phase timeouts.
 
 ## Per-slice cycle
 

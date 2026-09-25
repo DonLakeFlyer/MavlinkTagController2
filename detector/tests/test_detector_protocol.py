@@ -19,10 +19,12 @@ from detector_protocol import (  # noqa: E402
     decode_header,
     decode_failed_report,
     decode_pulse_report,
+    decode_slice_progress,
     encode_arm,
     encode_failed_report,
     encode_header,
     encode_pulse_report,
+    encode_slice_progress,
 )
 
 
@@ -177,6 +179,26 @@ def test_header_only_message_rejects_payload():
 
     with pytest.raises(ProtocolError):
         decode_header(packet)
+
+
+def test_slice_progress_round_trips_with_stable_layout():
+    encoded = encode_slice_progress(
+        collection_id=7, slice_id=3, tag_id=42,
+        samples_have=38_400, samples_needed=115_200, sample_rate_hz=3840,
+    )
+
+    # Must match TagTrackerDetectorProtocol::SliceProgressPayload (shared/detector_protocol.h)
+    assert encoded == struct.pack('<IHHIIIIII', MAGIC, MessageType.SLICE_PROGRESS, 12, 7, 3, 42,
+                                  38_400, 115_200, 3840)
+    header, have, needed, fs = decode_slice_progress(encoded)
+    assert header.message_type == MessageType.SLICE_PROGRESS
+    assert (header.collection_id, header.slice_id, header.tag_id) == (7, 3, 42)
+    assert (have, needed, fs) == (38_400, 115_200, 3840)
+
+    with pytest.raises(ProtocolError):
+        decode_slice_progress(encode_header(MessageType.ARMED, 0, 7, 3, 42))
+    with pytest.raises(ProtocolError):
+        decode_header(encode_header(MessageType.SLICE_PROGRESS, 0, 7, 3, 42))
 
 
 @pytest.mark.parametrize('packet', [

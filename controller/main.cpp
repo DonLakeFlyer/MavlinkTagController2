@@ -171,6 +171,8 @@ int main(int argc, char** argv)
 			}
         } else if (strcmp(argv[i], "--debug-detector") == 0) {
             debugDetector = true;
+        } else if (strcmp(argv[i], "--verbose") == 0) {
+            setVerboseLogging(true);
         } else if (strcmp(argv[i], "--detector-impulse-blank-factor") == 0) {
             // Passed through to every pulse_detector.py as --impulse-blank-factor.
             double value = 0.0;
@@ -219,18 +221,18 @@ int main(int argc, char** argv)
                                    || simulatorPreset == "below-marginal" || simulatorPreset == "competing"
                                    || simulatorPreset == "silent" || simulatorPreset == "power-line";
         if (isLevelPreset) {
-            logInfo() << "Simulator mode enabled (level:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB"
+            logDebug() << "Simulator mode enabled (level:" << simulatorPreset << " snr:" << simulatorSnrDb << "dB"
                       << " tx bearing:" << simulatorTxBearingDeg << "deg"
                       << " interferer snr:" << simulatorInterfererSnrDb << "dB"
                       << " noise source:" << simulatorNoiseSource.db << "dB at" << simulatorNoiseSource.bearingDeg << "deg"
                       << (simulatorNoiseSource.impulsive ? " impulsive" : "")
                       << " antenna:" << simulatorAntenna << " pri ppm:" << simulatorPriPpm << ")";
         } else {
-            logInfo() << "Simulator mode enabled (preset:" << simulatorPreset << ", used only when no tag is configured)";
+            logDebug() << "Simulator mode enabled (preset:" << simulatorPreset << ", used only when no tag is configured)";
         }
-		logInfo() << "Simulator telemetry endpoint:" << simulatorTelemetryEndpoint;
+		logDebug() << "Simulator telemetry endpoint:" << simulatorTelemetryEndpoint;
     }
-    logInfo() << "Connecting to" << connectionUrl;
+    logDebug() << "Connecting to" << connectionUrl;
 
 	MavlinkSystem* mavlink = MavlinkSystem::instance();
 	mavlink->init(connectionUrl);
@@ -239,7 +241,7 @@ int main(int argc, char** argv)
 	if (simulatorMode) {
 		simulatorTelemetryPublisher = std::make_unique<SimulatorTelemetryPublisher>(mavlink, simulatorTelemetryEndpoint, 200);
 		if (!simulatorTelemetryPublisher->start()) {
-			logWarn() << "Failed to start simulator telemetry publisher; simulator will run without vehicle pose feed";
+			logDebug() << "Failed to start simulator telemetry publisher; simulator will run without vehicle pose feed";
 			simulatorTelemetryPublisher.reset();
 		}
 	}
@@ -261,7 +263,7 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
-	logInfo() << "Waiting for autopilot heartbeat...";
+	logDebug() << "Waiting for autopilot heartbeat...";
 	while (!mavlink->connected()) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
@@ -314,7 +316,7 @@ int main(int argc, char** argv)
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
 
-	logInfo() << "Exiting...";
+	logDebug() << "Exiting...";
 
     return 0;
 }

@@ -27,6 +27,20 @@ public:
         AlreadyComplete,
     };
 
+    static const char* resultName(Result result)
+    {
+        switch (result) {
+        case Result::Accepted:        return "Accepted";
+        case Result::Duplicate:       return "Duplicate";
+        case Result::Conflict:        return "Conflict";
+        case Result::Stale:           return "Stale";
+        case Result::Busy:            return "Busy";
+        case Result::OutOfOrder:      return "OutOfOrder";
+        case Result::AlreadyComplete: return "AlreadyComplete";
+        }
+        return "?";
+    }
+
     Result start(uint32_t collectionId, std::vector<uint32_t> detectorTagIds);
     Result detectorReady(uint32_t collectionId, uint32_t tagId);
     Result armSlice(uint32_t collectionId, uint32_t sliceId, float headingDeg);
@@ -48,6 +62,9 @@ public:
     uint32_t sliceId() const { return _activeSliceId.value_or(0); }
     float headingDeg() const { return _activeHeadingDeg; }
     size_t expectedDetectorCount() const { return _expectedTagIds.size(); }
+    bool isExpectedDetector(uint32_t tagId) const { return _expectedTagIds.contains(tagId); }
+    size_t readyDetectorCount() const { return _readyTagIds.size(); }
+    size_t armedDetectorCount() const { return _armedTagIds.size(); }
     bool sliceArmed() const { return !_expectedTagIds.empty() && _armedTagIds.size() == _expectedTagIds.size(); }
     size_t completedDetectorCount() const { return _completedTagIds.size(); }
 

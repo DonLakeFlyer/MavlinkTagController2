@@ -62,7 +62,7 @@ bool SimulatorTelemetryPublisher::start()
 	_running = true;
 	_thread = std::make_unique<std::thread>(&SimulatorTelemetryPublisher::_run, this);
 
-	logInfo() << "SimulatorTelemetryPublisher: publishing vehicle telemetry on" << _endpoint;
+	logDebug() << "SimulatorTelemetryPublisher: publishing vehicle telemetry on" << _endpoint;
 	return true;
 }
 
@@ -111,7 +111,7 @@ void SimulatorTelemetryPublisher::_run()
 
 			const int rc = zmq_send(_zmqPub, payload, std::strlen(payload), ZMQ_DONTWAIT);
 			if (rc < 0 && zmq_errno() != EAGAIN) {
-				logWarn() << "SimulatorTelemetryPublisher: zmq_send failed:" << zmq_strerror(zmq_errno());
+				logDebug() << "SimulatorTelemetryPublisher: zmq_send failed:" << zmq_strerror(zmq_errno());
 			}
 		}
 

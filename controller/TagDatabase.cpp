@@ -79,8 +79,8 @@ bool TagDatabase::_writeDetectorConfig(const TunnelProtocol::TagInfo_t& tagInfo,
         fileContents += buffer;
     }
 
-    logInfo() << "DETECTOR CONFIG:" << configPath;
-    logInfo() << fileContents;
+    logDebug() << "DETECTOR CONFIG:" << configPath;
+    logDebug() << fileContents;
 
     fclose(fp);
 
