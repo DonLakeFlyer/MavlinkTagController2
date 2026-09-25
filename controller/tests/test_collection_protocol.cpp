@@ -8,8 +8,14 @@ using namespace TunnelProtocol;
 
 int main()
 {
-    static_assert(TUNNEL_PROTOCOL_VERSION == 5);
+    static_assert(TUNNEL_PROTOCOL_VERSION == 7);
     static_assert(COMMAND_ID_OPERATION_PROGRESS == 21);
+    static_assert(COMMAND_ID_SET_LOG_LEVEL == 22);
+    static_assert(COMMAND_ID_DETECTOR_HEARTBEAT == 23);
+    static_assert(sizeof(DetectorHeartbeat_t) == sizeof(HeaderInfo_t) + 2 * sizeof(uint32_t));
+    static_assert(sizeof(SetLogLevel_t) == 12);
+    static_assert(offsetof(SetLogLevel_t, level) == 8);
+    static_assert(LOG_LEVEL_DEBUG == 0 && LOG_LEVEL_VERBOSE == 1);
     static_assert(offsetof(OperationProgress_t, message) == 28);
     static_assert(sizeof(HeaderInfo_t) == 8);
     static_assert(offsetof(HeaderInfo_t, request_id) == 4);
@@ -43,7 +49,7 @@ int main()
 
     Heartbeat_t heartbeat {};
     heartbeat.protocol_version = TUNNEL_PROTOCOL_VERSION;
-    CHECK(heartbeat.protocol_version == 5);
+    CHECK(heartbeat.protocol_version == 7);
 
     StartCollection_t collection {};
     collection.antenna_id = ANTENNA_ID_RA23K;

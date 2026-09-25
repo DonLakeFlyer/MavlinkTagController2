@@ -162,6 +162,26 @@ void testLogLineIsStable()
     CHECK(s.log.back() == "operation_progress command=8 request_id=5 state=1 step=0/13 msg=Raw capture");
 }
 
+// A rotation advances one step per dwell second; only message changes reach the debug log.
+void testStepOnlyUpdatesNotLogged()
+{
+    Sink s;
+    CHECK(s.reporter.begin(COMMAND_ID_START_COLLECTION, 7, "Rotation", 351));
+    s.reporter.update(10, "1/8 000 deg");
+    const size_t logLines = s.log.size();
+    CHECK(s.log.back().find("msg=1/8 000 deg") != std::string::npos);
+
+    s.reporter.update(11);
+    s.reporter.update(12);
+    CHECK(s.frames.size() == 4);                       // still sent
+    CHECK(s.log.size() == logLines);
+
+    s.reporter.update(13, "2/8 045 deg");
+    CHECK(s.log.size() == logLines + 1);
+    s.reporter.finish(true, "Rotation complete");
+    CHECK(s.log.size() == logLines + 2);
+}
+
 } // namespace
 
 int main()
@@ -174,6 +194,7 @@ int main()
     testResendWhileRunningAndBoundedAfterFinish();
     testMessageTruncation();
     testLogLineIsStable();
+    testStepOnlyUpdatesNotLogged();
     std::printf("test_operation_progress: all tests passed\n");
     return 0;
 }

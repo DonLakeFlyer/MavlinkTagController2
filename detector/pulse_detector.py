@@ -39,10 +39,10 @@ import threading
 import traceback
 from collections import deque
 
-from collection_control import ArmResult, CollectionControl, handle_control_packet
+from collection_control import ArmResult, CollectionControl, SliceProgressPolicy, handle_control_packet
 from detector_protocol import (ErrorCode, MessageType, ProtocolError, PulseReport,
                                encode_failed_report, encode_header,
-                               encode_pulse_report)
+                               encode_pulse_report, encode_slice_progress)
 from iq_stream import IqStream
 from udp_receiver import PacketRing, UdpReceiver
 import time
@@ -55,6 +55,7 @@ from log_schema import (StructuredLogger, STARTUP, DETECTION, NO_DETECTION,
                         GAP_EVENT, EVT_THRESHOLD, CYCLE_THRESHOLD, HYPOTHESIS,
                         SESSION_END, STFT_DEBUG, LOCK_CANDIDATE,
                         CANDIDATE_MEASUREMENT)
+from utc_log_stream import install_utc_line_prefix
 
 import numpy as np
 from scipy.linalg import toeplitz as scipy_toeplitz
@@ -264,6 +265,23 @@ def send_failed_udp(pulse_sock, dest_addr, tag_id, collection_id, slice_id,
         return True
     except OSError as e:
         print(f'Warning: failure report send failed: {e}', file=sys.stderr, flush=True)
+        return False
+
+
+def send_slice_progress_udp(pulse_sock, dest_addr, tag_id, collection_id, slice_id,
+                            samples_have, samples_needed, sample_rate_hz):
+    # All three fields are uint32 on the wire; a progress report must never
+    # be able to raise out of the detection loop.
+    u32_max = 0xFFFFFFFF
+    needed = int(max(0, min(samples_needed, u32_max)))
+    have = int(max(0, min(samples_have, needed)))
+    fs = int(max(1, min(sample_rate_hz, u32_max)))
+    try:
+        packet = encode_slice_progress(collection_id, slice_id, tag_id, have, needed, fs)
+        pulse_sock.sendto(packet, dest_addr)
+        return True
+    except (OSError, struct.error) as e:
+        print(f'Warning: slice progress send failed: {e}', file=sys.stderr, flush=True)
         return False
 
 
@@ -1911,6 +1929,7 @@ def main():
                     help='Save per-cycle spectrogram, IQ, and metadata '
                          'to --log-dir (requires --log-dir).')
     args = ap.parse_args()
+    install_utc_line_prefix()
 
     global K
     K = args.k
@@ -2200,6 +2219,7 @@ def main():
     warmup_remaining_samples = int(round(args.warmup_seconds * args.fs))
     collection_ready_sent = False
     last_ready_sent = float('-inf')
+    progress_policy = SliceProgressPolicy()
 
     # Cross-cycle threshold bookkeeping (see fold_detect threshold_state).
     # Fixed seed: a replay of the same IQ must reproduce the same thresholds.
@@ -2259,6 +2279,7 @@ def main():
                     if arm_result == ArmResult.ARMED:
                         # Heading starts here; the timeline itself is untouched.
                         cursor = stream.head
+                        progress_policy.reset()
                         armed_heading_deg = (arm_heading_deg % 360.0
                                              if math.isfinite(arm_heading_deg) else None)
                         if args.log_dir:
@@ -2371,6 +2392,15 @@ def main():
 
             # ---- process when we have a full segment ----
             if stream.head - cursor < samples_needed:
+                # Only sent on IQ arrival: a stalled stream stops progress, which
+                # is what the controller/GCS stall watchdog is meant to see.
+                if collection_control is not None:
+                    if progress_policy.periodic_due(time.monotonic()):
+                        progress_collection_id, progress_slice_id = collection_control.active_ids
+                        send_slice_progress_udp(
+                            pulse_sock, pulse_dest, args.tag_id,
+                            progress_collection_id, progress_slice_id,
+                            int(stream.head - cursor), int(samples_needed), int(args.fs))
                 continue
 
             cycle += 1
@@ -2378,6 +2408,13 @@ def main():
 
             if collection_control is not None:
                 cycle_collection_id, cycle_slice_id = collection_control.active_ids
+                # Final report: the segment is full and the detector goes quiet
+                # while it computes, which the controller shows as compute steps.
+                send_slice_progress_udp(
+                    pulse_sock, pulse_dest, args.tag_id,
+                    cycle_collection_id, cycle_slice_id,
+                    int(samples_needed), int(samples_needed), int(args.fs))
+                progress_policy.final_sent(t0)
             else:
                 cycle_collection_id, cycle_slice_id = 0, 0
 

@@ -6,6 +6,7 @@
 // idempotency, GCS restart and controller restart.
 
 #include "TunnelCommandDispatcher.h"
+#include "logLevel.h"
 #include "test_check.h"
 
 #include <cmath>
@@ -672,6 +673,28 @@ void testStopDetectionNotGatedAndCarriesRequestId()
     CHECK(g.actions.lastSaveRequestId == saveId);
 }
 
+void testSetLogLevel()
+{
+    Gcs g;
+    setVerboseLogging(false);
+    SetLogLevel_t level {};
+    level.level = LOG_LEVEL_VERBOSE;
+    CHECK(ok(g.send(level, COMMAND_ID_SET_LOG_LEVEL)));
+    CHECK(verboseLogging());
+    level.level = LOG_LEVEL_DEBUG;
+    CHECK(ok(g.send(level, COMMAND_ID_SET_LOG_LEVEL)));
+    CHECK(!verboseLogging());
+    level.level = 7;
+    CHECK(nack(g.send(level, COMMAND_ID_SET_LOG_LEVEL)));
+    CHECK(!verboseLogging());
+    // Works in any state: it is not gated by idle or by the busy reporter.
+    CHECK(g.progress.begin(COMMAND_ID_SAVE_LOGS, 1, "Saving logs"));
+    level.level = LOG_LEVEL_VERBOSE;
+    CHECK(ok(g.send(level, COMMAND_ID_SET_LOG_LEVEL)));
+    CHECK(verboseLogging());
+    setVerboseLogging(false);
+}
+
 } // namespace
 
 int main()
@@ -696,6 +719,7 @@ int main()
     testLegacyRequestIdZeroIsNeverDeduped();
     testLongRunningCommandsRefusedWhileBusy();
     testStopDetectionNotGatedAndCarriesRequestId();
+    testSetLogLevel();
     std::printf("test_command_retry: all tests passed\n");
     return 0;
 }

@@ -37,7 +37,8 @@ public:
     std::string busyMessage() const;
 
 private:
-    void        _send();
+    /// log: step-only updates skip the debug line; the frame itself is logged at verbose by the sender.
+    void        _send(bool log);
     void        _updateLocked(uint32_t step, uint32_t stepCount, const std::string& message);
     std::string _busyMessageLocked() const;
 

@@ -13,6 +13,11 @@ legacy detector_*.config) and produces the evidence for:
             not measurable from these logs; needs raw IQ)
   Check 5 - noise_psd across sessions and headings
 
+The controller log carries confirmed pulses at the default log level; the
+unconfirmed "Conf: 0" pulses and "NO DETECTION" noise lines it also matches are
+only present when the controller ran with --verbose. The detector jsonl/logs
+are the primary source for those; the controller-log parse is a fallback.
+
 Usage:  python3 flight_checks.py "/Users/don/Documents/PDC Testing"
 """
 

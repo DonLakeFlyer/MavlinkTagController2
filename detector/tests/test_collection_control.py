@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from collection_control import (  # noqa: E402
     ArmResult,
     CollectionControl,
+    SliceProgressPolicy,
     handle_control_packet,
 )
 from detector_protocol import MessageType, ProtocolError, encode_arm, encode_header  # noqa: E402
@@ -122,3 +123,35 @@ def test_arm_for_another_tag_does_not_touch_state():
     # tag_id 0 is the broadcast form and is still accepted
     _, result, _ = handle_control_packet(control, encode_arm(10, 4, 0, 0.0), expected_tag_id=42)
     assert result == ArmResult.DUPLICATE
+
+
+def test_slice_progress_periodic_is_throttled_to_one_hertz():
+    policy = SliceProgressPolicy()
+
+    assert policy.periodic_due(100.0)          # first report of a slice goes out at once
+    assert not policy.periodic_due(100.5)
+    assert not policy.periodic_due(100.99)
+    assert policy.periodic_due(101.0)
+    assert not policy.periodic_due(101.5)
+    assert policy.periodic_due(102.3)          # interval is measured from the last send, not a grid
+    assert not policy.periodic_due(103.2)
+
+
+def test_slice_progress_reset_on_arm_unthrottles_first_report():
+    policy = SliceProgressPolicy()
+    assert policy.periodic_due(100.0)
+    assert not policy.periodic_due(100.2)
+
+    policy.reset()                              # new slice armed
+    assert policy.periodic_due(100.3)
+
+
+def test_slice_progress_final_report_restarts_the_clock():
+    policy = SliceProgressPolicy()
+    assert policy.periodic_due(100.0)
+
+    # The full-segment report is unconditional; the policy only records it so a
+    # periodic report cannot follow it within the interval.
+    policy.final_sent(100.4)
+    assert not policy.periodic_due(101.0)
+    assert policy.periodic_due(101.4)

@@ -68,7 +68,7 @@ bool MonitoredProcess::waitForExit(std::chrono::milliseconds timeout, bool quiet
 	std::unique_lock<std::mutex> lock(_exitMutex);
 	const bool exited = _exitCondition.wait_for(lock, timeout, [this]() { return _exited; });
 	if (!exited && !quiet) {
-		logWarn() << "MonitoredProcess::waitForExit timed out:" << _name;
+		logDebug() << "MonitoredProcess::waitForExit timed out:" << _name;
 	}
 	return exited;
 }
@@ -78,7 +78,7 @@ void MonitoredProcess::_run(void)
 	std::string statusStr("Process start: ");
 	statusStr.append(_name);
 
-	logInfo() << statusStr << "'" << _command.c_str() << "' >" << _logPath.c_str();
+	logDebug() << statusStr << "'" << _command.c_str() << "' >" << _logPath.c_str();
 	_mavlink->sendStatusText(statusStr.c_str());
 
 	std::filesystem::remove(_logPath);
@@ -132,8 +132,15 @@ void MonitoredProcess::_run(void)
 		statusStr.append(" ");
 	}
 	statusStr.append(_name);
-	logError() << statusStr;
-	_mavlink->sendStatusText(statusStr, (result == 0 || _stopped) ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
+	// Only a requested stop, or a capture that ran to completion, is a normal exit;
+	// a pipeline process ending on its own is a fault even at exit code 0.
+	const bool expectedExit = _stopped || (_rawCaptureProcess && result == 0);
+	if (expectedExit) {
+		logDebug() << statusStr;
+	} else {
+		logError() << statusStr;
+	}
+	_mavlink->sendStatusText(statusStr, expectedExit ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
 
     // A persistent detector must not exit on its own, even cleanly (e.g. an
     // external SIGTERM it handled gracefully); only a controller-requested

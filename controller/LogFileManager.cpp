@@ -97,7 +97,7 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
         break;
     case ROTATION:
         if (!_logDirRotation.empty()) {
-            logWarn() << "Previous rotation log directory not cleaned up, replacing";
+            logDebug() << "Previous rotation log directory not cleaned up, replacing";
             _logDirRotation.clear();
         }
         logDirPrefix = formatString("%s%s", _logsDirPrefix.c_str(), "Rotation");
@@ -219,7 +219,7 @@ std::list<std::string> LogFileManager::_listLogFileDirs(bool* complete)
         std::error_code statusEc;
         const auto status = itr->status(statusEc);
         if (statusEc) {
-            logWarn() << "Skipping " << itr->path() << ": " << statusEc.message();
+            logDebug() << "Skipping " << itr->path() << ": " << statusEc.message();
             if (complete) {
                 *complete = false;
             }
@@ -233,7 +233,7 @@ std::list<std::string> LogFileManager::_listLogFileDirs(bool* complete)
         }
     }
     if (ec) {
-        logWarn() << "Error listing " << _logsRoot << ": " << ec.message();
+        logDebug() << "Error listing " << _logsRoot << ": " << ec.message();
         if (complete) {
             *complete = false;
         }
@@ -256,7 +256,7 @@ std::string LogFileManager::_getSDCardPath()
             MavlinkSystem::instance()->sendStatusText(errorMsg, MAV_SEVERITY_ALERT);
             return std::string();
         }
-        logInfo() << "Not running on rPi, saving logs to" << fakeSDCardDir.string();
+        logDebug() << "Not running on rPi, saving logs to" << fakeSDCardDir.string();
         return fakeSDCardDir.string();
     }
 
@@ -295,7 +295,7 @@ std::string LogFileManager::_getSDCardPath()
 
 LogFileManager::LogOpResult LogFileManager::saveLogsToSDCard(const ProgressFn& progress)
 {
-    logInfo() << "Saving logs to SD card";
+    logDebug() << "Saving logs to SD card";
 
     std::string sdCardPath = _getSDCardPath();
     if (sdCardPath.empty()) {
@@ -310,7 +310,7 @@ LogFileManager::LogOpResult LogFileManager::saveLogsToSDCard(const ProgressFn& p
         return LogOpResult::Failed;
     }
     if (logDirs.empty()) {
-        logInfo() << "No log directories found";
+        logDebug() << "No log directories found";
         return LogOpResult::NothingToDo;
     }
 
@@ -391,7 +391,7 @@ LogFileManager::LogOpResult LogFileManager::saveLogsToSDCard(const ProgressFn& p
 
 LogFileManager::LogOpResult LogFileManager::cleanLocalLogs(const ProgressFn& progress)
 {
-    logInfo() << "Cleaning local logs";
+    logDebug() << "Cleaning local logs";
     // The closed session dir is about to be deleted; stop mirroring into it.
     _logDirClosed.clear();
 
@@ -402,7 +402,7 @@ LogFileManager::LogOpResult LogFileManager::cleanLocalLogs(const ProgressFn& pro
         return LogOpResult::Failed;
     }
     if (logDirs.empty()) {
-        logInfo() << "No log directories found";
+        logDebug() << "No log directories found";
         return LogOpResult::NothingToDo;
     }
 
@@ -412,7 +412,7 @@ LogFileManager::LogOpResult LogFileManager::cleanLocalLogs(const ProgressFn& pro
     for (const auto& logDir: logDirs) {
         fs::path dirPath = _logsRoot + "/" + logDir;
         std::error_code errorCode;
-        logInfo() << "Removing directory " << dirPath;
+        logDebug() << "Removing directory " << dirPath;
         fs::remove_all(dirPath, errorCode);
         if (errorCode) {
             logError() << "Failed to remove directory " << dirPath << ": " << errorCode.message();
@@ -425,9 +425,9 @@ LogFileManager::LogOpResult LogFileManager::cleanLocalLogs(const ProgressFn& pro
     }
 
     if (allOk) {
-        logInfo() << "Local logs deleted";
+        logDebug() << "Local logs deleted";
     } else {
-        logWarn() << "Local log deletion incomplete";
+        logDebug() << "Local log deletion incomplete";
     }
     return allOk ? LogOpResult::Done : LogOpResult::Failed;
 }
@@ -438,7 +438,7 @@ unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double t
     std::error_code ec;
     auto spaceInfo = fs::space(_homeDir, ec);
     if (ec || spaceInfo.capacity == 0) {
-        logWarn() << "LogRetention: unable to query disk space: " << ec.message();
+        logDebug() << "LogRetention: unable to query disk space: " << ec.message();
         return 0;
     }
 
@@ -446,16 +446,16 @@ unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double t
     double totalGB     = static_cast<double>(spaceInfo.capacity) / (1024.0 * 1024.0 * 1024.0);
     double freeGB      = static_cast<double>(spaceInfo.available) / (1024.0 * 1024.0 * 1024.0);
 
-    logInfo() << "LogRetention: disk " << std::fixed << std::setprecision(1)
+    logDebug() << "LogRetention: disk " << std::fixed << std::setprecision(1)
               << freeGB << " GB free / " << totalGB << " GB total (" << freePercent << "%)";
 
     if (freePercent >= minFreePercent) {
-        logInfo() << "LogRetention: free space " << std::fixed << std::setprecision(1)
+        logDebug() << "LogRetention: free space " << std::fixed << std::setprecision(1)
                   << freePercent << "% >= " << minFreePercent << "% threshold, no cleanup needed";
         return 0;
     }
 
-    logWarn() << "LogRetention: free space " << std::fixed << std::setprecision(1)
+    logDebug() << "LogRetention: free space " << std::fixed << std::setprecision(1)
               << freePercent << "% < " << minFreePercent << "% threshold, starting cleanup";
 
     // Get log directories sorted oldest-first by timestamp suffix.
@@ -483,7 +483,7 @@ unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double t
         freePercent = 100.0 * static_cast<double>(spaceInfo.available) / static_cast<double>(spaceInfo.capacity);
 
         if (freePercent >= targetFreePercent) {
-            logInfo() << "LogRetention: free space recovered to " << std::fixed << std::setprecision(1)
+            logDebug() << "LogRetention: free space recovered to " << std::fixed << std::setprecision(1)
                       << freePercent << "%, stopping cleanup";
             break;
         }
@@ -498,7 +498,7 @@ unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double t
             _logDirClosed.clear();
         }
 
-        logInfo() << "LogRetention: removing " << logDirs.front()
+        logDebug() << "LogRetention: removing " << logDirs.front()
                   << " (free space " << std::fixed << std::setprecision(1)
                   << freePercent << "% < target " << targetFreePercent << "%)";
 
@@ -517,10 +517,10 @@ unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double t
         spaceInfo = fs::space(_homeDir, ec);
         freePercent = (ec || spaceInfo.capacity == 0) ? 0.0
                       : 100.0 * static_cast<double>(spaceInfo.available) / static_cast<double>(spaceInfo.capacity);
-        logInfo() << "LogRetention: pruned " << removed << " old log directories, free space now "
+        logDebug() << "LogRetention: pruned " << removed << " old log directories, free space now "
                   << std::fixed << std::setprecision(1) << freePercent << "%";
     } else if (freePercent < minFreePercent) {
-        logWarn() << "LogRetention: disk still under pressure (" << std::fixed << std::setprecision(1)
+        logDebug() << "LogRetention: disk still under pressure (" << std::fixed << std::setprecision(1)
                   << freePercent << "%) but only " << logDirs.size()
                   << " log dirs remain (min keep: " << minKeepDirs << ")";
     }

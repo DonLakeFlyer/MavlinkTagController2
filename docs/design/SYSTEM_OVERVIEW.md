@@ -32,7 +32,7 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
 | Decimator → detectors | UDP, one port per detector | `complex64` array; first element is a header with `uint32` seconds / nanoseconds bit-cast into its float lanes, rest are IQ; short frame before a hole | 3840 S/s |
 | Detector → controller | UDP `CommandHandler::kPulseUdpPort` (50000) | TTDP, `shared/detector_protocol.h` | per cycle + 1 Hz heartbeat |
 | Controller → detector | UDP `--control-port` per detector | TTDP `ARM` | per slice |
-| Controller ⇄ GCS | MAVLink tunnel through the autopilot | `TunnelProtocol.h` (CPM-pinned; exact `TUNNEL_PROTOCOL_VERSION` match required) | commands + pulses + bearings |
+| Controller ⇄ GCS | MAVLink tunnel through the autopilot | `TunnelProtocol.h` (CPM-pinned; exact `TUNNEL_PROTOCOL_VERSION` match required) | commands + pulses + bearings; each detector's 1 Hz TTDP heartbeat (uavrt: `frequency_hz == 0` UDP report) is relayed as `DETECTOR_HEARTBEAT` |
 
 ## Control flow of a flight
 
@@ -112,14 +112,19 @@ indicator. Steps: one per pipeline process for start/stop, one per elapsed
 second of the 13 s raw capture, one per file for save logs (plus the unmount
 on the rPi), one per session directory for clean logs; the post-flight
 analysis that follows a stop is reported indeterminate under
-`STOP_DETECTION` with `request_id` 0.
+`STOP_DETECTION` with `request_id` 0. A collection is one operation under
+`START_COLLECTION` spanning the whole rotation, advanced by detector
+`READY`/`ARMED`/`SLICE_PROGRESS`/`CYCLE_COMPLETE` and the finalize stages
+(`RotationProgress`; see COLLECTION_FLOW.md § Rotation progress); the pipeline
+start/stop inside it do not open their own operations.
 
 The reporter is also the concurrency gate: `TunnelCommandDispatcher` NACKs a
 second long-running command with `Busy: <operation> in progress` while one is
 running (`STOP_DETECTION` is exempt — `DetectionCoordinator` already refuses
-it while `Starting`, and it must be able to interrupt detection). Every
-transition is logged as `operation_progress command=… request_id=… state=…
-step=x/y msg=…`. Spoken status texts remain only for completion and failure
+it while `Starting`, and it must be able to interrupt detection). Begin,
+message changes and finish are logged as `operation_progress command=…
+request_id=… state=… step=x/y msg=…`; step-only updates and the 1 Hz re-sends
+appear only in the verbose `OPERATION_PROGRESS sent:` frame log. Spoken status texts remain only for completion and failure
 (`#Log save complete`, `#Logs deleted`, `#Capture complete`, the hung-process
 alerts).
 
@@ -147,6 +152,20 @@ Detector bins are ~33 Hz wide. The simulator has no spur, hence
 
 The GCS can fetch any of these over MAVLink FTP (`MavlinkFtpServer`).
 
+### Controller log levels
+
+Every line is `[HH:MM:SS|L]  message  (file:line)` with `L` one of `D`
+(normal), `E` (internal error) or `V` (verbose). `D` and `E` are always
+written. `V` carries the high-rate lines: unconfirmed pulses, `NO DETECTION`
+cycles, detector heartbeats and `PULSE`/`PYTHON_PULSE` tunnel frames; it is
+off by default and enabled either by `--verbose` at startup or at runtime by
+the GCS `SET_LOG_LEVEL` command (`SetLogLevel_t::level`), which TagTracker
+sends from its *Controller verbose logging* setting on every change and on
+every (re)connect, since the controller reverts to the default on restart.
+Every other tunnel frame in either direction is logged at `D` as
+`<NAME> sent:`/`<NAME> received:` with its fields (`TunnelProtocolLog`); the
+1 Hz `HEARTBEAT` is summarized once a minute and on status change.
+
 ## Failure behaviour at each hop
 
 | Anomaly | Where detected | Action |
@@ -158,7 +177,7 @@ The GCS can fetch any of these over MAVLink FTP (`MavlinkFtpServer`).
 | UDP gap ≥ 2·tp | detector `iq_stream` | barrier; segment restarts after the hole |
 | Detector `FAILED` during a slice | controller | forwarded to the GCS as `COLLECTION_STATUS_FAILED` with the error code (only if it names the current slice); the GCS decides whether to cancel |
 | Detector process exits during a collection (crash or unrequested exit) | controller `MonitoredProcess` → `_handleDetectorProcessFailure` | `COLLECTION_STATUS_FAILED` with `ErrorCode::ProcessFailed` and expected/completed detector counts sent to the GCS; if still in `Starting`, the collection is cancelled. Outside a collection the exit is only logged and announced as a status text |
-| Detector silent | controller | heartbeats are logged on receipt only; there is no controller-side timeout on `CYCLE_COMPLETE`, so a stalled detector holds the slice open until the GCS times out or cancels |
+| Detector silent | controller | heartbeats are logged on receipt only; there is no controller-side timeout on `CYCLE_COMPLETE`. During a collection the rotation `OPERATION_PROGRESS` step stops advancing (no `SLICE_PROGRESS`), which the GCS treats as a stalled rotation and cancels |
 | No candidate clears `confidenceFloor` | `BearingCalculator` | `BEARING_RESULT` with NaN bearing, `confirmed = 0` |
 
 ## Related

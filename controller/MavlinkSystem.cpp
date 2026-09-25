@@ -3,7 +3,10 @@
 #include "UdpConnection.h"
 #include "SerialConnection.h"
 #include "TunnelProtocol.h"
+#include "TunnelProtocolLog.h"
+#include "formatString.h"
 
+#include <algorithm>
 #include <mutex>
 #include <fstream>
 #include <functional>
@@ -83,7 +86,7 @@ void MavlinkSystem::subscribeToMessage(uint16_t message_id, const MessageCallbac
 	std::scoped_lock<std::mutex> lock(_subscriptions_mutex);
 
 	if (_message_subscriptions.find(message_id) == _message_subscriptions.end()) {
-		logInfo() << "subscribeToMessage" << message_id;
+		logDebug() << "subscribeToMessage" << message_id;
 		_message_subscriptions.emplace(message_id, callback);
 	} else {
 		logError() << "MavlinkSystem::subscribe_to_message failed, callback already registered";
@@ -122,7 +125,7 @@ void MavlinkSystem::sendStatusText(std::string& text, MAV_SEVERITY severity)
         return;
     }
 
-	logInfo() << "statustext:" << text;
+	logDebug() << "statustext:" << text;
 
 	mavlink_statustext_t statustext;
 
@@ -142,6 +145,24 @@ void MavlinkSystem::sendTunnelMessage(void* tunnelPayload, size_t tunnelPayloadS
     if (!gcsSystemId().has_value()) {
         logError() << "Called before gcs discovered";
         return;
+    }
+
+    // Every outbound tunnel frame is logged. Pulse reports, detector heartbeats
+    // and operation progress (re-sent at 1 Hz; OperationProgressReporter logs
+    // its transitions) go at verbose; the 1 Hz controller heartbeat is
+    // summarized by the sender thread.
+    {
+        TunnelProtocol::HeaderInfo_t header {};
+        if (tunnelPayloadSize >= sizeof(header)) {
+            memcpy(&header, tunnelPayload, sizeof(header));
+        }
+        if (header.command == COMMAND_ID_PULSE || header.command == COMMAND_ID_PYTHON_PULSE
+                || header.command == COMMAND_ID_DETECTOR_HEARTBEAT
+                || header.command == COMMAND_ID_OPERATION_PROGRESS) {
+            logVerbose() << TunnelProtocolLog::describe("sent", tunnelPayload, tunnelPayloadSize);
+        } else if (header.command != COMMAND_ID_HEARTBEAT) {
+            logDebug() << TunnelProtocolLog::describe("sent", tunnelPayload, tunnelPayloadSize);
+        }
     }
 
     mavlink_message_t   message;
@@ -213,7 +234,19 @@ float MavlinkSystem::_cpuTemp()
 void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
 {
     std::thread heartbeatSenderThread([this, tick = std::move(tick)]() {
+        using clock = std::chrono::steady_clock;
+        constexpr int   kSummaryEvery   = 60;
+        constexpr float kMaxGapSeconds  = 1.5f;   // nominal 1 s; beyond this the thread was stalled (CPU starvation, log write)
+        // TagTracker CustomPlugin::_controllerHeartbeatTimer interval; a gap past half of it is an error.
+        constexpr float kGcsControllerLostSeconds = 6.0f;
+        constexpr float kErrorGapSeconds = kGcsControllerLostSeconds / 2.0f;
         int heartbeatCount = 0;
+        bool firstBeat = true;
+        std::optional<uint16_t> lastStatus;
+        auto windowStart = clock::now();
+        auto lastSent    = windowStart;
+        float worstGapS  = 0.0f;
+        int   lateBeats  = 0;
 
         while (true) {
             TunnelProtocol::Heartbeat_t heartbeat {};
@@ -224,15 +257,44 @@ void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
             heartbeat.status            = _heartbeatStatus;
             heartbeat.cpu_temp_c         = _cpuTemp();
 
+            if (!lastStatus || *lastStatus != heartbeat.status) {
+                logDebug() << "HEARTBEAT sent: status:" << TunnelProtocolLog::heartbeatStatusName(heartbeat.status)
+                          << (lastStatus ? "(was " + TunnelProtocolLog::heartbeatStatusName(*lastStatus) + ")" : std::string("(first)"))
+                          << "cpu_temp_c:" << heartbeat.cpu_temp_c;
+                lastStatus = heartbeat.status;
+            }
+
+            const auto now = clock::now();
+            const float gapS = std::chrono::duration<float>(now - lastSent).count();
+            lastSent = now;
+            if (!firstBeat) {
+                worstGapS = std::max(worstGapS, gapS);
+                if (gapS > kErrorGapSeconds) {
+                    ++lateBeats;
+                    logError() << formatString("HEARTBEAT late: %.2f s since previous; GCS declares controller lost at %.0f s", gapS, kGcsControllerLostSeconds);
+                } else if (gapS > kMaxGapSeconds) {
+                    ++lateBeats;
+                    logDebug() << formatString("HEARTBEAT late: %.2f s since previous (nominal 1.0 s)", gapS);
+                }
+            }
+            firstBeat = false;
+
             sendTunnelMessage(&heartbeat, sizeof(heartbeat));
 
             if (tick) {
                 tick();
             }
 
-            if (++heartbeatCount >= 60) {
-                logInfo() << "Sent" << heartbeatCount << "tunnel heartbeats, status:" << _heartbeatStatus << " cpu_temp:" << heartbeat.cpu_temp_c;
+            if (++heartbeatCount >= kSummaryEvery) {
+                const float windowS = std::chrono::duration<float>(clock::now() - windowStart).count();
+                logDebug() << formatString("HEARTBEAT sent: x%d in %.1f s (worst gap %.2f s, %d late) status: %s cpu_temp_c: %.1f",
+                                           heartbeatCount, windowS, worstGapS, lateBeats,
+                                           TunnelProtocolLog::heartbeatStatusName(heartbeat.status).c_str(),
+                                           heartbeat.cpu_temp_c);
                 heartbeatCount = 0;
+                worstGapS = 0.0f;
+                lateBeats = 0;
+                windowStart = clock::now();
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -285,7 +347,7 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 		if (alreadyInitialized) {
 			if (!_vehicleTimeSuppressLogged.load()) {
 				int64_t delta = static_cast<int64_t>(vehicleEpochTimeSeconds) - static_cast<int64_t>(frozenEpoch);
-				logInfo() << "Vehicle time updates suppressed during detection (initial delta=" << delta << "s)";
+				logDebug() << "Vehicle time updates suppressed during detection (initial delta=" << delta << "s)";
 				_vehicleTimeSuppressLogged.store(true);
 			}
 			return;
@@ -306,7 +368,7 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 		char buf[32];
 		gmtime_r(&t, &tm_buf);
 		std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm_buf);
-		logInfo() << "Vehicle time tracking started - " << buf << " (will update as GPS locks)";
+		logDebug() << "Vehicle time tracking started - " << buf << " (will update as GPS locks)";
 	} else if (previousEpochSeconds > 0) {
 		int64_t delta = static_cast<int64_t>(vehicleEpochTimeSeconds) - static_cast<int64_t>(previousEpochSeconds);
 		if (std::abs(delta) > 60) {
@@ -315,7 +377,7 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 			char buf[32];
 			gmtime_r(&t, &tm_buf);
 			std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S UTC", &tm_buf);
-			logInfo() << "Vehicle time jumped by " << delta << "s (GPS lock?) - now " << buf;
+			logDebug() << "Vehicle time jumped by " << delta << "s (GPS lock or frozen time released) - now " << buf;
 		}
 	}
 }

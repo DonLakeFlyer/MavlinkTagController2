@@ -7,21 +7,21 @@
 #include <mutex>
 #include <functional>
 
+#include "logLevel.h"
+
 // Remove path and extract only filename.
 #define FILENAME \
     (__builtin_strrchr(__FILE__, '/') ? __builtin_strrchr(__FILE__, '/') + 1 : __FILE__)
 
 #define call_user_callback(...) call_user_callback_located(FILENAME, __LINE__, __VA_ARGS__)
 
-#define logDebug()  LogDebugDetailed(FILENAME, __LINE__)
-#define logInfo()   LogInfoDetailed (FILENAME, __LINE__)
-#define logWarn()   LogWarnDetailed (FILENAME, __LINE__)
-#define logError()  LogErrDetailed  (FILENAME, __LINE__)
+// Three levels. Debug and Error are always written; Verbose (per-frame,
+// per-cycle chatter) only when enabled with --verbose.
+#define logDebug()    LogDebugDetailed  (FILENAME, __LINE__)
+#define logError()    LogErrDetailed    (FILENAME, __LINE__)
+#define logVerbose()  LogVerboseDetailed(FILENAME, __LINE__)
 
-enum class LogColor { Red, Green, Yellow, Blue, Gray, Reset };
-enum class LogLevel : int { Debug = 0, Info = 1, Warn = 2, Err = 3 };
-
-void set_color(LogColor LogColor, std::stringstream& s);
+enum class LogLevel : int { Verbose = 0, Debug = 1, Err = 2 };
 
 class LogDetailed {
 public:
@@ -46,9 +46,12 @@ public:
 
     template<typename T> LogDetailed& operator<<(const std::vector<T>& vector)
     {
-        for (auto value : vector) {
-            _s << value << ", ";
-        }   
+        const char* sep = "";
+        for (const auto& value : vector) {
+            _s << sep << value;
+            sep = ", ";
+        }
+        _s << " ";
         return *this;
     }
 
@@ -65,34 +68,25 @@ private:
 
 class LogDebugDetailed : public LogDetailed {
 public:
-    LogDebugDetailed(const char* filename, int filenumber) 
+    LogDebugDetailed(const char* filename, int filenumber)
         : LogDetailed(filename, filenumber)
     {
         _log_level = LogLevel::Debug;
     }
 };
 
-class LogInfoDetailed : public LogDetailed {
+class LogVerboseDetailed : public LogDetailed {
 public:
-    LogInfoDetailed(const char* filename, int filenumber) 
+    LogVerboseDetailed(const char* filename, int filenumber)
         : LogDetailed(filename, filenumber)
     {
-        _log_level = LogLevel::Info;
-    }
-};
-
-class LogWarnDetailed : public LogDetailed {
-public:
-    LogWarnDetailed(const char* filename, int filenumber) 
-        : LogDetailed(filename, filenumber)
-    {
-        _log_level = LogLevel::Warn;
+        _log_level = LogLevel::Verbose;
     }
 };
 
 class LogErrDetailed : public LogDetailed {
 public:
-    LogErrDetailed(const char* filename, int filenumber) 
+    LogErrDetailed(const char* filename, int filenumber)
         : LogDetailed(filename, filenumber)
     {
         _log_level = LogLevel::Err;

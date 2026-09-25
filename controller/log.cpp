@@ -9,13 +9,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define ANSI_COLOR_RED "\x1b[31m"
-#define ANSI_COLOR_GREEN "\x1b[32m"
-#define ANSI_COLOR_YELLOW "\x1b[33m"
-#define ANSI_COLOR_BLUE "\x1b[34m"
-#define ANSI_COLOR_GRAY "\x1b[37m"
-#define ANSI_COLOR_RESET "\x1b[0m"
-
 std::mutex LogDetailed::_logMutex;
 
 LogDetailed::LogDetailed(const char* filename, int filenumber)
@@ -28,25 +21,13 @@ LogDetailed::LogDetailed(const char* filename, int filenumber)
 
 LogDetailed::~LogDetailed()
 {
+    if (_log_level == LogLevel::Verbose && !verboseLogging()) {
+        return;
+    }
+
     _logMutex.lock();
 
     std::stringstream sStream;
-
-    switch (_log_level) {
-        case LogLevel::Debug:
-            set_color(LogColor::Green, sStream);
-            break;
-        case LogLevel::Info:
-            set_color(LogColor::Blue, sStream);
-            break;
-        case LogLevel::Warn:
-            set_color(LogColor::Yellow, sStream);
-            break;
-        case LogLevel::Err:
-            set_color(LogColor::Red, sStream);
-            break;
-    }
-
 
     // UTC, 24-hour: logs come from rPi flights and SITL desktops in different
     // timezones and are analyzed elsewhere; the detector and jsonl are UTC too.
@@ -58,21 +39,16 @@ LogDetailed::~LogDetailed()
     sStream << "[" << time_buffer;
 
     switch (_log_level) {
+        case LogLevel::Verbose:
+            sStream << "|V] ";
+            break;
         case LogLevel::Debug:
             sStream << "|D] ";
-            break;
-        case LogLevel::Info:
-            sStream << "|I] ";
-            break;
-        case LogLevel::Warn:
-            sStream << "|W] ";
             break;
         case LogLevel::Err:
             sStream << "|E] ";
             break;
     }
-
-    set_color(LogColor::Reset, sStream);
 
     sStream << " " << _s.str() << " (" << _caller_filename << ":" << std::dec << _caller_filenumber << ")";
 
@@ -127,29 +103,5 @@ LogDetailed::~LogDetailed()
     // sendStatusText logs, which re-enters this destructor: must run unlocked.
     if (!operatorError.empty()) {
         MavlinkSystem::instance()->sendStatusText(operatorError, MAV_SEVERITY_ERROR);
-    }
-}
-
-void set_color(LogColor LogColor, std::stringstream& s)
-{
-    switch (LogColor) {
-        case LogColor::Red:
-            s << ANSI_COLOR_RED;
-            break;
-        case LogColor::Green:
-            s << ANSI_COLOR_GREEN;
-            break;
-        case LogColor::Yellow:
-            s << ANSI_COLOR_YELLOW;
-            break;
-        case LogColor::Blue:
-            s << ANSI_COLOR_BLUE;
-            break;
-        case LogColor::Gray:
-            s << ANSI_COLOR_GRAY;
-            break;
-        case LogColor::Reset:
-            s << ANSI_COLOR_RESET;
-            break;
     }
 }
