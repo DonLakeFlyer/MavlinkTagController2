@@ -22,8 +22,8 @@ re-deriving the setup. Kept current; not dated.
 | FC | Holybro Pixhawk 6X | Mounted on the Holybro Pixhawk RPi CM4 Baseboard together with the companion CM4 |
 | Firmware | PX4 v1.17 (stable) | |
 | GPS / compass | Holybro M9N GPS ([product page](https://holybro.com/collections/standard-gps-module/products/m9n-m10-gps-v2)) | u-blox M9N; module includes compass |
-| RC link | | |
-| Telemetry | | |
+| RC link | Skydroid GR01 receiver | SBUS to the Pixhawk 6X. In its own shielded box on top of the avionics box, see [Shielding](#shielding) |
+| Telemetry | Skydroid GR01 receiver | Same unit as the RC link |
 
 ## Power distribution
 
@@ -44,7 +44,8 @@ re-deriving the setup. Kept current; not dated.
 
 | What | How | Notes |
 | --- | --- | --- |
-| Avionics box | 3D-printed box wrapped in Titan RF fabric | Contains the Pixhawk 6X + CM4 baseboard and the UBEC DUO. Outside the box: CAN-L4-BM, PDB, ESCs, SDR. Bench A/B 2026-09-19: 7.4 dB. |
+| Avionics box | 3D-printed box wrapped in Titan RF fabric | Contains the Pixhawk 6X + CM4 baseboard and the UBEC DUO. Outside the box: CAN-L4-BM, PDB, ESCs, SDR, GR01 (own box). Bench A/B 2026-09-19: 7.4 dB. |
+| Receiver box | 3D-printed box wrapped in Titan RF fabric, mounted on top of the avionics box | Contains the Skydroid GR01 receiver. |
 | UBEC DUO | Individually wrapped in Titan RF tape over an insulating layer, inside the avionics box | Bench 2026-09-19: the DUO was the only avionics component raising the SDR floor (+11 dB bare, +3 dB and two ~6 dB humps in the box). Bench 2026-09-20 (SDR captured through the RPi): with the wrap, input and output ferrites below and the USB cable cores, its harmonics no longer appear above the floor. |
 
 ## Ferrites
