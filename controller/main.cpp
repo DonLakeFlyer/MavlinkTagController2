@@ -39,7 +39,7 @@ int main(int argc, char** argv)
     // Check that TunnelProtocol hasn't exceed limits
     static_assert(TunnelProtocolValidateSizes, "TunnelProtocolValidateSizes failed");
 
-	std::string connectionUrl = "udp://127.0.0.1:14540";    // default to SITL
+	std::string connectionUrl = "udp://0.0.0.0:14540";    // default to SITL, which may run on another host
     bool        simulatorMode = false;
     std::string simulatorPreset = "strong";
     double      simulatorSnrDb = 20.0;

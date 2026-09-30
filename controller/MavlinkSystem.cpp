@@ -305,7 +305,23 @@ void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
 
 void MavlinkSystem::_sendMessageOnConnection(const mavlink_message_t& message)
 {
-	_connection->_sendMessage(message);
+	if (!_connection->_sendMessage(message)) {
+		_sendFailuresTotal++;
+		_sendFailuresSinceLog++;
+		_lastFailedMsgId = message.msgid;
+	}
+
+	if (_sendFailuresSinceLog == 0) {
+		return;
+	}
+
+	auto now = std::chrono::steady_clock::now();
+	if (now - _lastSendFailureLog >= std::chrono::seconds(5)) {
+		logError() << "MAVLink send failed:" << _sendFailuresSinceLog << "since last report, total" << _sendFailuresTotal
+		           << "last msgid" << _lastFailedMsgId;
+		_sendFailuresSinceLog = 0;
+		_lastSendFailureLog = now;
+	}
 }
 
 std::time_t MavlinkSystem::vehicleTimeNow() const

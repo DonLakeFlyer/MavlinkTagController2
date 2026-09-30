@@ -79,5 +79,11 @@ private:
 	std::chrono::steady_clock::time_point _vehicleTimeReceivedAt {};
 	mutable std::mutex			_vehicleTimeMutex {};
 
+	// Only touched by the outgoing queue thread
+	uint64_t					_sendFailuresTotal { 0 };
+	uint32_t					_sendFailuresSinceLog { 0 };
+	uint32_t					_lastFailedMsgId { 0 };
+	std::chrono::steady_clock::time_point _lastSendFailureLog {};
+
 	friend class MavlinkOutgoingMessageQueue;
 };

@@ -80,7 +80,7 @@ Per-directory details: [detector/tests/README.md](detector/tests/README.md),
 ## Running against PX4 SITL
 
 1. Set up PX4 SITL per the [PX4 developer guide](https://docs.px4.io/main/en/dev_setup/getting_started.html).
-2. Start the controller with the default connection (`udp://127.0.0.1:14540`):
+2. Start the controller with the default connection (`udp://0.0.0.0:14540`, so SITL can run on another host or VM):
    ```bash
    ./build/controller/MavlinkTagController2
    ```

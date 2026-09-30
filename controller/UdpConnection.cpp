@@ -19,6 +19,9 @@ UdpConnection::UdpConnection(MavlinkSystem* mavlink)
 	std::string conn = _mavlink->connectionUrl();
 
 	conn.erase(conn.find(udp), udp.length());
+	if (conn.rfind("//", 0) == 0) {
+		conn.erase(0, 2);
+	}
 
 	size_t index = conn.find(':');
 	_our_ip = conn.substr(0, index);
@@ -28,20 +31,23 @@ UdpConnection::UdpConnection(MavlinkSystem* mavlink)
 
 bool UdpConnection::_open()
 {
+	struct sockaddr_in addr = {};
+
+	addr.sin_family = AF_INET;
+
+	if (inet_pton(AF_INET, _our_ip.c_str(), &(addr.sin_addr)) != 1) {
+		logError() << "_open - invalid bind address" << _our_ip;
+		return false;
+	}
+
+	addr.sin_port = htons(_our_port);
+
 	_socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
 
 	if (_socket_fd < 0) {
 		logError() << "_open - socket error" << strerror(errno);
 		return false;
 	}
-
-	struct sockaddr_in addr = {};
-
-	addr.sin_family = AF_INET;
-
-	inet_pton(AF_INET, _our_ip.c_str(), &(addr.sin_addr));
-
-	addr.sin_port = htons(_our_port);
 
 	if (bind(_socket_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
 		logError() << "_open - bind failed" << strerror(errno);
@@ -62,11 +68,14 @@ void UdpConnection::_close()
 
 bool UdpConnection::_sendMessage(const mavlink_message_t& message)
 {
-	struct sockaddr_in dest_addr {};
-	dest_addr.sin_family = AF_INET;
-
-	inet_pton(AF_INET, _remote_ip.c_str(), &dest_addr.sin_addr.s_addr);
-	dest_addr.sin_port = htons(_remote_port);
+	sockaddr_in dest_addr;
+	{
+		std::lock_guard<std::mutex> lock(_remote_mutex);
+		if (!_remote_known) {
+			return false;
+		}
+		dest_addr = _remote_addr;
+	}
 
 	uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
 	uint16_t buffer_len = mavlink_msg_to_send_buffer(buffer, &message);
@@ -93,8 +102,11 @@ ssize_t UdpConnection::_receiveBytes(uint8_t* buffer, size_t cBuffer)
 								reinterpret_cast<struct sockaddr*>(&src_addr),
 								&src_addr_len);
 
-	_remote_ip = inet_ntoa(src_addr.sin_addr);
-	_remote_port = ntohs(src_addr.sin_port);
+	if (cBytesReceived > 0) {
+		std::lock_guard<std::mutex> lock(_remote_mutex);
+		_remote_addr = src_addr;
+		_remote_known = true;
+	}
 
 	return cBytesReceived;
 }

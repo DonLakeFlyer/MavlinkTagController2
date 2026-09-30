@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -8,6 +9,7 @@
 #include <functional>
 
 #include <time.h>
+#include <netinet/in.h>
 
 #include "Connection.h"
 #include "timeHelpers.h"
@@ -34,9 +36,10 @@ protected:
 	std::string _our_ip {};
 	int _our_port {};
 
-	// Autopilot IP and port
-	std::string _remote_ip {};
-	int _remote_port {};
+	// Autopilot address, learned from the last received datagram
+	std::mutex _remote_mutex;
+	sockaddr_in _remote_addr {};
+	bool _remote_known {false};
 
 	// Connection
 	int _socket_fd {-1};
