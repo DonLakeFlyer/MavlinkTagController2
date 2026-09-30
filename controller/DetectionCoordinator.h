@@ -7,7 +7,7 @@
 #include <mutex>
 
 // Tag-list / detection lifecycle state machine. Commands arrive on the
-// MAVLink thread; the start, stop and capture pipelines finish on worker
+// command thread; the start, stop and capture pipelines finish on worker
 // threads, so every transition is serialised here. Raw capture is a state
 // here too because it holds the SDR, which is what START_DETECTION contends
 // for. No logging; the caller owns diagnostics, process management and
