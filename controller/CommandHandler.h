@@ -12,11 +12,13 @@
 
 #include <condition_variable>
 #include <atomic>
+#include <deque>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <mavlink.h>
@@ -43,6 +45,7 @@ public:
                             const std::string& simulatorAntenna = "ra2a", double simulatorPriPpm = 43.0,
                             const SimulatorNoiseSource& simulatorNoiseSource = SimulatorNoiseSource{},
                             double detectorImpulseBlankFactor = 0.0);
+    ~CommandHandler();
 
     static constexpr int kPulseUdpPort = 50000; // UDP port for pulse/heartbeat reports from detectors
 
@@ -119,6 +122,7 @@ private:
     // Returns false if detection is still Stopping when the wait expires.
     bool _stopDetectionAndWait  (void);
     void _handleTunnelMessage   (const mavlink_message_t& message);
+    void _commandThreadMain     ();
     void _handlePythonPulse     (const TagTrackerDetectorProtocol::Header& header, const TagTrackerDetectorProtocol::PulsePayload& payload);
     void _sendDetectorHeartbeat (uint32_t tagId, uint32_t detectionMode);
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
@@ -170,7 +174,7 @@ private:
     double                          _detectorImpulseBlankFactor = 0.0;  // pulse_detector.py --impulse-blank-factor; 0 = omit (off)
     uint32_t                        _simPhase               = 0;        // 4-phase cycle: 0=A, 1=A→B, 2=B, 3=B→A
 
-    // Rotation detection state — accessed from both MAVLink and UDP threads
+    // Rotation detection state — accessed from both command and UDP threads
     std::mutex                                  _rotationMutex;
     std::condition_variable                     _collectionReady;
     CollectionCoordinator                       _collectionCoordinator;
@@ -225,6 +229,16 @@ private:
     std::vector<TunnelProtocol::PythonPulseInfo_t> _updateLiveCandidate(uint32_t tagId);
 
     static constexpr int kDetectorControlPortBase = 51000;
+
+    // Commands run off the MAVLink receive thread so a blocking one cannot stall the autopilot HEARTBEAT.
+    static constexpr size_t         kCommandQueueSize       = 32;
+    std::mutex                      _commandQueueMutex;
+    std::condition_variable         _commandQueueCv;
+    std::deque<mavlink_tunnel_t>    _commandQueue;
+    bool                            _commandRunning         = false;
+    bool                            _commandThreadExit      = false;
+    uint32_t                        _droppedCommandCount    = 0;
+    std::thread                     _commandThread;
 
     static constexpr int kAirSpyHfFrequencyOffsetHz = 10000; // 10 kHz - takes into account 768 ksps incoming and 3840 Hz outgoing
     static constexpr double kSimulatorTxRangeM = 4000.0;     // simulated transmitter distance from the first vehicle pose

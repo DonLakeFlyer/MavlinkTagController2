@@ -128,6 +128,16 @@ appear only in the verbose `OPERATION_PROGRESS sent:` frame log. Spoken status t
 (`#Log save complete`, `#Logs deleted`, `#Capture complete`, the hung-process
 alerts).
 
+Tunnel commands are handled one at a time, in arrival order, on a dedicated
+command thread fed by a bounded queue (32) from the MAVLink receive thread.
+Commands that block until done (`START_COLLECTION` waits for detector
+`READY`, `FINISH_COLLECTION` for teardown) therefore cannot stall the receive
+loop, which also sends the controller's MAVLink `HEARTBEAT`; PX4 reports
+"Connection to mission computer lost" after `COM_OBC_LOSS_T` (5 s) without it.
+A command arriving behind another is logged as `queued behind N command(s)`;
+one arriving at a full queue is dropped unACKed with `Command queue full`
+(the GCS retries).
+
 ## Frequency plan
 
 The HF+ has a DC spur. The radio is tuned 10 kHz **above** the tag, so the tag

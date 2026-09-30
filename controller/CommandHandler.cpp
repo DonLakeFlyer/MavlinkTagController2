@@ -84,8 +84,22 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetry
         }
     }
 
+    _commandThread = std::thread(&CommandHandler::_commandThreadMain, this);
+
     using namespace std::placeholders;
     _mavlink->subscribeToMessage(MAVLINK_MSG_ID_TUNNEL, std::bind(&CommandHandler::_handleTunnelMessage, this, _1));
+}
+
+CommandHandler::~CommandHandler()
+{
+    {
+        std::lock_guard<std::mutex> lock(_commandQueueMutex);
+        _commandThreadExit = true;
+    }
+    _commandQueueCv.notify_one();
+    if (_commandThread.joinable()) {
+        _commandThread.join();
+    }
 }
 
 void CommandHandler::_sendCommandAck(const AckInfo_t& ack)
@@ -2164,7 +2178,51 @@ void CommandHandler::_handleTunnelMessage(const mavlink_message_t& message)
 
     logDebug() << TunnelProtocolLog::describe("received", tunnel.payload, std::min<size_t>(tunnel.payload_length, sizeof(tunnel.payload)));
 
-    _sendCommandAck(_dispatcher.handle(tunnel));
+    HeaderInfo_t header {};
+    memcpy(&header, tunnel.payload, sizeof(header));
+
+    size_t   ahead        = 0;
+    uint32_t totalDropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(_commandQueueMutex);
+        if (_commandQueue.size() >= kCommandQueueSize) {
+            totalDropped = ++_droppedCommandCount;
+        } else {
+            ahead = _commandQueue.size() + (_commandRunning ? 1 : 0);
+            _commandQueue.push_back(tunnel);
+        }
+    }
+    if (totalDropped) {
+        // No ACK: the GCS retries, and a NACK could fail a request that is already queued.
+        logError() << formatString("Command queue full (%zu): dropped %s request_id:%u (total dropped %u)",
+                                   kCommandQueueSize, TunnelProtocolLog::commandName(header.command).c_str(),
+                                   header.request_id, totalDropped);
+        return;
+    }
+    _commandQueueCv.notify_one();
+    if (ahead > 0) {
+        logDebug() << formatString("%s request_id:%u queued behind %zu command(s)",
+                                   TunnelProtocolLog::commandName(header.command).c_str(), header.request_id, ahead);
+    }
+}
+
+void CommandHandler::_commandThreadMain()
+{
+    while (true) {
+        mavlink_tunnel_t tunnel;
+        {
+            std::unique_lock<std::mutex> lock(_commandQueueMutex);
+            _commandRunning = false;
+            _commandQueueCv.wait(lock, [this]() { return _commandThreadExit || !_commandQueue.empty(); });
+            if (_commandThreadExit) {
+                return;
+            }
+            tunnel = _commandQueue.front();
+            _commandQueue.pop_front();
+            _commandRunning = true;
+        }
+        _sendCommandAck(_dispatcher.handle(tunnel));
+    }
 }
 
 std::string CommandHandler::_checkForAirSpy(void)
