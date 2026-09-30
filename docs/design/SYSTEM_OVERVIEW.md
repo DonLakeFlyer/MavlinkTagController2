@@ -15,8 +15,8 @@ detail lives in the documents linked from each section.
                     │                                                                          TTDP/UDP :50000 ◀───────────┘             │
                     │                                                                                     │                                   │
                     │                                                              ┌──────────────────────▼──────────────────────┐            │
- Pixhawk ◀─serial──▶│ MavlinkTagController2  ◀──── MAVLink tunnel ────▶ GCS       │ spawns & supervises all of the above,       │            │
- (TELEM2 921600)    │                          (via Pixhawk forwarding)           │ ARMs detectors per heading, stores slices,  │            │
+ Pixhawk ◀─serial──▶│ mavlink-routerd ⇄ MavlinkTagController2 ◀── tunnel ──▶ GCS  │ spawns & supervises all of the above,       │            │
+ (TELEM2 921600)    │ WiFi GCS UDP :14550      (via Pixhawk forwarding)           │ ARMs detectors per heading, stores slices,  │            │
                     │                                                              │ fits antenna pattern → BEARING_RESULT       │            │
                     │                                                              └─────────────────────────────────────────────┘            │
                     └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -32,12 +32,16 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
 | Decimator → detectors | UDP, one port per detector | `complex64` array; first element is a header with `uint32` seconds / nanoseconds bit-cast into its float lanes, rest are IQ; short frame before a hole | 3840 S/s |
 | Detector → controller | UDP `CommandHandler::kPulseUdpPort` (50000) | TTDP, `shared/detector_protocol.h` | per cycle + 1 Hz heartbeat |
 | Controller → detector | UDP `--control-port` per detector | TTDP `ARM` | per slice |
+| Pixhawk ⇄ controller, WiFi GCS | `mavlink-routerd` (`setup/mavlink-router.conf`): UART `/dev/serial0` 921600 ⇄ UDP `127.0.0.1:14540` (controller) and UDP server `:14550` (WiFi GCS) | MAVLink v2 | all MAVLink traffic |
 | Controller ⇄ GCS | MAVLink tunnel through the autopilot | `TunnelProtocol.h` (CPM-pinned; exact `TUNNEL_PROTOCOL_VERSION` match required) | commands + pulses + bearings; each detector's 1 Hz TTDP heartbeat (uavrt: `frequency_hz == 0` UDP report) is relayed as `DETECTOR_HEARTBEAT` |
 
 ## Control flow of a flight
 
-1. **Boot.** `setup/crontab-start-controller.sh` starts the controller on
-   `serial:///dev/serial0:921600`. It heartbeats on the tunnel; TagTracker
+1. **Boot.** The `mavlink-router` systemd service opens `/dev/serial0`, and
+   `setup/crontab-start-controller.sh` starts the controller on
+   `udp://127.0.0.1:14540`, which the router forwards to (or directly on
+   `serial:///dev/serial0:921600` if the service is not enabled). The controller
+   learns the router's address from the first packet received. It heartbeats on the tunnel; TagTracker
    checks the protocol version.
    Every GCS command carries `HeaderInfo_t::request_id`, unique per command and
    repeated byte-for-byte on retry. `TunnelCommandDispatcher` answers a

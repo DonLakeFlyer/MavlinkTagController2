@@ -30,6 +30,29 @@ if command -v raspi-config >/dev/null 2>&1; then
     sudo raspi-config nonint do_serial_hw 0
     sudo raspi-config nonint do_serial_cons 1
 
+    echo "*** Build and install mavlink-router (owns /dev/serial0; controller and WiFi GCS connect over UDP)"
+    MAVLINK_ROUTER_DIR="$HOME/repos/mavlink-router"
+    # Pinned past v4 for the <cstdint> fix newer GCC needs
+    MAVLINK_ROUTER_SHA="2362c620f483cef1edd574fb962a373a288e4b9e"
+    sudo apt install meson ninja-build -y
+    if [ ! -d "$MAVLINK_ROUTER_DIR" ]; then
+        git clone https://github.com/mavlink-router/mavlink-router.git "$MAVLINK_ROUTER_DIR"
+    fi
+    git -C "$MAVLINK_ROUTER_DIR" fetch origin
+    git -C "$MAVLINK_ROUTER_DIR" checkout --detach "$MAVLINK_ROUTER_SHA"
+    git -C "$MAVLINK_ROUTER_DIR" submodule update --init --recursive
+    rm -rf "$MAVLINK_ROUTER_DIR/build"
+    meson setup "$MAVLINK_ROUTER_DIR/build" "$MAVLINK_ROUTER_DIR" --buildtype=release -Dsystemdsystemunitdir=/etc/systemd/system
+    ninja -C "$MAVLINK_ROUTER_DIR/build"
+    sudo ninja -C "$MAVLINK_ROUTER_DIR/build" install
+    sudo install -D -m 644 "$REPO_DIR/setup/mavlink-router.conf" /etc/mavlink-router/main.conf
+    # Default restart limits give up after ~0.5 s of UART failures, leaving the controller with no link
+    sudo mkdir -p /etc/systemd/system/mavlink-router.service.d
+    printf '[Unit]\nStartLimitIntervalSec=0\n\n[Service]\nRestart=always\nRestartSec=1\n' \
+        | sudo tee /etc/systemd/system/mavlink-router.service.d/restart.conf >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl enable mavlink-router
+
     echo "*** Install crontab entry to start controller at boot"
     CRON_LINE="@reboot /bin/bash \"$REPO_DIR/setup/crontab-start-controller.sh\" >> \"$HOME/MavlinkTagController-boot.log\" 2>&1"
     # Replace any existing entry for this script so a re-run never yields two @reboot controllers.
@@ -45,5 +68,5 @@ if command -v raspi-config >/dev/null 2>&1; then
     sudo raspi-config nonint do_vnc 0 || echo "*** WARNING: VNC enable failed; skipping"
     sudo raspi-config nonint do_vnc_resolution 1920x1080 || echo "*** WARNING: VNC resolution not supported; skipping"
 
-    echo "*** Setup complete. Reboot to apply serial port and VNC changes and start the controller."
+    echo "*** Setup complete. Reboot to apply serial port and VNC changes and start mavlink-router and the controller."
 fi
