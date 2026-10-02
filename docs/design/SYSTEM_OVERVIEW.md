@@ -88,9 +88,12 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
    spectrogram, so there is no warm-up cycle and nothing cached on disk.
 4. **START_COLLECTION** (a rotation) → `~/Logs/Logs-Rotation-<UTC>/`. For each
    heading the GCS sends `START_COLLECTION_SLICE`; the controller `ARM`s every
-   detector, which reopens its `.jsonl` in `heading-NNN/`, runs one K-fold
-   cycle, may lock, measures every buffered slice at every lock candidate, and
-   sends `CYCLE_COMPLETE`. During the rotation only locked (`CONFIRMED`)
+   detector, which opens its `.jsonl` in `heading-NNN/`, captures one K-fold
+   segment and sends `SLICE_CAPTURED`, which completes the slice for the GCS.
+   The detector analyses the segment while the next heading is flown: one
+   K-fold cycle, may lock, measures every buffered slice at every lock
+   candidate, and sends `CYCLE_COMPLETE`. The last slice is held until every
+   analysis is done. During the rotation only locked (`CONFIRMED`)
    measurements of the live candidate reach the GCS.
 5. **FINISH_COLLECTION.** The controller may first ask for one revisit slice,
    then fits the antenna pattern to each candidate, sends `BEARING_RESULT` per
@@ -118,7 +121,7 @@ on the rPi), one per session directory for clean logs; the post-flight
 analysis that follows a stop is reported indeterminate under
 `STOP_DETECTION` with `request_id` 0. A collection is one operation under
 `START_COLLECTION` spanning the whole rotation, advanced by detector
-`READY`/`ARMED`/`SLICE_PROGRESS`/`CYCLE_COMPLETE` and the finalize stages
+`READY`/`ARMED`/`SLICE_PROGRESS`/`SLICE_CAPTURED`/`COMPUTE_PROGRESS`/`CYCLE_COMPLETE` and the finalize stages
 (`RotationProgress`; see COLLECTION_FLOW.md § Rotation progress); the pipeline
 start/stop inside it do not open their own operations.
 
@@ -189,9 +192,9 @@ Every other tunnel frame in either direction is logged at `D` as
 | Sample-rate mismatch beyond `--rate-tol-ppm` (packet header or measured rate) | decimator | warning; with `--strict-input-rate` the process exits on the **first** such mismatch |
 | UDP gap < 2·tp | detector `iq_stream` | zero-fill, segment flagged |
 | UDP gap ≥ 2·tp | detector `iq_stream` | barrier; segment restarts after the hole |
-| Detector `FAILED` during a slice | controller | forwarded to the GCS as `COLLECTION_STATUS_FAILED` with the error code (only if it names the current slice); the GCS decides whether to cancel |
+| Detector `FAILED` during a slice | controller | forwarded to the GCS as `COLLECTION_STATUS_FAILED` with the error code (only if it names the slice being captured or one still being analysed); the GCS decides whether to cancel |
 | Detector process exits during a collection (crash or unrequested exit) | controller `MonitoredProcess` → `_handleDetectorProcessFailure` | `COLLECTION_STATUS_FAILED` with `ErrorCode::ProcessFailed` and expected/completed detector counts sent to the GCS; if still in `Starting`, the collection is cancelled. Outside a collection the exit is only logged and announced as a status text |
-| Detector silent | controller | heartbeats are logged on receipt only; there is no controller-side timeout on `CYCLE_COMPLETE`. During a collection the rotation `OPERATION_PROGRESS` step stops advancing (no `SLICE_PROGRESS`), which the GCS treats as a stalled rotation and cancels |
+| Detector silent | controller | heartbeats are logged on receipt only; there is no controller-side timeout on `CYCLE_COMPLETE`. During a collection the rotation `OPERATION_PROGRESS` step stops advancing (no `SLICE_PROGRESS` while capturing; an analysis without `COMPUTE_PROGRESS` for > 5 s, or running > 120 s, freezes it), which the GCS treats as a stalled rotation and cancels |
 | No candidate clears `confidenceFloor` | `BearingCalculator` | `BEARING_RESULT` with NaN bearing, `confirmed = 0` |
 
 ## Related

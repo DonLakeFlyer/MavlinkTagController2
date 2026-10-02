@@ -31,6 +31,7 @@ import datetime
 import json
 import math
 import os
+import queue
 import signal
 import socket
 import struct
@@ -39,14 +40,15 @@ import threading
 import traceback
 from collections import deque
 
-from collection_control import ArmResult, CollectionControl, SliceProgressPolicy, handle_control_packet
-from detector_protocol import (ErrorCode, MessageType, ProtocolError, PulseReport,
-                               encode_failed_report, encode_header,
+from collection_control import (ArmResult, CollectionControl, ComputeProgressPolicy,
+                                SliceProgressPolicy, StatusRepeat, handle_control_packet)
+from detector_protocol import (ComputeStage, ErrorCode, MessageType, ProtocolError, PulseReport,
+                               encode_compute_progress, encode_failed_report, encode_header,
                                encode_pulse_report, encode_slice_progress)
 from iq_stream import IqStream
 from udp_receiver import PacketRing, UdpReceiver
 import time
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 # Structured logging (shared contract with analyzer)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'shared'))
@@ -76,6 +78,10 @@ INITIAL_PRI_PPM_UNCERTAINTY = 150.0
 # Pre-lock spectrograms kept for retro-measurement once a lock is acquired.
 # Each entry is one full power spectrogram (~0.5 MB at default geometry).
 MAX_BUFFERED_SLICES = 64
+# Captured segments waiting for analysis. Analysis normally finishes within
+# the next slice's dwell, so a backlog means it is falling behind; once full,
+# capture blocks and its SLICE_PROGRESS stops, which the GCS sees as a stall.
+MAX_PENDING_ANALYSES = 4
 # Competing lock candidates kept from the acquisition cycles. Every buffered
 # and post-lock slice is measured at each of them; the controller picks the
 # candidate whose per-heading powers best fit the antenna pattern (#134).
@@ -143,6 +149,19 @@ class PulseLock(NamedTuple):
     # Last fit_lock_timing plateau touched the grid edge: pri_seconds is the
     # retained prior, not a converged estimate.
     pri_fit_clipped: bool = False
+
+
+class AnalysisJob(NamedTuple):
+    """A captured segment handed from the capture thread to the analysis loop."""
+    cycle: int
+    segment: np.ndarray
+    current_ts: int
+    had_gap_fills: list
+    collection_id: int
+    slice_id: int
+    heading_deg: Optional[float]
+    out_dir: Optional[str]      # heading dir for spectrogram dumps
+    log_path: Optional[str]     # heading .jsonl the analysis records are appended to
 
 
 def hyp_label_to_rate_state(label):
@@ -282,6 +301,20 @@ def send_slice_progress_udp(pulse_sock, dest_addr, tag_id, collection_id, slice_
         return True
     except (OSError, struct.error) as e:
         print(f'Warning: slice progress send failed: {e}', file=sys.stderr, flush=True)
+        return False
+
+
+def send_compute_progress_udp(pulse_sock, dest_addr, tag_id, collection_id, slice_id,
+                              stage, done, total):
+    u32_max = 0xFFFFFFFF
+    done = int(max(0, min(done, u32_max)))
+    total = int(max(0, min(total, u32_max)))
+    try:
+        packet = encode_compute_progress(collection_id, slice_id, tag_id, stage, done, total)
+        pulse_sock.sendto(packet, dest_addr)
+        return True
+    except (OSError, struct.error) as e:
+        print(f'Warning: compute progress send failed: {e}', file=sys.stderr, flush=True)
         return False
 
 
@@ -773,7 +806,8 @@ def lock_candidate_from_detection(detection, segment_start_seconds, n_ws, fs,
 
 def fit_lock_timing(buffered_slices, freq_axis, lock, n_ws, fs,
                     span_ppm=PRI_FIT_SPAN_PPM, step_ppm=PRI_FIT_STEP_PPM,
-                    footprint_offsets=(-1, 0, 1, 2), anchor_steps=11):
+                    footprint_offsets=(-1, 0, 1, 2), anchor_steps=11,
+                    on_step=None):
     """Refit a lock's PRI and sub-step anchor from every buffered slice.
 
     Sums on-pulse power at the lock's frequency across all slices for each
@@ -809,6 +843,9 @@ def fit_lock_timing(buffered_slices, freq_axis, lock, n_ws, fs,
     A plateau that touches either grid edge is a clipped fit: the true PRI
     may lie outside the span, so the prior estimate is kept, its uncertainty
     widened to the span, and pri_fit_clipped set for the caller to log.
+
+    ``on_step()`` is called after each anchor offset is scanned; the cost of
+    one grows with the number of buffered slices.
     """
     if not math.isfinite(lock.nominal_pri_seconds):
         raise ValueError('fit_lock_timing needs a lock with nominal_pri_seconds')
@@ -862,6 +899,8 @@ def fit_lock_timing(buffered_slices, freq_axis, lock, n_ws, fs,
     for offset in anchor_grid:
         candidate_anchor = lock.anchor_seconds + float(offset)
         e, v, n = _scan(candidate_anchor)
+        if on_step is not None:
+            on_step()
         if energy is None or e.max() > energy.max():
             best_anchor, energy, variance, n_used = candidate_anchor, e, v, n
 
@@ -1177,7 +1216,7 @@ NULL_TRAIN_FOLD_SNR = 3.0
 def permutation_null_threshold(power, noise_power, pf, n_perm,
                                hypotheses=None, pulse_idx=None,
                                frequency_mask=None, rng=None,
-                               time_budget_s=None):
+                               time_budget_s=None, on_progress=None):
     """Detection threshold from the slice's own spectrogram.
 
     Randomly permutes the STFT time windows and re-runs the identical fold
@@ -1195,7 +1234,8 @@ def permutation_null_threshold(power, noise_power, pf, n_perm,
     must be given, matching the caller's search. When ``time_budget_s`` is
     set, permutations stop once it is exceeded (never below
     ``NULL_MIN_PERMUTATIONS``), keeping the per-cycle cost bounded on slow
-    hosts; the count actually used is returned.
+    hosts; the count actually used is returned. ``on_progress(done, total)``
+    is called after every permutation.
 
     Returns ``(threshold, mu, sigma, n_perm_used)``; ``mu``/``sigma`` are None
     when the Gumbel fit failed and an empirical percentile was used.
@@ -1225,6 +1265,8 @@ def permutation_null_threshold(power, noise_power, pf, n_perm,
                                                  local_radius=FOLD_LOCAL_RADIUS),
                             axis=1)
         maxima.append(float(np.max(scores / sub_norm)))
+        if on_progress is not None:
+            on_progress(len(maxima), int(n_perm))
         if (time_budget_s is not None and len(maxima) >= NULL_MIN_PERMUTATIONS
                 and time.monotonic() - started > time_budget_s):
             break
@@ -1355,7 +1397,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                 N_A_exact=None, N_B_exact=None,
                 slog=None, frequency_mask=None, max_detections=1,
                 k_folds=None, n_null_permutations=40, null_time_budget_s=None,
-                cycle=0, blanked_fraction=0.0):
+                cycle=0, blanked_fraction=0.0, on_null_progress=None):
     """Fold power spectrogram and detect pulses.
 
     Supports both single-rate and multi-hypothesis rate-switch detection.
@@ -1405,6 +1447,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         cycle:               Cycle counter for the per-cycle threshold log.
         blanked_fraction:    Impulse-blanked fraction of this segment's IQ,
                              carried into the per-cycle threshold log.
+        on_null_progress:    Passed to permutation_null_threshold as on_progress.
 
     Returns:
         (detections, noise_psd, best_candidate) where:
@@ -1565,7 +1608,7 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
                 hypotheses=hypotheses if hypotheses else None,
                 pulse_idx=single_rate_pulse_idx if not hypotheses else None,
                 frequency_mask=frequency_mask, rng=null_rng,
-                time_budget_s=null_time_budget_s)
+                time_budget_s=null_time_budget_s, on_progress=on_null_progress)
 
         base_threshold, null_mu, null_sigma, n_perm_used = _null(power)
         if np.isinf(base_threshold):
@@ -1984,6 +2027,11 @@ def main():
             print(f'Spectrogram dump → {args.log_dir}/', flush=True)
     slog = StructuredLogger(jsonl_path=_jsonl_path,
                             preamble_types=(STARTUP, EVT_THRESHOLD))
+    # The capture thread logs through its own handle (gap events, the heading
+    # file opened at ARM); slog follows the slice being analysed.
+    capture_log = slog.fork()
+    if _jsonl_path:
+        capture_log.reopen(_jsonl_path, append=True)
 
     # --- STFT geometry ---
     n_w  = int(np.ceil(args.tp * args.fs))
@@ -2207,7 +2255,7 @@ def main():
                      f'    Segment restarts at stream index {kw["barrier"]}\n'
                      f'    Expected packet after {kw["expected_delta_ms"]:.1f} ms, '
                      f'got {kw["actual_delta_ms"]:.1f} ms\n')
-        slog.emit(GAP_EVENT, human, kind=kind, **kw)
+        capture_log.emit(GAP_EVENT, human, kind=kind, **kw)
 
     # Continuous timeline: never cleared by ARM; history beyond one full
     # segment behind the cursor is retired (and counted) so memory is bounded.
@@ -2253,8 +2301,27 @@ def main():
     rx_thread.start()
     rx_ring_dropped_logged = 0
 
-    try:
-        while not _should_stop:
+    # Capture (ARM handling + IQ ingest) runs on its own thread so the next
+    # heading is armed and recorded while this thread analyses the last one.
+    analysis_jobs = queue.Queue(maxsize=MAX_PENDING_ANALYSES)
+    capture_failure = []
+    capture_stop = threading.Event()
+    capture_count = 0
+    capture_heading_deg = None
+    capture_out_dir = args.log_dir
+    analysed_ids = set()   # (collection_id, slice_id) whose CYCLE_COMPLETE went out
+    status_repeat = StatusRepeat()
+
+    def _send_due_repeats():
+        for message_type, collection_id, slice_id in status_repeat.take_due(time.monotonic()):
+            send_lifecycle_udp(pulse_sock, pulse_dest, message_type, args.tag_id,
+                               collection_id, slice_id)
+
+    def _capture_loop():
+        nonlocal cursor, warmup_remaining_samples, collection_ready_sent, last_ready_sent
+        nonlocal capture_count, capture_heading_deg, capture_out_dir, rx_ring_dropped_logged
+        while not _should_stop and not capture_stop.is_set():
+            _send_due_repeats()
             if control_sock is not None:
                 while True:
                     try:
@@ -2268,20 +2335,23 @@ def main():
                         print(f'Warning: rejected detector control packet: {error}',
                               file=sys.stderr, flush=True)
                         continue
-                    if arm_result == ArmResult.ALREADY_COMPLETE:
-                        # Controller is retrying on behalf of another detector;
-                        # our completion may have been lost, so resend it.
+                    if arm_result == ArmResult.ALREADY_CAPTURED:
+                        # The controller re-ARMs after a lost status; replay ours.
+                        replay_ids = (control_header.collection_id, control_header.slice_id)
                         send_lifecycle_udp(
-                            pulse_sock, pulse_dest, MessageType.CYCLE_COMPLETE,
-                            args.tag_id, control_header.collection_id,
-                            control_header.slice_id)
+                            pulse_sock, pulse_dest, MessageType.SLICE_CAPTURED,
+                            args.tag_id, *replay_ids)
+                        if replay_ids in analysed_ids:
+                            send_lifecycle_udp(
+                                pulse_sock, pulse_dest, MessageType.CYCLE_COMPLETE,
+                                args.tag_id, *replay_ids)
                         continue
                     if arm_result == ArmResult.ARMED:
                         # Heading starts here; the timeline itself is untouched.
                         cursor = stream.head
                         progress_policy.reset()
-                        armed_heading_deg = (arm_heading_deg % 360.0
-                                             if math.isfinite(arm_heading_deg) else None)
+                        capture_heading_deg = (arm_heading_deg % 360.0
+                                               if math.isfinite(arm_heading_deg) else None)
                         if args.log_dir:
                             # Heading comes off the wire: keep it a sane path component.
                             # One dir per slice: a confirmation revisit can land on an
@@ -2300,9 +2370,9 @@ def main():
                                 heading_dir = f'{heading_dir}-s{armed_slice_id:02d}'
                             try:
                                 os.makedirs(heading_dir, exist_ok=True)
-                                slog.reopen(os.path.join(
+                                capture_log.reopen(os.path.join(
                                     heading_dir, f'detector{_tag_suffix}.jsonl'))
-                                cycle_out_dir = heading_dir
+                                capture_out_dir = heading_dir
                                 slice_log_dirs[armed_slice_id] = heading_dir
                             except OSError as exc:
                                 # Acknowledging would silently file this slice's
@@ -2403,26 +2473,110 @@ def main():
                             int(stream.head - cursor), int(samples_needed), int(args.fs))
                 continue
 
-            cycle += 1
-            t0 = time.monotonic()
+            capture_count += 1
 
             if collection_control is not None:
-                cycle_collection_id, cycle_slice_id = collection_control.active_ids
-                # Final report: the segment is full and the detector goes quiet
-                # while it computes, which the controller shows as compute steps.
+                job_collection_id, job_slice_id = collection_control.active_ids
+                # Final report: the segment is full.
                 send_slice_progress_udp(
                     pulse_sock, pulse_dest, args.tag_id,
-                    cycle_collection_id, cycle_slice_id,
+                    job_collection_id, job_slice_id,
                     int(samples_needed), int(samples_needed), int(args.fs))
-                progress_policy.final_sent(t0)
+                progress_policy.final_sent(time.monotonic())
             else:
-                cycle_collection_id, cycle_slice_id = 0, 0
+                job_collection_id, job_slice_id = 0, 0
 
             segment, current_ts, had_gap_fills = stream.take(cursor, samples_needed)
             cursor += samples_needed
             stream.retire(cursor)
-            had_gap = bool(had_gap_fills)
+            if collection_control is not None:
+                # The heading is recorded; the GCS may fly the next one while
+                # this one is analysed.
+                collection_control.captured(job_collection_id, job_slice_id)
+                send_lifecycle_udp(
+                    pulse_sock, pulse_dest, MessageType.SLICE_CAPTURED, args.tag_id,
+                    job_collection_id, job_slice_id)
+                status_repeat.schedule(MessageType.SLICE_CAPTURED, job_collection_id,
+                                       job_slice_id, time.monotonic())
+            backlog = analysis_jobs.qsize()
+            if backlog > 0:
+                print(f'WARNING: analysis is behind capture: {backlog} captured '
+                      f'segment(s) still queued', file=sys.stderr, flush=True)
+            log_path = (os.path.join(capture_out_dir, f'detector{_tag_suffix}.jsonl')
+                        if args.log_dir and collection_control is not None else None)
+            job = AnalysisJob(
+                cycle=capture_count, segment=segment, current_ts=current_ts,
+                had_gap_fills=had_gap_fills, collection_id=job_collection_id,
+                slice_id=job_slice_id, heading_deg=capture_heading_deg,
+                out_dir=capture_out_dir, log_path=log_path)
+            # Backpressure when full, but keep honouring a stop request and repeats.
+            while not (_should_stop or capture_stop.is_set()):
+                try:
+                    analysis_jobs.put(job, timeout=0.5)
+                    break
+                except queue.Full:
+                    _send_due_repeats()
 
+    def _run_capture():
+        try:
+            _capture_loop()
+        except BaseException as exc:  # re-raised on the analysis thread, which owns the exit path
+            # Report now: the re-raise waits for the analysis in progress and is
+            # skipped if a stop request lands first.
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
+            if (pulse_sock is not None and collection_control is not None
+                    and collection_control.last_ids is not None):
+                send_failed_udp(pulse_sock, pulse_dest, args.tag_id,
+                                *collection_control.last_ids,
+                                ErrorCode.UNEXPECTED_EXCEPTION)
+            capture_failure.append(exc)
+
+    capture_thread = threading.Thread(target=_run_capture, name='capture', daemon=True)
+    capture_thread.start()
+
+    analysing_ids = None   # (collection_id, slice_id) of the analysis in progress
+    analysed_count = 0
+    analysis_log_path = _jsonl_path
+    compute_policy = ComputeProgressPolicy()
+
+    def _report_compute(stage, done=0, total=0):
+        if analysing_ids is not None and compute_policy.due(stage, time.monotonic()):
+            send_compute_progress_udp(pulse_sock, pulse_dest, args.tag_id,
+                                      *analysing_ids, stage, done, total)
+
+    try:
+        while not _should_stop:
+            if capture_failure:
+                raise capture_failure[0]
+            try:
+                job = analysis_jobs.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            cycle = job.cycle
+            t0 = time.monotonic()
+            cycle_collection_id, cycle_slice_id = job.collection_id, job.slice_id
+            if collection_control is not None:
+                analysing_ids = (cycle_collection_id, cycle_slice_id)
+            armed_heading_deg = job.heading_deg
+            cycle_out_dir = job.out_dir
+            segment, current_ts, had_gap_fills = job.segment, job.current_ts, job.had_gap_fills
+            had_gap = bool(had_gap_fills)
+            if job.log_path is not None and job.log_path != analysis_log_path:
+                try:
+                    slog.reopen(job.log_path, append=True)
+                    analysis_log_path = job.log_path
+                except OSError as exc:
+                    # reopen() keeps the old file; this slice must not land in it.
+                    slog.close()
+                    analysis_log_path = None
+                    print(f'WARNING: cannot open {job.log_path} for slice '
+                          f'{cycle_slice_id} analysis records: {exc}; '
+                          f'records go to stdout only',
+                          file=sys.stderr, flush=True)
+
+            _report_compute(ComputeStage.SPECTROGRAM)
             segment, blanked_fraction = blank_impulses(
                 segment, args.impulse_blank_factor, impulse_max_run)
 
@@ -2473,6 +2627,7 @@ def main():
                 expected_offset_hz = args.freq - args.center_freq * 1e6
                 frequency_mask &= np.abs(Wf - expected_offset_hz) <= ACQUISITION_SEARCH_HZ
 
+            _report_compute(ComputeStage.SEARCH)
             t_fold_start = time.monotonic()
             detections, nodet_noise_psd, best_candidate = fold_detect(
                                      power, N, args.pf, args.fs, nfft,
@@ -2498,7 +2653,9 @@ def main():
                                      null_time_budget_s=(args.null_time_budget
                                                          if args.null_time_budget > 0 else None),
                                      cycle=cycle,
-                                     blanked_fraction=blanked_fraction)
+                                     blanked_fraction=blanked_fraction,
+                                     on_null_progress=lambda done, total: _report_compute(
+                                         ComputeStage.NULL, done, total))
             t_fold_end = time.monotonic()
             bank_detections = detections
             detections = detections[:1]
@@ -2674,8 +2831,12 @@ def main():
                 # can move a pulse onto a different STFT window; below that
                 # the re-measurement would just repeat the same numbers.
                 for candidate_id, candidate in enumerate(lock_candidates):
+                    def _refit_step(done=candidate_id):
+                        _report_compute(ComputeStage.REFIT, done, len(lock_candidates))
+                    _refit_step()
                     refined = fit_lock_timing(
-                        buffered_slices, Wf, candidate, n_ws, args.fs)
+                        buffered_slices, Wf, candidate, n_ws, args.fs,
+                        on_step=_refit_step)
                     if refined == candidate:
                         continue
                     lock_candidates[candidate_id] = refined
@@ -2727,8 +2888,12 @@ def main():
                 # admitted this cycle, and every cycle again after a PRI
                 # refit. The controller upserts per slice, so the latest
                 # report wins. A failed send is retried next cycle.
+                measure_total = len(buffered_slices) * len(lock_candidates)
+                measure_done = 0
                 for buffered in buffered_slices:
                     for candidate_id, candidate in enumerate(lock_candidates):
+                        _report_compute(ComputeStage.MEASURE, measure_done, measure_total)
+                        measure_done += 1
                         if candidate_id in buffered['measured']:
                             continue
                         (signal_power_psd, noise_power_psd, locked_indices,
@@ -3006,7 +3171,9 @@ def main():
                         pulse_sock, pulse_dest, MessageType.CYCLE_COMPLETE,
                         args.tag_id, cycle_collection_id, cycle_slice_id)
                     if completion_sent:
-                        collection_control.complete(cycle_collection_id, cycle_slice_id)
+                        analysed_ids.add((cycle_collection_id, cycle_slice_id))
+                        status_repeat.schedule(MessageType.CYCLE_COMPLETE, cycle_collection_id,
+                                               cycle_slice_id, time.monotonic())
                     else:
                         send_failed_udp(
                             pulse_sock, pulse_dest, args.tag_id,
@@ -3017,24 +3184,34 @@ def main():
                         pulse_sock, pulse_dest, args.tag_id,
                         cycle_collection_id, cycle_slice_id,
                         ErrorCode.REPORT_SEND_FAILED)
+            analysing_ids = None
+            analysed_count += 1
 
     except KeyboardInterrupt:
         pass  # Handled by signal handler
-    except Exception:
+    except Exception as exc:
+        if capture_failure and exc is capture_failure[0]:
+            raise   # already reported by the capture thread
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
-        if (pulse_sock is not None and collection_control is not None
-                and collection_control.active_ids is not None):
-            collection_id, slice_id = collection_control.active_ids
+        failed_ids = (analysing_ids if analysing_ids is not None
+                      else collection_control.active_ids if collection_control is not None
+                      else None)
+        if pulse_sock is not None and failed_ids is not None:
+            collection_id, slice_id = failed_ids
             send_failed_udp(
                 pulse_sock, pulse_dest, args.tag_id, collection_id, slice_id,
                 ErrorCode.UNEXPECTED_EXCEPTION)
         raise
     finally:
+        capture_stop.set()
+        capture_thread.join(timeout=3.0)
+        unanalysed = capture_count - analysed_count
         elapsed = time.monotonic() - run_start
         slog.emit(SESSION_END,
                   f'\n--- Detection stopped after {cycle} cycles ({elapsed:.0f} s) ---\n'
                   f'  Detections:        {det_total}\n'
+                  f'  Unanalysed:        {unanalysed} captured segment(s) dropped at stop\n'
                   f'  Zero-filled gaps:  {stream.zerofill_count} (< {gap_threshold_reset*1000:.1f} ms)\n'
                   f'  Reset gaps:        {stream.reset_count} (≥ {gap_threshold_reset*1000:.1f} ms, segment restarted)\n'
                   f'  Total gap events:  {stream.zerofill_count + stream.reset_count}\n'
@@ -3043,12 +3220,14 @@ def main():
                   f'  Slice buf evicted: {buffered_slices_evicted} cycles',
                   cycles=cycle, elapsed_s=elapsed,
                   detections=det_total,
+                  unanalysed_segments=unanalysed,
                   gap_zerofill_count=stream.zerofill_count,
                   gap_reset_count=stream.reset_count,
                   retired_samples=stream.retired_samples,
                   rx_ring_dropped=rx_ring.dropped,
                   buffered_slices_evicted=buffered_slices_evicted)
         slog.close()
+        capture_log.close()
         rx_thread.stop()
         heartbeat_stop.set()
         if heartbeat_thread is not None:

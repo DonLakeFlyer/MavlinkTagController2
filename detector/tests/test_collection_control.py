@@ -7,13 +7,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from collection_control import (  # noqa: E402
     ArmResult,
     CollectionControl,
+    ComputeProgressPolicy,
     SliceProgressPolicy,
+    StatusRepeat,
     handle_control_packet,
 )
 from detector_protocol import MessageType, ProtocolError, encode_arm, encode_header  # noqa: E402
 
 
-def test_arm_complete_and_rearm():
+def test_arm_capture_and_rearm():
     control = CollectionControl()
 
     assert not control.armed
@@ -21,7 +23,8 @@ def test_arm_complete_and_rearm():
     assert control.armed
     assert control.active_ids == (10, 1)
 
-    assert control.complete(10, 1)
+    # Captured: the next heading can be armed while this one is analysed.
+    assert control.captured(10, 1)
     assert not control.armed
 
     assert control.arm(10, 2) == ArmResult.ARMED
@@ -36,22 +39,34 @@ def test_duplicate_arm_is_idempotent():
     assert control.active_ids == (10, 4)
 
 
-def test_rearm_of_completed_slice_is_a_replay_not_a_new_slice():
-    # Controller re-ARMs everyone when the GCS retries for a slower detector;
-    # a detector that already finished must not reopen/recollect.
+def test_rearm_of_captured_slice_is_a_replay_not_a_new_slice():
+    # The controller re-ARMs when the GCS retries after a lost status; a
+    # detector that already captured the slice must not reopen/recollect.
     control = CollectionControl()
     assert control.arm(10, 4) == ArmResult.ARMED
-    assert control.complete(10, 4)
+    assert control.captured(10, 4)
 
-    assert control.arm(10, 4) == ArmResult.ALREADY_COMPLETE
+    assert control.arm(10, 4) == ArmResult.ALREADY_CAPTURED
     assert not control.armed
 
-    # only the most recent completion is remembered; the next slice arms normally
+    # only the most recent capture is remembered; the next slice arms normally
     assert control.arm(10, 5) == ArmResult.ARMED
-    assert control.complete(10, 5)
-    assert control.arm(10, 4) == ArmResult.ARMED  # 4 is no longer "completed"
+    assert control.captured(10, 5)
+    assert control.arm(10, 4) == ArmResult.ARMED  # 4 is no longer "captured"
     control.cancel()
-    assert control.arm(10, 5) == ArmResult.ARMED  # cancel forgets completions too
+    assert control.arm(10, 5) == ArmResult.ARMED  # cancel forgets captures too
+
+
+def test_last_ids_falls_back_to_the_last_capture():
+    control = CollectionControl()
+    assert control.last_ids is None
+    control.arm(10, 4)
+    assert control.last_ids == (10, 4)
+    control.captured(10, 4)
+    assert control.active_ids is None
+    assert control.last_ids == (10, 4)
+    control.arm(10, 5)
+    assert control.last_ids == (10, 5)
 
 
 def test_conflicting_arm_is_rejected_while_collecting():
@@ -63,12 +78,12 @@ def test_conflicting_arm_is_rejected_while_collecting():
     assert control.active_ids == (10, 4)
 
 
-def test_stale_completion_does_not_close_active_slice():
+def test_stale_capture_does_not_close_active_slice():
     control = CollectionControl()
 
     control.arm(10, 4)
-    assert not control.complete(10, 3)
-    assert not control.complete(9, 4)
+    assert not control.captured(10, 3)
+    assert not control.captured(9, 4)
     assert control.active_ids == (10, 4)
 
 
@@ -155,3 +170,28 @@ def test_slice_progress_final_report_restarts_the_clock():
     policy.final_sent(100.4)
     assert not policy.periodic_due(101.0)
     assert policy.periodic_due(101.4)
+
+
+def test_compute_progress_sends_each_stage_change_and_throttles_within_a_stage():
+    policy = ComputeProgressPolicy()
+
+    assert policy.due(1, 100.0)
+    assert policy.due(2, 100.1)                # stage change goes out at once
+    assert policy.due(3, 100.2)
+    assert not policy.due(3, 100.7)
+    assert not policy.due(3, 101.1)
+    assert policy.due(3, 101.2)                # one second after the last send
+    assert not policy.due(3, 101.5)
+    assert policy.due(4, 101.6)
+
+
+def test_status_repeat_sends_one_copy_after_the_delay():
+    repeat = StatusRepeat()
+    repeat.schedule(MessageType.SLICE_CAPTURED, 10, 4, now=100.0)
+    repeat.schedule(MessageType.CYCLE_COMPLETE, 10, 3, now=100.5)
+
+    assert repeat.take_due(100.9) == []
+    assert repeat.take_due(101.0) == [(MessageType.SLICE_CAPTURED, 10, 4)]
+    assert repeat.take_due(101.2) == []
+    assert repeat.take_due(102.0) == [(MessageType.CYCLE_COMPLETE, 10, 3)]
+    assert repeat.take_due(110.0) == []

@@ -2,41 +2,46 @@
 
 #include "OperationProgress.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 // Publishes one OPERATION_PROGRESS operation (command START_COLLECTION) that
 // spans a whole rotation, advanced only by real events: pipeline processes
-// started, detector READY/ARMED/SLICE_PROGRESS/CYCLE_COMPLETE, finalize stages.
-// The GCS treats a step that has not advanced for a while as a stalled rotation.
+// started, detector READY/ARMED/SLICE_PROGRESS/SLICE_CAPTURED/COMPUTE_PROGRESS/
+// CYCLE_COMPLETE, finalize stages. The GCS treats a step that has not advanced
+// for a while as a stalled rotation.
 //
 // Step layout:
 //   [startup processes][detectors READY]
-//   per slice: [ARMED][one step per second of dwell][compute, <= kComputeSteps][COMPLETE]
-//   [finalize stages]
+//   per slice: [ARMED][one step per second of dwell][CAPTURED]
+//   [analysis wait, >= kAnalysisEstimateSteps][finalize stages]
 // The dwell length is estimated at begin() and corrected from SLICE_PROGRESS
 // reports, which carry each detector's real segment length; the longest wins.
 // A detector restarts its segment after an IQ gap; the seconds it discards are
 // added to the current slice as extra steps so the bar keeps moving instead of
 // sitting at its old high-water mark until the detector catches back up.
-// Once every detector has a full segment it goes quiet while it computes
-// (STFT, fold, permutation null); the compute steps are ticked from the 1 Hz
-// heartbeat so that silence is not mistaken for a dead stream, and are bounded
-// so a detector hung in compute still trips the GCS watchdog.
+// Detectors analyse each captured slice in the background while the next one
+// is flown; only the last slice waits for the analyses, and those wait steps
+// are ticked from the 1 Hz heartbeat. Every running analysis must keep sending
+// COMPUTE_PROGRESS: one that goes quiet, or runs past kMaxAnalysisSeconds,
+// freezes the step (dwell included) so the GCS stall watchdog fires.
 class RotationProgress {
 public:
     static constexpr uint32_t kFinalizeSteps = 3;   // stopping detectors, computing bearing, sending results
-    // Seconds of detector compute the bar keeps moving for after the segment is
-    // full: two full --null-time-budget passes plus STFT. Beyond this the step
-    // stops and the GCS stall watchdog applies.
-    static constexpr uint32_t kComputeSteps = 12;
-    // A detector whose last report left at most this much remaining counts as
-    // full: it sends one report per second and a final full one, so a lost
-    // or slightly early last datagram must not keep the compute steps parked.
-    static constexpr uint32_t kFullToleranceSeconds = 1;
+    // Steps reserved for the wait on the last slice's analysis; a slice measured
+    // 23-36 s on the flight computer (#173). A longer wait grows the layout.
+    static constexpr uint32_t kAnalysisEstimateSteps = 30;
+    // Heartbeat ticks an analysing detector may go without COMPUTE_PROGRESS
+    // (sent ~1 Hz; one PRI re-fit step takes up to ~4 s late in a rotation).
+    static constexpr uint32_t kComputeProgressTimeoutSeconds = 5;
+    // One slice's analysis normally takes 23-36 s; past this it is treated as
+    // hung even while it keeps reporting.
+    static constexpr uint32_t kMaxAnalysisSeconds = 120;
     // A samples_have drop larger than this is a segment restart; a reordered
     // datagram (reports are <= 1 Hz) regresses by at most about one second.
     static constexpr uint32_t kRestartToleranceSeconds = 2;
@@ -58,9 +63,18 @@ public:
     /// SegmentChanged: the detector's segment length differs from its earlier reports
     /// in this slice (a detector bug); the report is dropped so it cannot inflate the layout.
     ProgressResult sliceProgress(uint32_t sliceId, uint32_t tagId, uint32_t samplesHave, uint32_t samplesNeeded, uint32_t sampleRateHz);
-    /// 1 Hz from the heartbeat: advances a compute step while every detector's segment is full.
-    void computeTick();
+    /// Every detector has captured the last slice; the GCS is held until the analyses finish.
+    void sliceCaptured(uint32_t sliceId);
+    /// SLICE_COMPLETE sent; for a held slice this ends the analysis wait.
     void sliceComplete(uint32_t sliceId);
+    /// A detector captured a slice; its analysis is queued.
+    void analysisQueued(uint32_t tagId);
+    void computeProgress(uint32_t sliceId, uint32_t tagId, uint16_t stage, uint32_t done, uint32_t total);
+    /// CYCLE_COMPLETE: the detector finished analysing one slice.
+    void analysisDone(uint32_t tagId);
+    /// 1 Hz from the heartbeat: ages running analyses and advances the analysis wait.
+    /// Returns one diagnostic per analysis that has just become stalled.
+    std::vector<std::string> computeTick();
     /// One more slice will be flown; grows step_count.
     void revisitRequested(float headingDeg);
 
@@ -68,16 +82,25 @@ public:
     void finalizeStage(uint32_t stage, const std::string& message);
     void finish(bool success, const std::string& message);
 
+    static std::string computeStageText(uint16_t stage, uint32_t done, uint32_t total);
+
 private:
     enum class Phase { Startup, Slice, Finalize };
 
-    uint32_t _sliceSteps() const { return 2 + _dwellSteps + kComputeSteps; }
+    uint32_t _sliceSteps() const { return 2 + _dwellSteps; }
     uint32_t _startupSteps() const { return _startupProcesses + _detectorCount; }
-    uint32_t _totalSteps() const { return _startupSteps() + _sliceCount * _sliceSteps() + _completedExtraSteps + _currentExtraLocked() + kFinalizeSteps; }
+    uint32_t _analysisWaitSteps() const
+    {
+        const uint32_t reserved = _analysisWaitPending ? kAnalysisEstimateSteps : 0;
+        return std::max(reserved, _awaitingSliceId ? _analysisWaitTicks : 0u);
+    }
+    uint32_t _totalSteps() const { return _startupSteps() + _sliceCount * _sliceSteps() + _completedExtraSteps + _currentExtraLocked() + _completedWaitSteps + _analysisWaitSteps() + kFinalizeSteps; }
     uint32_t _stepLocked() const;
     uint32_t _sliceSecondsLocked() const;
-    bool     _segmentsFullLocked() const;
     uint32_t _currentExtraLocked() const;
+    bool     _analysisStalledLocked() const;
+    void     _endCurrentSliceLocked();
+    std::string _sliceMessageLocked() const;
     void     _publishLocked(const std::string& message);
 
     OperationProgressReporter&  _reporter;
@@ -104,8 +127,28 @@ private:
     uint32_t                    _slicesComplete    = 0;
     std::map<uint32_t, TagProgress> _sliceProgressByTag;    // per detector, for the current slice
     uint32_t                    _completedExtraSteps = 0;   // restart seconds of completed slices (max per slice across detectors)
-    uint32_t                    _computeTicks      = 0;     // compute steps published for the current slice
     float                       _currentHeadingDeg = 0.0f;
+    std::string                 _sliceText;                 // "3/8 090 deg" for the slice being flown
+    std::map<uint32_t, float>   _sliceHeadings;             // slice id -> heading, to name analysed slices
+    // Background analysis
+    struct Analysis {
+        uint32_t pending          = 0;   // slices captured and not yet analysed
+        uint32_t ticksSinceReport = 0;
+        uint32_t ticksInAnalysis  = 0;   // of the slice being analysed now
+        std::optional<uint32_t> lastSliceId;   // from the last COMPUTE_PROGRESS
+        std::string lastStageText;
+        bool stallReported        = false;
+        bool stalled() const
+        {
+            return pending > 0 && (ticksSinceReport > kComputeProgressTimeoutSeconds || ticksInAnalysis > kMaxAnalysisSeconds);
+        }
+    };
+    std::map<uint32_t, Analysis> _analysisByTag;
+    std::string                 _computeText;               // "045 deg: null 24/40" while any analysis runs
+    std::optional<uint32_t>     _awaitingSliceId;           // captured slice the GCS is held on
+    bool                        _analysisWaitPending = true; // an analysis wait is still ahead in the layout
+    uint32_t                    _analysisWaitTicks = 0;
+    uint32_t                    _completedWaitSteps = 0;
     // Finalize phase
     uint32_t                    _finalizeStage     = 0;
     uint32_t                    _lastStep          = 0;

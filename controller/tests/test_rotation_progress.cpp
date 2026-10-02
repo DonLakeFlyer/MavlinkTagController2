@@ -1,13 +1,16 @@
-// RotationProgress: step layout, monotonic advance, learned dwell, revisit growth, terminal frames.
+// RotationProgress: step layout, monotonic advance, learned dwell, revisit growth, background analysis, terminal frames.
 
 #include "RotationProgress.h"
+#include "detector_protocol.h"
 #include "test_check.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 using namespace TunnelProtocol;
+using TagTrackerDetectorProtocol::ComputeStage;
 
 namespace {
 
@@ -19,11 +22,13 @@ struct Sink {
     std::string message() const { return last().message; }
 };
 
+uint16_t stage(ComputeStage value) { return static_cast<uint16_t>(value); }
+
 // begin(): 2 startup procs + 1 detector, 2 slices, 10 s dwell estimate.
 constexpr uint32_t kProcs = 3, kDetectors = 1, kSlices = 2, kDwell = 10;
-constexpr uint32_t kCompute = RotationProgress::kComputeSteps;
-constexpr uint32_t kSliceSteps = 2 + kDwell + kCompute;
-constexpr uint32_t kTotal = kProcs + kDetectors + kSlices * kSliceSteps + RotationProgress::kFinalizeSteps;
+constexpr uint32_t kWait = RotationProgress::kAnalysisEstimateSteps;
+constexpr uint32_t kSliceSteps = 2 + kDwell;
+constexpr uint32_t kTotal = kProcs + kDetectors + kSlices * kSliceSteps + kWait + RotationProgress::kFinalizeSteps;
 
 void checkMonotonic(const Sink& s)
 {
@@ -69,8 +74,8 @@ void testFullRotation()
     // Detector reports a real 12 s segment at 3840 Hz: layout re-sized.
     const uint32_t fs = 3840, needed = 12 * fs;
     s.rotation.sliceProgress(1, 2, 3 * fs, needed, fs);
-    const uint32_t learnedSliceSteps = 2 + 12 + kCompute;
-    const uint32_t learnedTotal = kProcs + kDetectors + kSlices * learnedSliceSteps + RotationProgress::kFinalizeSteps;
+    const uint32_t learnedSliceSteps = 2 + 12;
+    const uint32_t learnedTotal = kProcs + kDetectors + kSlices * learnedSliceSteps + kWait + RotationProgress::kFinalizeSteps;
     CHECK(s.last().step_count == learnedTotal);
     CHECK(s.last().step == slice1Base + 1 + 3);
     CHECK(s.message() == "1/2 090 deg");                    // dwell moves the bar, not the text
@@ -98,18 +103,21 @@ void testFullRotation()
     CHECK(s.last().step == slice1Base + 2 * learnedSliceSteps);
 
     // Finalize
+    // Finalize without an analysis wait (no held slice): the reserved wait steps are dropped.
+    const uint32_t finalTotal = learnedTotal - kWait;
     s.rotation.finalizeStage(0, "Stopping detectors");
-    CHECK(s.last().step == learnedTotal - 3);
+    CHECK(s.last().step_count == finalTotal);
+    CHECK(s.last().step == finalTotal - 3);
     s.rotation.finalizeStage(1, "Computing bearing");
-    CHECK(s.last().step == learnedTotal - 2);
+    CHECK(s.last().step == finalTotal - 2);
     s.rotation.finalizeStage(2, "Sending results");
-    CHECK(s.last().step == learnedTotal - 1);
+    CHECK(s.last().step == finalTotal - 1);
 
     s.rotation.finish(true, "Rotation complete");
     CHECK(!s.rotation.active());
     CHECK(!s.reporter.busy());
     CHECK(s.last().state == OPERATION_STATE_COMPLETE);
-    CHECK(s.last().step == learnedTotal);
+    CHECK(s.last().step == finalTotal);
     CHECK(s.message() == "Rotation complete");
 
     // Post-finish events are ignored, and the reporter is free again.
@@ -132,7 +140,7 @@ void testRevisitGrowsStepCount()
     const uint32_t afterSlice = s.last().step;
 
     s.rotation.revisitRequested(45.0f);
-    CHECK(s.last().step_count == total1 + 2 + 5 + kCompute);
+    CHECK(s.last().step_count == total1 + 2 + 5);
     CHECK(s.last().step == afterSlice);
     CHECK(s.message() == "Revisit 045 deg");
 
@@ -175,10 +183,10 @@ void testUnequalDetectorDurations()
     const uint32_t fs = 1000, shortNeeded = 3 * fs, longNeeded = 8 * fs;
 
     s.rotation.sliceProgress(1, 10, 1 * fs, shortNeeded, fs);   // short detector first: dwell 3
-    CHECK(s.last().step_count == procs + detectors + (2 + 3 + kCompute) + RotationProgress::kFinalizeSteps);
+    CHECK(s.last().step_count == procs + detectors + (2 + 3) + kWait + RotationProgress::kFinalizeSteps);
     CHECK(s.last().step == base);                              // long detector not heard from yet
     s.rotation.sliceProgress(1, 11, 1 * fs, longNeeded, fs);    // dwell grows to 8
-    CHECK(s.last().step_count == procs + detectors + (2 + 8 + kCompute) + RotationProgress::kFinalizeSteps);
+    CHECK(s.last().step_count == procs + detectors + (2 + 8) + kWait + RotationProgress::kFinalizeSteps);
     CHECK(s.last().step == base + 1);
 
     s.rotation.sliceProgress(1, 10, 3 * fs, shortNeeded, fs);   // short detector done
@@ -190,7 +198,7 @@ void testUnequalDetectorDurations()
     CHECK(s.last().step == base + 8);
 
     s.rotation.sliceComplete(1);
-    CHECK(s.last().step == base - 1 + 2 + 8 + kCompute);
+    CHECK(s.last().step == base - 1 + 2 + 8);
     checkMonotonic(s);
 }
 
@@ -223,7 +231,7 @@ void testSegmentRestartAddsWork()
 
     s.rotation.sliceComplete(1);
     CHECK(s.last().step_count == total + 12);
-    CHECK(s.last().step == base - 1 + 2 + 20 + 12 + kCompute);
+    CHECK(s.last().step == base - 1 + 2 + 20 + 12);
     s.rotation.finalizeStage(2, "Sending results");
     CHECK(s.last().step == s.last().step_count - 1);
     s.rotation.finish(true, "done");
@@ -288,42 +296,211 @@ void testAsymmetricRestart()
     checkMonotonic(s);
 }
 
-// The detector goes quiet once its segment is full while it computes. Heartbeat
-// ticks move the step through a bounded compute phase; before the segment is
-// full, and past the bound, they do nothing.
-void testComputeTicksAreBounded()
+// Slice 1 is analysed while slice 2 is flown; the bar only waits on the last
+// slice, and those wait steps tick from the heartbeat while the detector
+// keeps reporting. The stage shows in the message.
+void testBackgroundAnalysis()
 {
     Sink s;
-    CHECK(s.rotation.begin(1, 1, 2, 2, 10));
-    s.rotation.detectorReady(2);
-    s.rotation.sliceArmed(1, 0.0f);
+    constexpr uint32_t procs = 2, detectors = 1, slices = 2, dwell = 10, tag = 7;
+    CHECK(s.rotation.begin(1, slices, detectors, procs, dwell));
+    s.rotation.detectorReady(1);
+    s.rotation.sliceArmed(1, 90.0f);
     const uint32_t base = s.last().step;
-    const uint32_t fs = 1000, needed = 10 * fs;
+    const uint32_t fs = 1000, needed = dwell * fs;
+    const uint32_t total = procs + detectors + slices * (2 + dwell) + kWait + RotationProgress::kFinalizeSteps;
+    CHECK(s.last().step_count == total);
 
-    s.rotation.computeTick();                                   // nothing reported yet
-    CHECK(s.last().step == base);
-    s.rotation.sliceProgress(1, 10, needed, needed, fs);
-    s.rotation.sliceProgress(1, 11, 6 * fs, needed, fs);
-    CHECK(s.last().step == base + 6);
-    s.rotation.computeTick();                                   // second detector still collecting
-    CHECK(s.last().step == base + 6);
-
-    s.rotation.sliceProgress(1, 11, needed - fs / 2, needed, fs);   // last periodic report, just short of full
-    CHECK(s.last().step == base + 9);
-    for (uint32_t i = 1; i <= kCompute; ++i) {
-        s.rotation.computeTick();
-        CHECK(s.last().step == base + 9 + i);
-    }
-    s.rotation.computeTick();                                   // bound reached: the watchdog takes over
-    CHECK(s.last().step == base + 9 + kCompute);
-    s.rotation.sliceProgress(1, 11, needed, needed, fs);        // the detector's final full report
-    CHECK(s.last().step == base + 10 + kCompute);
-
+    s.rotation.sliceProgress(1, tag, needed, needed, fs);
+    CHECK(s.last().step == base + dwell);
+    s.rotation.analysisQueued(tag);
     s.rotation.sliceComplete(1);
-    CHECK(s.last().step == base - 1 + 2 + 10 + kCompute);
-    s.rotation.computeTick();                                   // no current slice
-    CHECK(s.last().step == base - 1 + 2 + 10 + kCompute);
+    const uint32_t slice2Base = base - 1 + 2 + dwell;
+    CHECK(s.last().step == slice2Base);
+    s.rotation.computeProgress(1, tag, stage(ComputeStage::Null), 3, 40);
+    CHECK(s.message() == "1/2 090 deg");                       // between slices the text stands
+
+    s.rotation.sliceArmed(2, 180.0f);
+    CHECK(s.message() == "2/2 180 deg | 090 deg: null 3/40");
+    for (int i = 0; i < 3; ++i) {
+        s.rotation.computeTick();                               // not waiting on analysis: no steps
+    }
+    CHECK(s.last().step == slice2Base + 1);
+    s.rotation.sliceProgress(2, tag, 4 * fs, needed, fs);
+    CHECK(s.last().step == slice2Base + 1 + 4);
+    s.rotation.analysisDone(tag);
+    CHECK(s.message() == "2/2 180 deg");
+    s.rotation.computeProgress(1, tag, stage(ComputeStage::Null), 4, 40);   // late report for a finished analysis
+    CHECK(s.message() == "2/2 180 deg");
+    s.rotation.sliceProgress(2, tag, needed, needed, fs);
+
+    // Last slice: captured, then held until its analysis is done.
+    s.rotation.analysisQueued(tag);
+    s.rotation.sliceCaptured(2);
+    const uint32_t waitBase = slice2Base + 2 + dwell;
+    CHECK(s.last().step == waitBase);
+    CHECK(s.message() == "Analysing");
+    s.rotation.computeProgress(2, tag, stage(ComputeStage::Spectrogram), 0, 0);
+    CHECK(s.message() == "Analysing 180 deg: spectrogram");
+
+    const uint32_t ticks = kWait + 5;                           // runs past the estimate: layout grows
+    for (uint32_t i = 1; i <= ticks; ++i) {
+        s.rotation.computeProgress(2, tag, stage(ComputeStage::Null), i, 40);
+        s.rotation.computeTick();
+        CHECK(s.last().step == waitBase + i);
+        CHECK(s.last().step_count == total - kWait + std::max(kWait, i));
+    }
+    s.rotation.analysisDone(tag);
+    s.rotation.sliceComplete(2);
+    const uint32_t finalTotal = total - kWait + ticks;
+    CHECK(s.last().step == waitBase + ticks);
+    CHECK(s.last().step_count == finalTotal);
+    s.rotation.computeTick();                                   // wait over: no more steps
+    CHECK(s.last().step == waitBase + ticks);
+
+    s.rotation.finalizeStage(0, "Stopping");
+    CHECK(s.last().step == finalTotal - RotationProgress::kFinalizeSteps);
+    s.rotation.finish(true, "done");
+    CHECK(s.last().step == finalTotal);
     checkMonotonic(s);
+}
+
+// An analysis that stops reporting freezes the step even while the next slice's
+// dwell is still delivering IQ, so the GCS watchdog sees the hung detector.
+void testSilentAnalysisFreezesStep()
+{
+    Sink s;
+    constexpr uint32_t dwell = 20, tag = 7;
+    CHECK(s.rotation.begin(1, 3, 1, 2, dwell));
+    s.rotation.detectorReady(1);
+    s.rotation.sliceArmed(1, 0.0f);
+    const uint32_t fs = 1000, needed = dwell * fs;
+    s.rotation.sliceProgress(1, tag, needed, needed, fs);
+    s.rotation.analysisQueued(tag);
+    s.rotation.sliceComplete(1);
+    s.rotation.sliceArmed(2, 120.0f);
+    const uint32_t slice2Base = s.last().step;
+    s.rotation.computeProgress(1, tag, stage(ComputeStage::Search), 0, 0);
+
+    constexpr uint32_t timeout = RotationProgress::kComputeProgressTimeoutSeconds;
+    for (uint32_t i = 1; i <= timeout; ++i) {
+        CHECK(s.rotation.computeTick().empty());
+        s.rotation.sliceProgress(2, tag, i * fs, needed, fs);
+        CHECK(s.last().step == slice2Base + i);
+    }
+    const auto stalls = s.rotation.computeTick();               // one tick too many without a report
+    CHECK(stalls.size() == 1);
+    CHECK(stalls.front().find("detector 7") != std::string::npos);
+    CHECK(stalls.front().find("no COMPUTE_PROGRESS") != std::string::npos);
+    CHECK(stalls.front().find("slice 1") != std::string::npos);
+    CHECK(stalls.front().find("'search'") != std::string::npos);
+    CHECK(s.rotation.computeTick().empty());                    // reported once per stall
+    s.rotation.sliceProgress(2, tag, (timeout + 1) * fs, needed, fs);
+    CHECK(s.last().step == slice2Base + timeout);
+    s.rotation.sliceProgress(2, tag, (timeout + 2) * fs, needed, fs);
+    CHECK(s.last().step == slice2Base + timeout);
+
+    s.rotation.computeProgress(1, tag, stage(ComputeStage::Null), 1, 40);   // reporting again
+    CHECK(s.last().step == slice2Base + timeout + 2);
+    checkMonotonic(s);
+}
+
+// An analysis that keeps reporting but never finishes is capped.
+void testRunawayAnalysisIsCapped()
+{
+    Sink s;
+    constexpr uint32_t dwell = 10, tag = 7;
+    CHECK(s.rotation.begin(1, 1, 1, 2, dwell));
+    s.rotation.detectorReady(1);
+    s.rotation.sliceArmed(1, 0.0f);
+    const uint32_t fs = 1000;
+    s.rotation.sliceProgress(1, tag, dwell * fs, dwell * fs, fs);
+    s.rotation.analysisQueued(tag);
+    s.rotation.sliceCaptured(1);
+    const uint32_t waitBase = s.last().step;
+
+    constexpr uint32_t cap = RotationProgress::kMaxAnalysisSeconds;
+    for (uint32_t i = 1; i <= cap; ++i) {
+        s.rotation.computeProgress(1, tag, stage(ComputeStage::Null), i % 40, 40);
+        CHECK(s.rotation.computeTick().empty());
+        CHECK(s.last().step == waitBase + i);
+    }
+    for (int i = 0; i < 3; ++i) {
+        s.rotation.computeProgress(1, tag, stage(ComputeStage::Null), 1, 40);
+        const auto stalls = s.rotation.computeTick();
+        CHECK(stalls.size() == (i == 0 ? 1u : 0u));             // still reporting, so still one stall
+        if (i == 0) {
+            CHECK(stalls.front().find("cap") != std::string::npos);
+        }
+        CHECK(s.last().step == waitBase + cap);
+    }
+
+    s.rotation.analysisDone(tag);                               // a late finish releases the wait
+    s.rotation.sliceComplete(1);
+    s.rotation.finalizeStage(2, "Sending results");
+    CHECK(s.last().step == s.last().step_count - 1);
+    checkMonotonic(s);
+}
+
+// A lost CYCLE_COMPLETE must not let two analyses add up against the per-slice cap.
+void testCapRestartsOnLaterSlice()
+{
+    Sink s;
+    constexpr uint32_t dwell = 10, tag = 7, fs = 1000;
+    CHECK(s.rotation.begin(1, 2, 1, 2, dwell));
+    s.rotation.detectorReady(1);
+    s.rotation.sliceArmed(1, 0.0f);
+    s.rotation.sliceProgress(1, tag, dwell * fs, dwell * fs, fs);
+    s.rotation.analysisQueued(tag);
+    s.rotation.sliceComplete(1);
+    s.rotation.sliceArmed(2, 180.0f);
+    s.rotation.sliceProgress(2, tag, dwell * fs, dwell * fs, fs);
+    s.rotation.analysisQueued(tag);
+    s.rotation.sliceCaptured(2);
+    uint32_t step = s.last().step;
+
+    constexpr uint32_t cap = RotationProgress::kMaxAnalysisSeconds;
+    for (uint32_t i = 0; i < cap - 10; ++i) {
+        s.rotation.computeProgress(1, tag, stage(ComputeStage::Null), 1, 40);
+        CHECK(s.rotation.computeTick().empty());
+        CHECK(s.last().step == ++step);
+    }
+    for (uint32_t i = 0; i < 20; ++i) {                        // slice 1's CYCLE_COMPLETE never arrived
+        s.rotation.computeProgress(2, tag, stage(ComputeStage::Null), 1, 40);
+        CHECK(s.rotation.computeTick().empty());
+        CHECK(s.last().step == ++step);
+    }
+    checkMonotonic(s);
+}
+
+void testComputeStageText()
+{
+    CHECK(RotationProgress::computeStageText(stage(ComputeStage::Null), 24, 40) == "null 24/40");
+    CHECK(RotationProgress::computeStageText(stage(ComputeStage::Refit), 1, 3) == "refit 1/3");
+    CHECK(RotationProgress::computeStageText(stage(ComputeStage::Spectrogram), 0, 0) == "spectrogram");
+    CHECK(RotationProgress::computeStageText(99, 0, 0) == "stage 99");
+}
+
+// An analysis that finishes while the vehicle yaws between slices must not
+// leave its stage text on the bar until the next ARM.
+void testAnalysisTextClearedBetweenSlices()
+{
+    Sink s;
+    constexpr uint32_t dwell = 10, tag = 7, fs = 1000;
+    CHECK(s.rotation.begin(1, 3, 1, 2, dwell));
+    s.rotation.detectorReady(1);
+    s.rotation.sliceArmed(1, 90.0f);
+    s.rotation.sliceProgress(1, tag, dwell * fs, dwell * fs, fs);
+    s.rotation.analysisQueued(tag);
+    s.rotation.sliceComplete(1);
+    s.rotation.sliceArmed(2, 180.0f);
+    s.rotation.computeProgress(1, tag, stage(ComputeStage::Measure), 2, 8);
+    CHECK(s.message() == "2/3 180 deg | 090 deg: measure 2/8");
+    s.rotation.sliceProgress(2, tag, dwell * fs, dwell * fs, fs);
+    s.rotation.sliceComplete(2);
+    CHECK(s.message() == "2/3 180 deg | 090 deg: measure 2/8");
+    s.rotation.analysisDone(tag);
+    CHECK(s.message() == "2/3 180 deg");
 }
 
 void testFailureAndBusyGate()
@@ -353,7 +530,12 @@ int main()
     testSegmentRestartAddsWork();
     testSimultaneousRestart();
     testAsymmetricRestart();
-    testComputeTicksAreBounded();
+    testBackgroundAnalysis();
+    testSilentAnalysisFreezesStep();
+    testRunawayAnalysisIsCapped();
+    testCapRestartsOnLaterSlice();
+    testComputeStageText();
+    testAnalysisTextClearedBetweenSlices();
     testFailureAndBusyGate();
     std::printf("test_rotation_progress: all tests passed\n");
     return 0;

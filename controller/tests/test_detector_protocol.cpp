@@ -74,5 +74,28 @@ int main()
     static_assert(offsetof(SliceProgressPayload, samples_needed) == 4);
     static_assert(offsetof(SliceProgressPayload, sample_rate_hz) == 8);
 
+    static_assert(static_cast<uint16_t>(MessageType::SliceCaptured) == 10);
+    static_assert(static_cast<uint16_t>(MessageType::ComputeProgress) == 11);
+    static_assert(static_cast<uint16_t>(ComputeStage::Spectrogram) == 1);
+    static_assert(static_cast<uint16_t>(ComputeStage::Measure) == 5);
+    header.message_type = static_cast<uint16_t>(MessageType::SliceCaptured);
+    header.payload_length = 0;
+    CHECK(validateHeader(header, sizeof(Header)) == ValidationResult::Valid);
+    header.payload_length = 1;
+    CHECK(validateHeader(header, sizeof(Header) + 1) == ValidationResult::BadPayloadLength);
+
+    header.message_type = static_cast<uint16_t>(MessageType::ComputeProgress);
+    header.payload_length = 0;
+    CHECK(validateHeader(header, sizeof(Header)) == ValidationResult::BadPayloadLength);
+    header.payload_length = sizeof(ComputeProgressPayload);
+    CHECK(validateHeader(header, sizeof(Header) + sizeof(ComputeProgressPayload)) == ValidationResult::Valid);
+    static_assert(sizeof(ComputeProgressPayload) == 12);
+    static_assert(offsetof(ComputeProgressPayload, reserved) == 2);
+    static_assert(offsetof(ComputeProgressPayload, done) == 4);
+    static_assert(offsetof(ComputeProgressPayload, total) == 8);
+
+    header.message_type = static_cast<uint16_t>(MessageType::ComputeProgress) + 1;
+    CHECK(validateHeader(header, sizeof(Header) + sizeof(ComputeProgressPayload)) == ValidationResult::BadMessageType);
+
     return 0;
 }

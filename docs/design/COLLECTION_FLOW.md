@@ -17,7 +17,8 @@ GCS (TagTracker)
    ▼
 MavlinkTagController2
    │  TTDP over UDP (shared/detector_protocol.h):
-   │     → ARM(heading_deg)          ← READY, ARMED, SLICE_PROGRESS (≤ 1 Hz while armed),
+   │     → ARM(heading_deg)          ← READY, ARMED, SLICE_PROGRESS (≤ 1 Hz while armed), SLICE_CAPTURED,
+   │                                    COMPUTE_PROGRESS (each stage change, else ≤ 1 Hz, while analysing),
    │                                    PULSE, NO_DETECTION, CYCLE_COMPLETE, FAILED, HEARTBEAT (1 Hz)
    ▼
 pulse_detector.py  (one process per tag, alive for the whole collection)
@@ -30,60 +31,94 @@ controller ARMs every detector once per slice. Slices are identified by
 ## State machine (one collection)
 
 The GCS drives the rotation one heading at a time; the controller gates each
-heading on every detector; the detectors keep state across headings. Each
-detector runs the same per-slice cycle regardless of lock state — what changes
-after the first qualifying candidate is *what gets reported* (see
-[Lock candidates](#lock-candidates)).
+heading on every detector; the detectors keep state across headings. A heading
+is complete for the GCS once every detector has *captured* its segment: each
+detector analyses a captured slice on its main thread while its capture thread
+records the next heading, so the aircraft does not hover through the analysis
+(~23–36 s per slice on the flight computer, #173). Only the last announced
+slice — `slice_id ≥ n_slices`, which includes a revisit — is held until every
+analysis has finished, so `FINISH_COLLECTION` always sees the full set of
+results.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Starting : GCS START_COLLECTION(antenna_id)
+    [*] --> Starting : GCS START_COLLECTION(antenna_id, n_slices)
     Starting --> Ready : every detector READY (30 s timeout, else COLLECTION_STATUS_FAILED)
 
-    state "Per heading" as Heading {
+    state "Per heading (detector capture thread)" as Heading {
         [*] --> Yawing : GCS yaws aircraft to heading N (clockwise sweep, 45° steps at 8 slices)
         Yawing --> Arming : GCS START_COLLECTION_SLICE(slice N, heading_deg)
         Arming --> Dwelling : controller sends ARM(heading) to every detector, all reply ARMED
-        Dwelling --> Blanking : K·PRI of IQ accumulated (about 40 s at K=20, tip 2 s); detector sends SLICE_PROGRESS once a second on IQ arrival
-        Blanking --> Folding : optional impulse blanking (--impulse-blank-factor), then STFT
-        Folding --> Thresholding : full-K fold search over the acquisition band
-        Thresholding --> Reporting : permutation null of this dwell's own windows gives the threshold at pf, re-derived without a detected train's windows. Up to 4 frequency-separated peaks
-        state Reporting {
-            [*] --> Acq : pulse_lock is None
-            [*] --> Locked : pulse_lock set
-            Acq --> [*] : send PULSE (status 0/1) or NO_DETECTION (3), first qualifying peak becomes candidate 0
-            Locked --> [*] : bank new candidates, PRI refit, send CONFIRMED (2) for every unmeasured (slice, candidate) pair
-        }
-        Reporting --> [*] : CYCLE_COMPLETE from every detector, controller sends COLLECTION_STATUS_SLICE_COMPLETE to the GCS (no controller timeout)
+        Dwelling --> [*] : K·PRI of IQ accumulated (about 40 s at K=20, tip 2 s); detector sends SLICE_PROGRESS once a second on IQ arrival, then SLICE_CAPTURED, and queues the segment for analysis
 
         note right of Arming
             Detector on ARM: cursor = stream head (no IQ discarded),
-            reopens detector_<tag>.jsonl under heading-NNN/
+            opens detector_<tag>.jsonl under heading-NNN/
             (heading-NNN-sSS/ if this heading was already flown).
-            ARM during a cycle → BUSY. Re-ARM of a done slice → CYCLE_COMPLETE again.
-        end note
-        note right of Locked
-            Qualifying peak: score_ratio ≥ 3.0, no dominant fold, within ±2 kHz.
-            Matches a banked candidate (±200 Hz, same PRI, phase in tolerance) → sighting.
-            New and bank < 4 → admitted, retro-measured on all earlier headings.
-            New and bank full → dropped. Below 3.0 → not reported after lock.
-        end note
-        note right of Thresholding
-            No cache: threshold is per dwell, per heading.
-            cycle_threshold record: mu, sigma, n_perm, refined, blanked_fraction, null_ms.
+            ARM while capturing → BUSY. Re-ARM of a captured slice →
+            SLICE_CAPTURED again (and CYCLE_COMPLETE once analysed).
         end note
     }
 
     Ready --> Heading : next heading
-    Heading --> Ready : controller stores (tag, candidate, slice) results, refits, may switch live candidate and replay its slices
-    Ready --> Finishing : GCS FINISH_COLLECTION
+    Heading --> Ready : SLICE_CAPTURED from every detector → COLLECTION_STATUS_SLICE_COMPLETE; the slice is analysed while the next heading is flown
+    Heading --> AwaitingAnalysis : last announced slice captured
+    AwaitingAnalysis --> Ready : CYCLE_COMPLETE for every captured slice from every detector → COLLECTION_STATUS_SLICE_COMPLETE
+    Ready --> Finishing : GCS FINISH_COLLECTION (NACKed while any analysis is pending)
     Finishing --> Heading : winner sighted on one heading only → COLLECTION_STATUS_REVISIT_REQUESTED(revisit_heading_deg), at most once
     Finishing --> [*] : weighted pattern fit of every candidate, w = (median noise_psd / noise_psd)². BEARING_RESULT per tag, NaN if below confidenceFloor, confirmed = sighted on ≥ 2 headings. GCS shows confirmed / unconfirmed / nothing heard + sector. Detectors torn down
     Ready --> [*] : GCS cancel → COLLECTION_STATUS_STOPPED
 ```
 
-An ARM while a cycle is running is answered `BUSY`; a repeated ARM for an
-already-completed slice re-sends `CYCLE_COMPLETE` (`collection_control.py`).
+Each captured slice then runs the same analysis on the detector's main thread,
+in capture order, regardless of lock state — what changes after the first
+qualifying candidate is *what gets reported* (see
+[Lock candidates](#lock-candidates)):
+
+```mermaid
+stateDiagram-v2
+    [*] --> Blanking : captured segment taken from the queue (at most 4 waiting; a backlog is logged)
+    Blanking --> Folding : optional impulse blanking (--impulse-blank-factor), then STFT
+    Folding --> Thresholding : full-K fold search over the acquisition band
+    Thresholding --> Reporting : permutation null of this dwell's own windows gives the threshold at pf, re-derived without a detected train's windows. Up to 4 frequency-separated peaks
+    state Reporting {
+        [*] --> Acq : pulse_lock is None
+        [*] --> Locked : pulse_lock set
+        Acq --> [*] : send PULSE (status 0/1) or NO_DETECTION (3), first qualifying peak becomes candidate 0
+        Locked --> [*] : bank new candidates, PRI refit, send CONFIRMED (2) for every unmeasured (slice, candidate) pair
+    }
+    Reporting --> [*] : CYCLE_COMPLETE
+
+    note right of Locked
+        Qualifying peak: score_ratio ≥ 3.0, no dominant fold, within ±2 kHz.
+        Matches a banked candidate (±200 Hz, same PRI, phase in tolerance) → sighting.
+        New and bank < 4 → admitted, retro-measured on all earlier headings.
+        New and bank full → dropped. Below 3.0 → not reported after lock.
+    end note
+    note right of Thresholding
+        No cache: threshold is per dwell, per heading.
+        cycle_threshold record: mu, sigma, n_perm, refined, blanked_fraction, null_ms.
+    end note
+```
+
+Throughout the analysis the detector sends `COMPUTE_PROGRESS` from the compute
+loop itself — at each stage change (spectrogram, search, null, PRI re-fit,
+measurement) and otherwise at most once a second, from inside the permutation
+loop, each re-fit anchor step and the measurement loop — so a computation that
+hangs goes quiet. Its records are appended to the analysed slice's own
+`heading-NNN/detector_<tag>.jsonl`, not the heading being captured.
+
+An ARM while a slice is being captured is answered `BUSY`; a repeated ARM for
+the last captured slice re-sends `SLICE_CAPTURED`, and `CYCLE_COMPLETE` too if
+its analysis has finished (`collection_control.py`). Since either one gates the
+GCS and the GCS only re-ARMs after a lost ACK, the detector also sends each of
+them a second time 1 s later; the controller treats the copy as a duplicate.
+If both copies of a `SLICE_CAPTURED` are lost, the detector's first
+`COMPUTE_PROGRESS` for the active slice stands in for it, within about a second.
+If both copies of a `CYCLE_COMPLETE` are lost, the detector's next
+`CYCLE_COMPLETE` retires it: a detector analyses its slices in order, so a
+completed slice implies every earlier one. Only the last slice's completion has
+no later one to stand in for it; losing both copies stalls the rotation.
 Nothing on the control plane clears IQ: an ARM only records the stream index
 at which the slice begins (`iq_stream.py`), so a slice starts at the first
 sample after the aircraft has settled on the heading.
@@ -99,15 +134,27 @@ pipeline process started, one per detector `READY`, then per slice one for
 detector credited with the least work — seconds received plus seconds its own
 restarts discarded — so a short-segment detector that has finished does not
 hold the step, and a restart on one detector cannot move it while another has
-received nothing), up to 12 compute steps
-ticked at 1 Hz from the heartbeat once every detector's segment is full (the
-detector sends a final `samples_have == samples_needed` report and is then
-silent while it runs the STFT, fold and permutation null; the bound means a
-detector hung in compute still trips the watchdog), one for the slice's
-`CYCLE_COMPLETE`, and finally three finalize stages (stopping detectors,
-computing bearing, sending results). `step_count` is sized at `START_COLLECTION`
+received nothing), and one when the slice is captured; then one analysis wait
+of at least `kAnalysisEstimateSteps` = 30 steps for the last slice, ticked at
+1 Hz from the heartbeat while the GCS is held on it; and finally three
+finalize stages (stopping detectors, computing bearing, sending results). A
+wait that runs past its estimate grows the layout.
+
+Every analysis in flight must keep reporting: if a detector with a queued or
+running analysis has sent no `COMPUTE_PROGRESS` for more than
+`kComputeProgressTimeoutSeconds` = 5 heartbeat ticks (one PRI re-fit anchor
+step takes up to ~4 s late in a long rotation), or its current slice's
+analysis has run for more than `kMaxAnalysisSeconds` = 120 ticks (normally
+23–36 s), the step is frozen — during the next heading's dwell too — so the
+GCS stall watchdog (10 s) cancels a hung or runaway analysis within about
+15 s. The message carries the stage of the analysis in flight, e.g.
+`3/8 090 deg | 045 deg: null 24/40` during a dwell or
+`Analysing 315 deg: refit 1/3` while the GCS waits.
+
+`step_count` is sized at `START_COLLECTION`
 from `n_slices` and a `(K+1)·PRI` dwell estimate, then corrected from
-`SLICE_PROGRESS` (the longest segment reported by any detector) and grown by one slice on
+`SLICE_PROGRESS` (the longest segment reported by any detector) and grown by one slice
+(and another analysis wait) on
 `REVISIT_REQUESTED`. When a detector restarts its segment after an IQ gap
 (`samples_have` drops by more than 2 s), the discarded seconds are added to the
 current slice as extra steps, so the step keeps advancing on resumed input
@@ -149,7 +196,7 @@ candidate ids already reported for it.
 | Strongest peak otherwise | `PULSE` | 0 SUBTHRESHOLD | 0 | 0 |
 | Nothing above threshold | `NO_DETECTION` | 3 | 0 | 0 |
 
-followed by `CYCLE_COMPLETE`.
+followed by `CYCLE_COMPLETE` once the slice's analysis is done.
 
 ## Lock candidates
 
@@ -291,21 +338,27 @@ leaves the pair unmeasured and it is retried next cycle.
 
 ### Handshake and timing (`CollectionCoordinator`)
 
-`START_COLLECTION` (carries `antenna_id`, selects the pattern table) →
-controller waits up to 30 s for `READY` from every detector, else cancels with
-`COLLECTION_STATUS_FAILED`. Per slice: `START_COLLECTION_SLICE` → controller
-sends `ARM(heading)` to every detector → each replies `ARMED`, runs its cycle,
-sends `CYCLE_COMPLETE` → when the last detector has completed, the controller
-sends `COLLECTION_STATUS_SLICE_COMPLETE` to the GCS. There is **no controller
-timeout on a slice**; the coordinator stays in `CollectingSlice` until every
-detector reports, and a stalled detector is the GCS's to time out. A repeated
+`START_COLLECTION` (carries `antenna_id`, selects the pattern table, and
+`n_slices`, NACKed when 0) → controller waits up to 30 s for `READY` from every detector, else
+cancels with `COLLECTION_STATUS_FAILED`. Per slice: `START_COLLECTION_SLICE` →
+controller sends `ARM(heading)` to every detector → each replies `ARMED`,
+captures its segment and sends `SLICE_CAPTURED` → when the last detector has
+captured, the controller sends `COLLECTION_STATUS_SLICE_COMPLETE` to the GCS.
+Each detector's analysis of that slice is tracked separately until its
+`CYCLE_COMPLETE` (a `CYCLE_COMPLETE` for the active slice also counts as its
+capture, in case `SLICE_CAPTURED` was lost). For the last announced slice
+(`slice_id ≥ n_slices`) `SLICE_COMPLETE` waits until no analysis is pending
+at all. There is **no controller timeout on a slice**; the coordinator stays
+in `CollectingSlice` until every detector reports, and a stalled detector is
+the GCS's to time out (see [Rotation progress](#rotation-progress)). A repeated
 `START_COLLECTION_SLICE` for a completed slice replays `SLICE_COMPLETE` without
-re-arming.
+re-arming. Pulse reports are accepted for any armed slice of the current
+collection, between slices too, since they trail capture by one heading.
 
 `FAILED` from a detector is forwarded as `COLLECTION_STATUS_FAILED` with the
-detector's error code only if it names the slice currently being collected;
-otherwise it is logged and ignored. The controller does not tear the collection
-down on its own — the GCS decides whether to cancel.
+detector's error code only if it names the slice being captured or a slice
+still being analysed; otherwise it is logged and ignored. The controller does
+not tear the collection down on its own — the GCS decides whether to cancel.
 
 ### `FINISH_COLLECTION`
 

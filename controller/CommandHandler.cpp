@@ -1024,11 +1024,49 @@ std::vector<TunnelProtocol::PythonPulseInfo_t> CommandHandler::_updateLiveCandid
     return replay;
 }
 
+void CommandHandler::heartbeatTick()
+{
+    _progress.resendIfRunning();
+    for (const std::string& stall : _rotationProgress.computeTick()) {
+        logError() << stall;
+    }
+}
+
+void CommandHandler::_handleDetectorCaptured(const TagTrackerDetectorProtocol::Header& header)
+{
+    bool accepted = false;
+    bool sliceComplete = false;
+    bool awaitAnalysis = false;
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        const auto result = _collectionCoordinator.detectorCaptured(
+            header.collection_id, header.slice_id, header.tag_id);
+        accepted = result == CollectionCoordinator::Result::Accepted;
+        sliceComplete = accepted && _collectionCoordinator.state() == CollectionCoordinator::State::Ready;
+        awaitAnalysis = accepted && _collectionCoordinator.sliceAwaitingAnalysis();
+        logDebug() << "Detector SLICE_CAPTURED: tag_id:" << header.tag_id << "slice:" << header.slice_id
+                   << "result:" << CollectionCoordinator::resultName(result)
+                   << "captured:" << _collectionCoordinator.completedDetectorCount() << "/" << _collectionCoordinator.expectedDetectorCount()
+                   << (awaitAnalysis ? "(last slice: SLICE_COMPLETE waits for analysis)" : "");
+    }
+    if (accepted) {
+        _rotationProgress.analysisQueued(header.tag_id);
+    }
+    if (sliceComplete) {
+        _rotationProgress.sliceComplete(header.slice_id);
+        _sendCollectionStatus(header.collection_id, header.slice_id,
+                              COLLECTION_STATUS_SLICE_COMPLETE);
+    } else if (awaitAnalysis) {
+        _rotationProgress.sliceCaptured(header.slice_id);
+    }
+}
+
 void CommandHandler::handlePythonDetectorMessage(
     const TagTrackerDetectorProtocol::Header& header,
     const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
     uint32_t errorCode,
-    const TagTrackerDetectorProtocol::SliceProgressPayload* progressPayload)
+    const TagTrackerDetectorProtocol::SliceProgressPayload* progressPayload,
+    const TagTrackerDetectorProtocol::ComputeProgressPayload* computePayload)
 {
     using TagTrackerDetectorProtocol::MessageType;
 
@@ -1111,21 +1149,66 @@ void CommandHandler::handlePythonDetectorMessage(
         return;
     }
 
-    if (messageType == MessageType::CycleComplete) {
-        bool sliceComplete = false;
+    if (messageType == MessageType::SliceCaptured) {
+        _handleDetectorCaptured(header);
+        return;
+    }
+
+    if (messageType == MessageType::ComputeProgress) {
+        if (computePayload == nullptr) {
+            return;
+        }
+        bool impliesCapture = false;
         {
             std::lock_guard<std::mutex> lock(_rotationMutex);
-            const auto result = _collectionCoordinator.completeDetector(
-                header.collection_id, header.slice_id, header.tag_id);
-            sliceComplete = result == CollectionCoordinator::Result::Accepted
+            if (!_collectionCoordinator.isLiveSlice(header.collection_id, header.slice_id)
+                || !_collectionCoordinator.isExpectedDetector(header.tag_id)) {
+                return;   // stale: a slice already analysed or a cancelled collection
+            }
+            impliesCapture = _collectionCoordinator.awaitingCapture(header.collection_id, header.slice_id, header.tag_id);
+        }
+        if (impliesCapture) {
+            // Both SLICE_CAPTURED copies were lost; waiting for CYCLE_COMPLETE would trip the GCS stall watchdog.
+            logDebug() << "Detector COMPUTE_PROGRESS implies lost SLICE_CAPTURED: tag_id:" << header.tag_id
+                       << "slice:" << header.slice_id;
+            _handleDetectorCaptured(header);
+        }
+        _rotationProgress.computeProgress(header.slice_id, header.tag_id, computePayload->stage,
+                                          computePayload->done, computePayload->total);
+        return;
+    }
+
+    if (messageType == MessageType::CycleComplete) {
+        bool accepted = false;
+        bool sliceComplete = false;
+        uint32_t completedSliceId = 0;
+        uint32_t retiredEarlier = 0;
+        {
+            std::lock_guard<std::mutex> lock(_rotationMutex);
+            // Analysis runs behind capture, so this may complete a held (last) slice, not the reported one.
+            const bool wasCollecting = _collectionCoordinator.state() == CollectionCoordinator::State::CollectingSlice;
+            completedSliceId = _collectionCoordinator.sliceId();
+            const auto result = _collectionCoordinator.detectorAnalysed(
+                header.collection_id, header.slice_id, header.tag_id, &retiredEarlier);
+            accepted = result == CollectionCoordinator::Result::Accepted;
+            sliceComplete = accepted && wasCollecting
                 && _collectionCoordinator.state() == CollectionCoordinator::State::Ready;
             logDebug() << "Detector CYCLE_COMPLETE: tag_id:" << header.tag_id << "slice:" << header.slice_id
                        << "result:" << CollectionCoordinator::resultName(result)
-                       << "complete:" << _collectionCoordinator.completedDetectorCount() << "/" << _collectionCoordinator.expectedDetectorCount();
+                       << "analysis pending:" << (_collectionCoordinator.analysisPending() ? "yes" : "no");
+            if (retiredEarlier > 0) {
+                logDebug() << "Detector CYCLE_COMPLETE: tag_id:" << header.tag_id << "retired" << retiredEarlier
+                           << "earlier analyses whose CYCLE_COMPLETE was lost";
+            }
+        }
+        if (accepted) {
+            for (uint32_t i = 0; i <= retiredEarlier; ++i) {
+                _rotationProgress.analysisDone(header.tag_id);
+            }
         }
         if (sliceComplete) {
-            _rotationProgress.sliceComplete(header.slice_id);
-            _sendCollectionStatus(header.collection_id, header.slice_id,
+            _rotationProgress.sliceComplete(completedSliceId);
+            _sendCollectionStatus(header.collection_id, completedSliceId,
                                   COLLECTION_STATUS_SLICE_COMPLETE);
         }
         return;
@@ -1137,9 +1220,8 @@ void CommandHandler::handlePythonDetectorMessage(
                    << "tag:" << header.tag_id << "error:" << errorCode;
         {
             std::lock_guard<std::mutex> lock(_rotationMutex);
-            if (_collectionCoordinator.state() != CollectionCoordinator::State::CollectingSlice
-                || _collectionCoordinator.collectionId() != header.collection_id
-                || _collectionCoordinator.sliceId() != header.slice_id) {
+            // A background analysis can fail after its slice was captured.
+            if (!_collectionCoordinator.isLiveSlice(header.collection_id, header.slice_id)) {
                 logDebug() << "Ignoring stale Python detector failure, collection:"
                           << header.collection_id << "slice:" << header.slice_id
                           << "tag:" << header.tag_id;
@@ -1168,11 +1250,15 @@ void CommandHandler::handlePythonDetectorMessage(
         const bool standalone = !_inRotation
             && header.collection_id == 0 && header.slice_id == 0;
         // After a lock the detector re-measures its buffered pre-lock cycles
-        // and reports them under their original slice ids, so any armed slice
-        // of the current collection is acceptable, not just the active one.
+        // and reports them under their original slice ids, and every slice is
+        // analysed behind its capture, so any armed slice of the current
+        // collection is acceptable, between slices too.
         const bool knownSlice = _rotationSliceHeadings.count(header.slice_id) != 0;
+        const auto collectionState = _collectionCoordinator.state();
+        const bool collecting = collectionState == CollectionCoordinator::State::CollectingSlice
+            || collectionState == CollectionCoordinator::State::Ready;
         if (!standalone
-            && (_collectionCoordinator.state() != CollectionCoordinator::State::CollectingSlice
+            && (!collecting
                 || _collectionCoordinator.collectionId() != header.collection_id
                 || !knownSlice)) {
             logDebug() << "Ignoring stale Python detector result, collection:"
@@ -1247,6 +1333,9 @@ std::string CommandHandler::startCollection(const mavlink_tunnel_t& tunnel)
     if (!AntennaPatterns::isKnown(collectionInfo.antenna_id)) {
         return formatString("Unknown antenna_id %u", collectionInfo.antenna_id);
     }
+    if (collectionInfo.n_slices == 0) {
+        return "n_slices must be > 0";
+    }
 
     std::vector<uint32_t> tagIds;
     for (const TagInfo_t& tagInfo : _tagDatabase) {
@@ -1256,7 +1345,7 @@ std::string CommandHandler::startCollection(const mavlink_tunnel_t& tunnel)
     bool startPipeline = false;
     {
         std::lock_guard<std::mutex> lock(_rotationMutex);
-        const auto result = _collectionCoordinator.start(collectionInfo.collection_id, tagIds);
+        const auto result = _collectionCoordinator.start(collectionInfo.collection_id, tagIds, collectionInfo.n_slices);
         if (result == CollectionCoordinator::Result::Conflict) {
             return "Another collection is active";
         }
@@ -1560,7 +1649,8 @@ std::string CommandHandler::finishCollection(const mavlink_tunnel_t& tunnel)
         {
             std::lock_guard<std::mutex> lock(_rotationMutex);
             collectionReady = _collectionCoordinator.collectionId() == finishInfo.collection_id
-                           && _collectionCoordinator.state() == CollectionCoordinator::State::Ready;
+                           && _collectionCoordinator.state() == CollectionCoordinator::State::Ready
+                           && !_collectionCoordinator.analysisPending();
         }
         if (collectionReady && (detState == DetectionCoordinator::State::Starting || detState == DetectionCoordinator::State::Stopping)) {
             return "Detection start/stop in progress; retry";
@@ -1629,7 +1719,8 @@ std::string CommandHandler::finishCollection(const mavlink_tunnel_t& tunnel)
             std::lock_guard<std::mutex> lock(_rotationMutex);
             const bool live = _collectionCoordinator.collectionId() == finishInfo.collection_id
                            && _collectionCoordinator.state() != CollectionCoordinator::State::Inactive;
-            willAccept = live && (!finalize || _collectionCoordinator.state() == CollectionCoordinator::State::Ready);
+            willAccept = live && (!finalize || (_collectionCoordinator.state() == CollectionCoordinator::State::Ready
+                                                && !_collectionCoordinator.analysisPending()));
         }
         const auto detState = _dispatcher.detection().state();
         if (willAccept && (detState == DetectionCoordinator::State::Detecting || detState == DetectionCoordinator::State::Stopping)) {
@@ -1651,8 +1742,10 @@ std::string CommandHandler::finishCollection(const mavlink_tunnel_t& tunnel)
             return "";
         }
         if (result != CollectionCoordinator::Result::Accepted) {
-            return result == CollectionCoordinator::Result::Busy
-                ? "Collection slice is still active" : "Collection id is not active";
+            if (result == CollectionCoordinator::Result::Busy) {
+                return _collectionCoordinator.analysisPending() ? "Detector analysis still running" : "Collection slice is still active";
+            }
+            return "Collection id is not active";
         }
     }
 

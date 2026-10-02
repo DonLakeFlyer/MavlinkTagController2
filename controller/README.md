@@ -90,7 +90,7 @@ the pattern fit. When a session stops the controller runs
 | `main.cpp` | CLI parsing, wiring |
 | `CommandHandler.cpp` | MAVLink framing and ACK send; starts/stops the pipeline (`CommandActions`); per-tag detector launch; pulse forwarding; `FinishCollection` |
 | `TunnelCommandDispatcher.cpp` | Decodes GCS commands, replays ACKs for retried `request_id`s (`RequestCache.cpp`), drives `TagUploadCoordinator.cpp` and `DetectionCoordinator.cpp`, returns the ACK |
-| `CollectionCoordinator.cpp` | ARM/ARMED/CYCLE_COMPLETE bookkeeping per slice and per detector |
+| `CollectionCoordinator.cpp` | ARM/ARMED/SLICE_CAPTURED/CYCLE_COMPLETE bookkeeping per slice and per detector |
 | `BearingCalculator.cpp` | Levenberg–Marquardt fit of slice SNRs to the antenna pattern; candidate selection; revisit decision |
 | `AntennaPattern.cpp` | RA-2A / RA-23K gain tables and `confidenceFloor` |
 | `UDPPulseReceiver.cpp`, `PythonPulseMapper.cpp` | TTDP receive and mapping to tunnel pulse messages |
