@@ -9,17 +9,17 @@ re-deriving the setup. Kept current; not dated.
 
 | Item | Part | Notes |
 | --- | --- | --- |
-| Frame | ReadyToSky ZD680 ([product page](https://readytosky.com/e_productshow/?1252-ZD680-680mm-Carbon-fiber-Quadcopter-Frame-FPV-Quad-with-Carbon-Fiber-Landing-Skid-1252.html)) | 680 mm wheelbase quad, 3K carbon fiber plates (3 mm bottom plate), carbon landing skid |
-| Motors | T-Motor 4014 330KV | ×4 |
-| ESCs | Holybro Tekko32 F4 45A | ×4, one per arm; BLHeli_32, 32-bit F4; driven by 100 Hz PWM from the FC (`PWM_MAIN_TIM0 = 100`). Each fitted with the Holybro-supplied 330 µF 35 V electrolytic across the battery input (recommended for 6S). Hover draw ≈19 A total (≈4.7 A/motor) from the 2026-09-21/22 flight logs. Bench 2026-09-21: the in-flight noise floor is the ESCs' PWM chopping at hover duty; a single-pass mix-43 clip-on around the phase wires at the ESC made no difference (0 dB at 50 % throttle). |
-| Props | T-Motor CF FA15.2x5 | 15.2 in carbon fiber folding |
+| Frame | ReadyToSky ZD680 ([product page](https://readytosky.com/e_productshow/?1252-ZD680-680mm-Carbon-fiber-Quadcopter-Frame-FPV-Quad-with-Carbon-Fiber-Landing-Skid-1252.html)) | 680 mm wheelbase quad (19 in adjacent shaft-to-shaft), 3K carbon fiber plates (3 mm bottom plate), carbon landing skid. All four arm tubes are rotated ≈0.7° in their clamps so each motor top leans toward its clockwise neighbour (viewed from above): this cancels a constant nose-left yaw torque that had the CCW pair spinning ≈20 % faster than the CW pair (DShot RPM, 2026-10-01). |
+| Motors | T-Motor MN4014 KV330 ([product page](https://uav-en.tmotor.com/2018/navigato_0402/58.html)) | ×4. 18N24P (`MOT_POLE_COUNT = 24`). T-Motor data at 22.2 V on a 15×5 CF prop: 1920 g max thrust per motor. |
+| ESCs | Holybro Tekko32 F4 45A | ×4, one per arm; BLHeli_32, 32-bit F4; driven by DShot300 from the FC's FMU outputs with bidirectional DShot (`DSHOT_BIDIR_EN = 1`) for per-motor RPM, which feeds the RPM gyro notch (`IMU_GYRO_DNF_EN = 1`). Was 100 Hz analog PWM from the I/O outputs until 2026-10-01; the SDR noise floor with DShot has not been bench-checked yet. Each fitted with the Holybro-supplied 330 µF 35 V electrolytic across the battery input (recommended for 6S). Hover draw ≈19 A total (≈4.7 A/motor) from the 2026-09-21/22 flight logs. Bench 2026-09-21: the in-flight noise floor is the ESCs' PWM chopping at hover duty; a single-pass mix-43 clip-on around the phase wires at the ESC made no difference (0 dB at 50 % throttle). |
+| Props | 15 in polymer folding | Fitted 2026-10-01. Replaced the T-Motor CF FA15.2x5 (15.2 in carbon fiber folding), which showed higher vibration, likely from a prop strike. |
 | Battery | Tattu 6S 4500 mAh LiPo | ×2 in parallel (9000 mAh, 22.2 V nominal) |
 
 ## Flight controller
 
 | Item | Part | Notes |
 | --- | --- | --- |
-| FC | Holybro Pixhawk 6X | Mounted on the Holybro Pixhawk RPi CM4 Baseboard together with the companion CM4 |
+| FC | Holybro Pixhawk 6X | Mounted on the Holybro Pixhawk RPi CM4 Baseboard together with the companion CM4. Rotated 180° in yaw (`SENS_BOARD_ROT = 4`); accel and level recalibrated after the rotation. |
 | Firmware | PX4 v1.17 (stable) | |
 | GPS / compass | Holybro M9N GPS ([product page](https://holybro.com/collections/standard-gps-module/products/m9n-m10-gps-v2)) | u-blox M9N; module includes compass |
 | RC link | Skydroid GR01 receiver | SBUS to the Pixhawk 6X. In its own shielded box on top of the avionics box, see [Shielding](#shielding) |
@@ -29,6 +29,7 @@ re-deriving the setup. Kept current; not dated.
 
 ```
 2× Tattu 6S (parallel) → Matek CAN-L4-BM → PDB → 4× Tekko32 ESCs
+                                             ├→ Skydroid GR01
                                              └→ Matek UBEC DUO ─┬→ CM4 (RPi USB power port)
                                                                 └→ Pixhawk 6X (baseboard POWER 1)
 ```
@@ -36,7 +37,7 @@ re-deriving the setup. Kept current; not dated.
 | Rail | Source | Feeds |
 | --- | --- | --- |
 | Battery (6S) | Matek CAN-L4-BM battery monitor | Reports voltage/current to the autopilot over DroneCAN; passes battery power to the PDB |
-| Battery (6S) | PDB | 4× Tekko32 ESCs; Matek UBEC DUO input |
+| Battery (6S) | PDB | 4× Tekko32 ESCs; Skydroid GR01 (direct, no BEC); Matek UBEC DUO input |
 | 5 V (UBEC out A) | Matek Systems UBEC DUO | CM4 / RPi via the baseboard's USB power port |
 | 5 V (UBEC out B) | Matek Systems UBEC DUO | Pixhawk 6X via the baseboard POWER 1 connector |
 
@@ -45,7 +46,7 @@ re-deriving the setup. Kept current; not dated.
 | What | How | Notes |
 | --- | --- | --- |
 | Avionics box | 3D-printed box wrapped in Titan RF fabric | Contains the Pixhawk 6X + CM4 baseboard and the UBEC DUO. Outside the box: CAN-L4-BM, PDB, ESCs, SDR, GR01 (own box). Bench A/B 2026-09-19: 7.4 dB. |
-| Receiver box | 3D-printed box wrapped in Titan RF fabric, mounted on top of the avionics box | Contains the Skydroid GR01 receiver. |
+| Receiver box | 3D-printed box wrapped in Titan RF fabric, mounted on top of the avionics box | Contains the Skydroid GR01 receiver. Leads out of the box: the GR01's two antenna leads and its power input cable, which runs direct from the PDB. |
 | UBEC DUO | Individually wrapped in Titan RF tape over an insulating layer, inside the avionics box | Bench 2026-09-19: the DUO was the only avionics component raising the SDR floor (+11 dB bare, +3 dB and two ~6 dB humps in the box). Bench 2026-09-20 (SDR captured through the RPi): with the wrap, input and output ferrites below and the USB cable cores, its harmonics no longer appear above the floor. |
 
 ## Ferrites
