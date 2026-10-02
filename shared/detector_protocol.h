@@ -11,12 +11,23 @@ enum class MessageType : uint16_t {
     Ready = 1,
     Pulse = 2,
     NoDetection = 3,
-    CycleComplete = 4,
+    CycleComplete = 4,   // the slice's analysis is done and every report for it has been sent
     Failed = 5,
     Arm = 6,
     Heartbeat = 7,
     Armed = 8,
     SliceProgress = 9,   // armed detector, ~1 Hz: IQ accumulated toward the slice's segment
+    SliceCaptured = 10,  // the slice's segment is in; its analysis runs in the background
+    ComputeProgress = 11, // analysing detector, from the compute thread: each stage change, else <= 1 Hz
+};
+
+// ComputeProgressPayload::stage
+enum class ComputeStage : uint16_t {
+    Spectrogram = 1,
+    Search = 2,      // fold search
+    Null = 3,        // permutation null; done/total = permutations
+    Refit = 4,       // PRI re-fit; done/total = lock candidates
+    Measure = 5,     // per-slice measurement; done/total = measurements
 };
 
 enum class ValidationResult {
@@ -63,6 +74,13 @@ struct SliceProgressPayload {
     uint32_t sample_rate_hz;
 };
 
+struct ComputeProgressPayload {
+    uint16_t stage;     // ComputeStage
+    uint16_t reserved;
+    uint32_t done;
+    uint32_t total;     // 0 = not countable
+};
+
 struct PulsePayload {
     uint32_t frequency_hz;
     uint32_t group_seq_counter;
@@ -87,7 +105,7 @@ struct PulseReport {
 constexpr bool isKnownMessageType(uint16_t value)
 {
     return value >= static_cast<uint16_t>(MessageType::Ready)
-        && value <= static_cast<uint16_t>(MessageType::SliceProgress);
+        && value <= static_cast<uint16_t>(MessageType::ComputeProgress);
 }
 
 constexpr uint16_t expectedPayloadLength(MessageType type)
@@ -102,10 +120,13 @@ constexpr uint16_t expectedPayloadLength(MessageType type)
         return sizeof(ArmPayload);
     case MessageType::SliceProgress:
         return sizeof(SliceProgressPayload);
+    case MessageType::ComputeProgress:
+        return sizeof(ComputeProgressPayload);
     case MessageType::Ready:
     case MessageType::CycleComplete:
     case MessageType::Heartbeat:
     case MessageType::Armed:
+    case MessageType::SliceCaptured:
         return 0;
     }
     return 0;
@@ -134,6 +155,7 @@ static_assert(sizeof(FailedPayload) == 4);
 static_assert(sizeof(ArmPayload) == 4);
 static_assert(sizeof(ArmMessage) == 24);
 static_assert(sizeof(SliceProgressPayload) == 12);
+static_assert(sizeof(ComputeProgressPayload) == 12);
 static_assert(sizeof(PulsePayload) == 60);
 static_assert(sizeof(PulseReport) == 80);
 

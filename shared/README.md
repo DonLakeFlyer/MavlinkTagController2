@@ -54,7 +54,9 @@ controller ↔ detector handshake and pulse reports over UDP. 20-byte header
 | `Armed` | detector → controller | none |
 | `Pulse`, `NoDetection` | detector → controller | `PulsePayload` (60 bytes) |
 | `SliceProgress` | detector → controller | `SliceProgressPayload` (`samples_have`, `samples_needed`, `sample_rate_hz` u32); ≤ 1 Hz while armed and short of a segment |
-| `CycleComplete` | detector → controller | none |
+| `SliceCaptured` | detector → controller | none; the slice's segment is in and the detector accepts the next `Arm` |
+| `ComputeProgress` | detector → controller | `ComputeProgressPayload` (`stage` u16 `ComputeStage`, `reserved` u16, `done`, `total` u32); while a slice is analysed, at each stage change and otherwise ≤ 1 Hz |
+| `CycleComplete` | detector → controller | none; the slice's analysis is done and all its reports are sent |
 | `Failed` | detector → controller | `FailedPayload` (`error_code` u32) |
 | `Heartbeat` | detector → controller | none (1 Hz) |
 

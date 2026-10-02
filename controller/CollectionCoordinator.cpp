@@ -3,13 +3,13 @@
 #include <algorithm>
 
 CollectionCoordinator::Result CollectionCoordinator::start(
-    uint32_t collectionId, std::vector<uint32_t> detectorTagIds)
+    uint32_t collectionId, std::vector<uint32_t> detectorTagIds, uint32_t sliceCount)
 {
     const std::set<uint32_t> requestedTagIds(
         detectorTagIds.begin(), detectorTagIds.end());
 
     if (_state != State::Inactive) {
-        if (_collectionId == collectionId && _expectedTagIds == requestedTagIds) {
+        if (_collectionId == collectionId && _expectedTagIds == requestedTagIds && _sliceCount == sliceCount) {
             return Result::Duplicate;
         }
         return Result::Conflict;
@@ -19,11 +19,14 @@ CollectionCoordinator::Result CollectionCoordinator::start(
     }
 
     _collectionId = collectionId;
+    _sliceCount = sliceCount;
     _nextSliceId = 1;
     _expectedTagIds = requestedTagIds;
     _readyTagIds.clear();
     _armedTagIds.clear();
-    _completedTagIds.clear();
+    _capturedTagIds.clear();
+    _pendingAnalysis.clear();
+    _analysedSliceIds.clear();
     _activeSliceId.reset();
     _lastCompletedSliceId.reset();
     _state = State::Starting;
@@ -78,7 +81,7 @@ CollectionCoordinator::Result CollectionCoordinator::armSlice(
     _activeSliceId = sliceId;
     _activeHeadingDeg = headingDeg;
     _armedTagIds.clear();
-    _completedTagIds.clear();
+    _capturedTagIds.clear();
     _state = State::CollectingSlice;
     return Result::Accepted;
 }
@@ -95,25 +98,88 @@ CollectionCoordinator::Result CollectionCoordinator::detectorArmed(
     return _armedTagIds.insert(tagId).second ? Result::Accepted : Result::Duplicate;
 }
 
-CollectionCoordinator::Result CollectionCoordinator::completeDetector(
+CollectionCoordinator::Result CollectionCoordinator::detectorCaptured(
     uint32_t collectionId, uint32_t sliceId, uint32_t tagId)
 {
-    if (!_matchesCollection(collectionId) || _activeSliceId != sliceId) {
+    if (!_matchesCollection(collectionId)) {
         return Result::Stale;
+    }
+    if (_activeSliceId != sliceId) {
+        // A replayed SLICE_CAPTURED (re-ARM after a lost status) for a slice already complete.
+        return _lastCompletedSliceId == sliceId ? Result::Duplicate : Result::Stale;
     }
     if (_state != State::CollectingSlice || !_expectedTagIds.contains(tagId)) {
         return Result::Conflict;
     }
-    if (!_completedTagIds.insert(tagId).second) {
+    if (!_capturedTagIds.insert(tagId).second) {
         return Result::Duplicate;
     }
-    if (_completedTagIds.size() == _expectedTagIds.size()) {
-        _state = State::Ready;
-        _lastCompletedSliceId = _activeSliceId;
-        _activeSliceId.reset();
-        ++_nextSliceId;
-    }
+    _pendingAnalysis[sliceId].insert(tagId);
+    _maybeCompleteActiveSlice();
     return Result::Accepted;
+}
+
+CollectionCoordinator::Result CollectionCoordinator::detectorAnalysed(
+    uint32_t collectionId, uint32_t sliceId, uint32_t tagId, uint32_t* retiredEarlier)
+{
+    if (retiredEarlier != nullptr) {
+        *retiredEarlier = 0;
+    }
+    if (!_matchesCollection(collectionId)) {
+        return Result::Stale;
+    }
+    if (!_expectedTagIds.contains(tagId)) {
+        return Result::Conflict;
+    }
+    if (_state == State::CollectingSlice && _activeSliceId == sliceId && !_capturedTagIds.contains(tagId)) {
+        // SLICE_CAPTURED was lost; a finished analysis proves the capture.
+        _capturedTagIds.insert(tagId);
+        _pendingAnalysis[sliceId].insert(tagId);
+    }
+    const auto it = _pendingAnalysis.find(sliceId);
+    if (it == _pendingAnalysis.end() || !it->second.contains(tagId)) {
+        return (it != _pendingAnalysis.end() || _analysedSliceIds.contains(sliceId)) ? Result::Duplicate : Result::Stale;
+    }
+    it->second.erase(tagId);
+    if (it->second.empty()) {
+        _pendingAnalysis.erase(it);
+        _analysedSliceIds.insert(sliceId);
+    }
+    // A detector analyses its slices in order, so this proves every earlier one
+    // is done too, even if both copies of its CYCLE_COMPLETE were lost.
+    for (auto earlier = _pendingAnalysis.begin(); earlier != _pendingAnalysis.end() && earlier->first < sliceId;) {
+        if (earlier->second.erase(tagId) != 0 && retiredEarlier != nullptr) {
+            ++*retiredEarlier;
+        }
+        if (earlier->second.empty()) {
+            _analysedSliceIds.insert(earlier->first);
+            earlier = _pendingAnalysis.erase(earlier);
+        } else {
+            ++earlier;
+        }
+    }
+    _maybeCompleteActiveSlice();
+    return Result::Accepted;
+}
+
+bool CollectionCoordinator::isLiveSlice(uint32_t collectionId, uint32_t sliceId) const
+{
+    if (!_matchesCollection(collectionId)) {
+        return false;
+    }
+    return (_state == State::CollectingSlice && _activeSliceId == sliceId) || _pendingAnalysis.contains(sliceId);
+}
+
+void CollectionCoordinator::_maybeCompleteActiveSlice()
+{
+    if (_state != State::CollectingSlice || !_allCaptured()
+        || (_holdsForAnalysis(*_activeSliceId) && !_pendingAnalysis.empty())) {
+        return;
+    }
+    _state = State::Ready;
+    _lastCompletedSliceId = _activeSliceId;
+    _activeSliceId.reset();
+    ++_nextSliceId;
 }
 
 CollectionCoordinator::Result CollectionCoordinator::finalize(uint32_t collectionId)
@@ -128,7 +194,7 @@ CollectionCoordinator::Result CollectionCoordinator::finalize(uint32_t collectio
     if (!_matchesCollection(collectionId)) {
         return Result::Stale;
     }
-    if (_state != State::Ready) {
+    if (_state != State::Ready || analysisPending()) {
         return Result::Busy;
     }
     _reset(Disposition::Finalized);
@@ -159,12 +225,15 @@ void CollectionCoordinator::_reset(Disposition disposition)
     _lastFinishedCollectionId = _collectionId;
     _lastDisposition = disposition;
     _collectionId = 0;
+    _sliceCount = 0;
     _nextSliceId = 1;
     _activeSliceId.reset();
     _lastCompletedSliceId.reset();
     _expectedTagIds.clear();
     _readyTagIds.clear();
     _armedTagIds.clear();
-    _completedTagIds.clear();
+    _capturedTagIds.clear();
+    _pendingAnalysis.clear();
+    _analysedSliceIds.clear();
     _state = State::Inactive;
 }

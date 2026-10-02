@@ -1,5 +1,6 @@
 #include "RotationProgress.h"
 #include "TunnelProtocol.h"
+#include "detector_protocol.h"
 #include "formatString.h"
 
 #include <algorithm>
@@ -32,7 +33,14 @@ bool RotationProgress::begin(uint32_t requestId, uint32_t sliceCount, uint32_t d
     _slicesComplete    = 0;
     _sliceProgressByTag.clear();
     _completedExtraSteps = 0;
-    _computeTicks      = 0;
+    _sliceText.clear();
+    _sliceHeadings.clear();
+    _analysisByTag.clear();
+    _computeText.clear();
+    _awaitingSliceId.reset();
+    _analysisWaitPending = true;
+    _analysisWaitTicks = 0;
+    _completedWaitSteps = 0;
     _finalizeStage     = 0;
     _lastStep          = 0;
     if (!_reporter.begin(COMMAND_ID_START_COLLECTION, requestId, "Rotation", _totalSteps())) {
@@ -87,21 +95,22 @@ void RotationProgress::sliceArmed(uint32_t sliceId, float headingDeg)
     if (!_active) {
         return;
     }
-    if (_currentSliceId && *_currentSliceId == sliceId) {
-        return;   // GCS retry of the same ARM
+    if (_sliceHeadings.contains(sliceId)) {
+        return;   // GCS retry of an ARM already counted (the slice may be captured since)
     }
     _phase = Phase::Slice;
     _processesStarted = _startupProcesses;
     _detectorsReady = _detectorCount;
     _currentSliceId = sliceId;
     _currentHeadingDeg = headingDeg;
+    _sliceHeadings[sliceId] = headingDeg;
     _sliceProgressByTag.clear();
-    _computeTicks = 0;
     ++_slicesArmed;
     if (_slicesArmed > _sliceCount) {
         _sliceCount = _slicesArmed;   // unannounced extra slice: grow rather than clamp
     }
-    _publishLocked(formatString("%u/%u %03.0f deg", _slicesArmed, _sliceCount, headingDeg));
+    _sliceText = formatString("%u/%u %03.0f deg", _slicesArmed, _sliceCount, headingDeg);
+    _publishLocked(_sliceMessageLocked());
 }
 
 RotationProgress::ProgressResult RotationProgress::sliceProgress(uint32_t sliceId, uint32_t tagId, uint32_t samplesHave, uint32_t samplesNeeded, uint32_t sampleRateHz)
@@ -139,28 +148,130 @@ RotationProgress::ProgressResult RotationProgress::sliceProgress(uint32_t sliceI
     return ProgressResult::Accepted;
 }
 
-void RotationProgress::computeTick()
-{
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (!_active || _phase != Phase::Slice || !_currentSliceId || !_segmentsFullLocked()
-        || _computeTicks >= kComputeSteps) {
-        return;
-    }
-    ++_computeTicks;
-    _publishLocked("");
-}
-
-void RotationProgress::sliceComplete(uint32_t sliceId)
+void RotationProgress::sliceCaptured(uint32_t sliceId)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     if (!_active || _phase != Phase::Slice || !_currentSliceId || *_currentSliceId != sliceId) {
         return;
     }
-    _slicesComplete = _slicesArmed;
-    _currentSliceId.reset();
-    _completedExtraSteps += _currentExtraLocked();
-    _sliceProgressByTag.clear();
+    _endCurrentSliceLocked();
+    _awaitingSliceId = sliceId;
+    _analysisWaitTicks = 0;
+    _publishLocked(_sliceMessageLocked());
+}
+
+void RotationProgress::sliceComplete(uint32_t sliceId)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_active || _phase != Phase::Slice) {
+        return;
+    }
+    if (_currentSliceId && *_currentSliceId == sliceId) {
+        _endCurrentSliceLocked();
+    } else if (_awaitingSliceId && *_awaitingSliceId == sliceId) {
+        _awaitingSliceId.reset();
+        _completedWaitSteps += _analysisWaitTicks;
+        _analysisWaitTicks = 0;
+        _analysisWaitPending = false;
+    } else {
+        return;
+    }
     _publishLocked("");   // step only; the next ARM names the next slice
+}
+
+void RotationProgress::analysisQueued(uint32_t tagId)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_active) {
+        return;
+    }
+    Analysis& analysis = _analysisByTag[tagId];
+    if (analysis.pending == 0) {
+        analysis.ticksSinceReport = 0;
+        analysis.ticksInAnalysis = 0;
+        analysis.lastSliceId.reset();
+        analysis.lastStageText.clear();
+        analysis.stallReported = false;
+    }
+    ++analysis.pending;
+}
+
+void RotationProgress::computeProgress(uint32_t sliceId, uint32_t tagId, uint16_t stage, uint32_t done, uint32_t total)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    const auto it = _analysisByTag.find(tagId);
+    if (!_active || it == _analysisByTag.end() || it->second.pending == 0) {
+        return;
+    }
+    it->second.ticksSinceReport = 0;
+    const auto heading = _sliceHeadings.find(sliceId);
+    const std::string stageText = computeStageText(stage, done, total);
+    if (it->second.lastSliceId && sliceId > *it->second.lastSliceId) {
+        it->second.ticksInAnalysis = 0;   // the earlier slice finished; its CYCLE_COMPLETE was lost
+    }
+    it->second.lastSliceId = sliceId;
+    it->second.lastStageText = stageText;
+    if (!it->second.stalled()) {
+        it->second.stallReported = false;   // recovered: a later stall is reported again
+    }
+    _computeText = heading == _sliceHeadings.end()
+        ? formatString("slice %u: %s", sliceId, stageText.c_str())
+        : formatString("%03.0f deg: %s", heading->second, stageText.c_str());
+    _publishLocked(_sliceMessageLocked());
+}
+
+void RotationProgress::analysisDone(uint32_t tagId)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    const auto it = _analysisByTag.find(tagId);
+    if (!_active || it == _analysisByTag.end() || it->second.pending == 0) {
+        return;
+    }
+    --it->second.pending;
+    it->second.ticksSinceReport = 0;
+    it->second.ticksInAnalysis = 0;
+    it->second.lastSliceId.reset();
+    it->second.lastStageText.clear();
+    it->second.stallReported = false;
+    const bool anyPending = std::any_of(_analysisByTag.begin(), _analysisByTag.end(),
+                                        [](const auto& entry) { return entry.second.pending > 0; });
+    if (!anyPending) {
+        _computeText.clear();
+    }
+    _publishLocked(_sliceMessageLocked());
+}
+
+std::vector<std::string> RotationProgress::computeTick()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::vector<std::string> stalls;
+    if (!_active) {
+        return stalls;
+    }
+    for (auto& [tag, analysis] : _analysisByTag) {
+        if (analysis.pending > 0) {
+            ++analysis.ticksSinceReport;
+            ++analysis.ticksInAnalysis;
+        }
+        if (!analysis.stalled() || analysis.stallReported) {
+            continue;
+        }
+        analysis.stallReported = true;
+        const std::string reason = analysis.ticksSinceReport > kComputeProgressTimeoutSeconds
+            ? formatString("no COMPUTE_PROGRESS for %u s (limit %u s)", analysis.ticksSinceReport, kComputeProgressTimeoutSeconds)
+            : formatString("running %u s (cap %u s)", analysis.ticksInAnalysis, kMaxAnalysisSeconds);
+        const std::string slice = analysis.lastSliceId ? formatString("%u", *analysis.lastSliceId) : std::string("?");
+        stalls.push_back(formatString("Rotation progress frozen: detector %u analysis stalled, %s, slice %s, last stage '%s', %u pending",
+                                      tag, reason.c_str(), slice.c_str(),
+                                      analysis.lastStageText.empty() ? "none" : analysis.lastStageText.c_str(),
+                                      analysis.pending));
+    }
+    if (_phase != Phase::Slice || !_awaitingSliceId || _analysisStalledLocked()) {
+        return stalls;
+    }
+    ++_analysisWaitTicks;
+    _publishLocked("");
+    return stalls;
 }
 
 void RotationProgress::revisitRequested(float headingDeg)
@@ -171,6 +282,7 @@ void RotationProgress::revisitRequested(float headingDeg)
     }
     _phase = Phase::Slice;
     _sliceCount = std::max(_sliceCount, _slicesArmed) + 1;
+    _analysisWaitPending = true;
     _publishLocked(formatString("Revisit %03.0f deg", headingDeg));
 }
 
@@ -185,6 +297,10 @@ void RotationProgress::finalizeStage(uint32_t stage, const std::string& message)
     _currentSliceId.reset();
     _completedExtraSteps += _currentExtraLocked();
     _sliceProgressByTag.clear();
+    _awaitingSliceId.reset();
+    _completedWaitSteps += _analysisWaitTicks;
+    _analysisWaitTicks = 0;
+    _analysisWaitPending = false;
     _finalizeStage = std::min(stage, kFinalizeSteps - 1);
     _publishLocked(message);
 }
@@ -231,13 +347,45 @@ uint32_t RotationProgress::_sliceSecondsLocked() const
     return slowest;
 }
 
-bool RotationProgress::_segmentsFullLocked() const
+bool RotationProgress::_analysisStalledLocked() const
 {
-    if (_sliceProgressByTag.size() < _detectorCount) {
-        return false;
+    return std::any_of(_analysisByTag.begin(), _analysisByTag.end(),
+                       [](const auto& entry) { return entry.second.stalled(); });
+}
+
+void RotationProgress::_endCurrentSliceLocked()
+{
+    _slicesComplete = _slicesArmed;
+    _currentSliceId.reset();
+    _completedExtraSteps += _currentExtraLocked();
+    _sliceProgressByTag.clear();
+}
+
+std::string RotationProgress::_sliceMessageLocked() const
+{
+    if (_awaitingSliceId) {
+        return _computeText.empty() ? std::string("Analysing") : "Analysing " + _computeText;
     }
-    return std::all_of(_sliceProgressByTag.begin(), _sliceProgressByTag.end(),
-                       [](const auto& entry) { return entry.second.remainingSeconds <= kFullToleranceSeconds; });
+    if (_computeText.empty()) {
+        return _sliceText;
+    }
+    // Between slices an analysis running on is not worth replacing the last slice text.
+    return _currentSliceId ? _sliceText + " | " + _computeText : std::string();
+}
+
+std::string RotationProgress::computeStageText(uint16_t stage, uint32_t done, uint32_t total)
+{
+    using TagTrackerDetectorProtocol::ComputeStage;
+    std::string name;
+    switch (static_cast<ComputeStage>(stage)) {
+    case ComputeStage::Spectrogram: name = "spectrogram"; break;
+    case ComputeStage::Search:      name = "search"; break;
+    case ComputeStage::Null:        name = "null"; break;
+    case ComputeStage::Refit:       name = "refit"; break;
+    case ComputeStage::Measure:     name = "measure"; break;
+    default:                        name = formatString("stage %u", stage); break;
+    }
+    return total > 0 ? formatString("%s %u/%u", name.c_str(), done, total) : name;
 }
 
 uint32_t RotationProgress::_stepLocked() const
@@ -246,20 +394,28 @@ uint32_t RotationProgress::_stepLocked() const
     case Phase::Startup:
         return _processesStarted + _detectorsReady;
     case Phase::Slice: {
-        uint32_t step = _startupSteps() + _slicesComplete * _sliceSteps() + _completedExtraSteps;
+        uint32_t step = _startupSteps() + _slicesComplete * _sliceSteps() + _completedExtraSteps + _completedWaitSteps;
         if (_currentSliceId) {
-            step += 1 + _sliceSecondsLocked() + _computeTicks;
+            step += 1 + _sliceSecondsLocked();
+        }
+        if (_awaitingSliceId) {
+            step += _analysisWaitTicks;
         }
         return step;
     }
     case Phase::Finalize:
-        return _startupSteps() + _sliceCount * _sliceSteps() + _completedExtraSteps + _finalizeStage;
+        return _totalSteps() - kFinalizeSteps + _finalizeStage;
     }
     return 0;
 }
 
 void RotationProgress::_publishLocked(const std::string& message)
 {
+    if (_analysisStalledLocked()) {
+        // Hold the step so the GCS watchdog sees the hung analysis, even mid-dwell.
+        _reporter.update(_lastStep, _reporterTotal, message);
+        return;
+    }
     const uint32_t total = _totalSteps();
     // Monotonic unless the layout itself changed (learned dwell, grown slice count, segment restart).
     uint32_t step = _stepLocked();

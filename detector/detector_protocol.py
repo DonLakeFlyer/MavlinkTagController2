@@ -13,6 +13,7 @@ _HEADER = struct.Struct('<IHHIII')
 _PULSE_PAYLOAD = struct.Struct('<IIBBBB6d')
 _ARM_PAYLOAD = struct.Struct('<f')
 _SLICE_PROGRESS_PAYLOAD = struct.Struct('<III')  # samples_have, samples_needed, sample_rate_hz
+_COMPUTE_PROGRESS_PAYLOAD = struct.Struct('<HHII')  # stage, reserved, done, total
 HEADER_SIZE = _HEADER.size
 PULSE_REPORT_SIZE = HEADER_SIZE + _PULSE_PAYLOAD.size
 
@@ -27,6 +28,16 @@ class MessageType(IntEnum):
     HEARTBEAT = 7
     ARMED = 8
     SLICE_PROGRESS = 9
+    SLICE_CAPTURED = 10
+    COMPUTE_PROGRESS = 11
+
+
+class ComputeStage(IntEnum):
+    SPECTROGRAM = 1
+    SEARCH = 2
+    NULL = 3
+    REFIT = 4
+    MEASURE = 5
 
 
 class ErrorCode(IntEnum):
@@ -102,6 +113,8 @@ def decode_header(packet):
         MessageType.HEARTBEAT: 0,
         MessageType.ARMED: 0,
         MessageType.SLICE_PROGRESS: _SLICE_PROGRESS_PAYLOAD.size,
+        MessageType.SLICE_CAPTURED: 0,
+        MessageType.COMPUTE_PROGRESS: _COMPUTE_PROGRESS_PAYLOAD.size,
     }[message_type]
     if payload_length != expected_payload_length:
         raise ProtocolError('detector message has the wrong payload size')
@@ -189,6 +202,25 @@ def decode_slice_progress(packet):
         raise ProtocolError('packet is not a slice progress report')
     samples_have, samples_needed, sample_rate_hz = _SLICE_PROGRESS_PAYLOAD.unpack_from(packet, HEADER_SIZE)
     return header, samples_have, samples_needed, sample_rate_hz
+
+
+def encode_compute_progress(collection_id, slice_id, tag_id, stage, done, total):
+    payload = _COMPUTE_PROGRESS_PAYLOAD.pack(int(stage), 0, done, total)
+    return encode_header(
+        MessageType.COMPUTE_PROGRESS,
+        len(payload),
+        collection_id,
+        slice_id,
+        tag_id,
+    ) + payload
+
+
+def decode_compute_progress(packet):
+    header = decode_header(packet)
+    if header.message_type != MessageType.COMPUTE_PROGRESS:
+        raise ProtocolError('packet is not a compute progress report')
+    stage, _, done, total = _COMPUTE_PROGRESS_PAYLOAD.unpack_from(packet, HEADER_SIZE)
+    return header, stage, done, total
 
 
 def decode_pulse_report(packet):

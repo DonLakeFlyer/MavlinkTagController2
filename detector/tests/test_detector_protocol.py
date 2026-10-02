@@ -11,16 +11,19 @@ from detector_protocol import (  # noqa: E402
     HEADER_SIZE,
     MAGIC,
     PULSE_REPORT_SIZE,
+    ComputeStage,
     ErrorCode,
     MessageType,
     ProtocolError,
     PulseReport,
     decode_arm,
+    decode_compute_progress,
     decode_header,
     decode_failed_report,
     decode_pulse_report,
     decode_slice_progress,
     encode_arm,
+    encode_compute_progress,
     encode_failed_report,
     encode_header,
     encode_pulse_report,
@@ -199,6 +202,40 @@ def test_slice_progress_round_trips_with_stable_layout():
         decode_slice_progress(encode_header(MessageType.ARMED, 0, 7, 3, 42))
     with pytest.raises(ProtocolError):
         decode_header(encode_header(MessageType.SLICE_PROGRESS, 0, 7, 3, 42))
+
+
+def test_message_type_values_match_controller_header():
+    # shared/detector_protocol.h MessageType / ComputeStage; both sides must agree
+    assert MessageType.SLICE_CAPTURED == 10
+    assert MessageType.COMPUTE_PROGRESS == 11
+    assert [int(s) for s in ComputeStage] == [1, 2, 3, 4, 5]
+
+
+def test_slice_captured_is_header_only():
+    encoded = encode_header(MessageType.SLICE_CAPTURED, 0, 7, 3, 42)
+    assert decode_header(encoded).message_type == MessageType.SLICE_CAPTURED
+    with pytest.raises(ProtocolError):
+        decode_header(encode_header(MessageType.SLICE_CAPTURED, 1, 7, 3, 42) + b'x')
+
+
+def test_compute_progress_round_trips_with_stable_layout():
+    encoded = encode_compute_progress(
+        collection_id=7, slice_id=3, tag_id=42,
+        stage=ComputeStage.NULL, done=24, total=40,
+    )
+
+    # Must match TagTrackerDetectorProtocol::ComputeProgressPayload (shared/detector_protocol.h)
+    assert encoded == struct.pack('<IHHIIIHHII', MAGIC, MessageType.COMPUTE_PROGRESS, 12, 7, 3, 42,
+                                  3, 0, 24, 40)
+    header, stage, done, total = decode_compute_progress(encoded)
+    assert header.message_type == MessageType.COMPUTE_PROGRESS
+    assert (header.collection_id, header.slice_id, header.tag_id) == (7, 3, 42)
+    assert (stage, done, total) == (ComputeStage.NULL, 24, 40)
+
+    with pytest.raises(ProtocolError):
+        decode_compute_progress(encode_header(MessageType.SLICE_CAPTURED, 0, 7, 3, 42))
+    with pytest.raises(ProtocolError):
+        decode_header(encode_header(MessageType.COMPUTE_PROGRESS, 0, 7, 3, 42))
 
 
 @pytest.mark.parametrize('packet', [

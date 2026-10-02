@@ -176,7 +176,10 @@ if(BUILD_TESTING)
         OperationProgress.cpp OperationProgress.h
         RotationProgress.cpp RotationProgress.h
     )
-    target_include_directories(test_rotation_progress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(test_rotation_progress PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/shared
+    )
     target_link_libraries(test_rotation_progress PRIVATE tunnel_protocol)
     add_test(NAME test_rotation_progress COMMAND test_rotation_progress)
 endif()

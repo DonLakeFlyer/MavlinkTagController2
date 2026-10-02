@@ -176,7 +176,11 @@ Per cycle the detector emits one TTDP `PULSE` (detection_status 0/1) or
 `NO_DETECTION` (3) carrying `frequency_hz`, `snr`, `score_ratio`, `noise_psd`,
 `rate_state`, `start_time_seconds`, `predict_next_start_seconds`. When the cycle
 was armed by a collection (`--control-port`) it is followed by `CYCLE_COMPLETE`;
-free-running cycles send none. Heartbeats are separate header-only messages at
+free-running cycles send none. Every cycle is analysed on the main thread while
+a capture thread keeps ingesting IQ and handling ARMs, so a collection's next
+slice is recorded during this one's analysis (see
+[COLLECTION_FLOW.md](COLLECTION_FLOW.md#state-machine-one-collection)).
+Heartbeats are separate header-only messages at
 1 Hz.
 Message layout: [shared/README.md](../../shared/README.md#ttdp-detector-protocol).
 

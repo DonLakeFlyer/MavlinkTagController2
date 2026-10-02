@@ -19,7 +19,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'shared'))
 from log_schema import (
     StructuredLogger, read_jsonl,
-    STARTUP, DETECTION, NO_DETECTION, SESSION_END,
+    STARTUP, DETECTION, NO_DETECTION, SESSION_END, EVT_THRESHOLD,
 )
 
 
@@ -117,6 +117,48 @@ class TestStructuredLogger:
         out, err = capsys.readouterr()
         assert 'still printed' in out and 'and again' in out
         assert err.count('WARNING') == 1
+
+    def test_fork_appends_to_a_file_the_parent_reopened(self, tmp_path):
+        """Capture and analysis threads share a heading file without clobbering."""
+        log = StructuredLogger(preamble_types=(STARTUP,))
+        log.emit(STARTUP, None, tp=0.015)
+        fork = log.fork()
+        path = str(tmp_path / 'heading.jsonl')
+
+        log.reopen(path)                          # fresh: truncated, preamble replayed
+        fork.reopen(path, append=True)            # joined as is: no second preamble
+        log.emit(DETECTION, None, cycle=1)
+        fork.emit(DETECTION, None, cycle=2)
+        log.emit(DETECTION, None, cycle=3)
+        log.close()
+        fork.close()
+
+        entries = read_jsonl(path)
+        assert [e['type'] for e in entries] == [STARTUP, DETECTION, DETECTION, DETECTION]
+        assert [e.get('cycle') for e in entries[1:]] == [1, 2, 3]
+
+        log.reopen(path)                          # a fresh open truncates again
+        log.close()
+        assert [e['type'] for e in read_jsonl(path)] == [STARTUP]
+
+    def test_late_preamble_record_reaches_an_already_open_fork_file(self, tmp_path):
+        """The next heading's file is opened before the last one's analysis logs its threshold."""
+        log = StructuredLogger(preamble_types=(STARTUP, EVT_THRESHOLD))
+        log.emit(STARTUP, None, tp=0.015)
+        fork = log.fork()
+        first, second = str(tmp_path / 'h1.jsonl'), str(tmp_path / 'h2.jsonl')
+        log.reopen(first)
+        fork.reopen(second)
+
+        log.emit(EVT_THRESHOLD, None, source='margin')
+        fork.emit(DETECTION, None, cycle=2)
+        log.reopen(second, append=True)           # analysis moves on to the second heading
+        log.emit(DETECTION, None, cycle=3)
+        log.close()
+        fork.close()
+
+        assert [e['type'] for e in read_jsonl(first)] == [STARTUP, EVT_THRESHOLD]
+        assert [e['type'] for e in read_jsonl(second)] == [STARTUP, EVT_THRESHOLD, DETECTION, DETECTION]
 
 
 # ---------------------------------------------------------------------------

@@ -68,11 +68,12 @@ public:
     // uavrt_detection pulses: forwarded to the GCS as PulseInfo_t, never part of a collection.
     void handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo);
     // For the 1 Hz heartbeat thread: re-sends the RUNNING operation frame.
-    void heartbeatTick() { _progress.resendIfRunning(); _rotationProgress.computeTick(); }
+    void heartbeatTick();
     void handlePythonDetectorMessage(const TagTrackerDetectorProtocol::Header& header,
                                      const TagTrackerDetectorProtocol::PulsePayload* pulsePayload,
                                      uint32_t errorCode = 0,
-                                     const TagTrackerDetectorProtocol::SliceProgressPayload* progressPayload = nullptr);
+                                     const TagTrackerDetectorProtocol::SliceProgressPayload* progressPayload = nullptr,
+                                     const TagTrackerDetectorProtocol::ComputeProgressPayload* computePayload = nullptr);
 
     // CommandActions
     std::string startDetectionPipeline(const TunnelProtocol::StartDetectionInfo_t& info) override;
@@ -130,6 +131,8 @@ private:
     void _trackProcess          (std::shared_ptr<MonitoredProcess> process);
     void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort = 0);
     bool _writeSessionInfo      (const TunnelProtocol::StartDetectionInfo_t& startDetection, AirSpyDeviceType deviceType, bool isHFMode);
+    // SLICE_CAPTURED, or COMPUTE_PROGRESS standing in for a lost one.
+    void _handleDetectorCaptured(const TagTrackerDetectorProtocol::Header& header);
     void _sendCollectionStatus(uint32_t collectionId, uint32_t sliceId, uint32_t status, uint32_t errorCode = 0,
                                std::optional<uint32_t> expectedDetectors = std::nullopt,
                                std::optional<uint32_t> completedDetectors = std::nullopt,

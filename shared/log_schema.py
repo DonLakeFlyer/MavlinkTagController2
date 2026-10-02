@@ -12,8 +12,10 @@ Adding a field to an emit() call automatically appears in the .jsonl record.
 """
 
 import json
+import os
 import sys
-from typing import List, Optional, Sequence, TextIO
+import threading
+from typing import Dict, List, Optional, Sequence, TextIO
 
 # ---------------------------------------------------------------------------
 # Entry type constants — shared between detector (writer) and analyzer (reader)
@@ -67,6 +69,16 @@ def _json_default(obj):
 # StructuredLogger
 # ---------------------------------------------------------------------------
 
+# Shared by forked loggers: the preamble and whole-line .jsonl writes.
+_WRITE_LOCK = threading.Lock()
+
+
+class _Preamble:
+    def __init__(self):
+        self.lines: List[str] = []
+        self.written: Dict[str, int] = {}   # path -> preamble lines already in that file
+
+
 class StructuredLogger:
     """Dual-output logger: human text to stdout, structured JSON to .jsonl.
 
@@ -80,33 +92,64 @@ class StructuredLogger:
 
     Entry types listed in *preamble_types* are remembered and replayed at the
     top of every file opened via :meth:`reopen`, so each file is self-contained.
+    One recorded after a file was opened is written there before its next
+    record, by whichever logger (this one or a fork) writes to it.
+
+    Files are written in append mode (after truncation on a fresh open), and
+    every .jsonl line is written and flushed under one lock, so a second
+    logger from :meth:`fork` may append whole lines to the same file from
+    another thread. stdout is not locked.
     """
 
     def __init__(self, jsonl_path: Optional[str] = None,
                  preamble_types: Sequence[str] = ()):
         self._jsonl: Optional[TextIO] = None
+        self._path: Optional[str] = None
         self._preamble_types = frozenset(preamble_types)
-        self._preamble: List[str] = []
+        self._preamble = _Preamble()
         if jsonl_path:
-            self._jsonl = open(jsonl_path, 'w',
-                               encoding='utf-8', newline='\n')
+            self._jsonl = self._open(jsonl_path, truncate=True)
+            self._path = os.path.abspath(jsonl_path)
+            self._preamble.written[self._path] = 0
 
-    def reopen(self, jsonl_path: str):
-        """Switch output to a new .jsonl at *jsonl_path*, replaying the preamble.
+    @staticmethod
+    def _open(path: str, truncate: bool) -> TextIO:
+        if truncate:
+            open(path, 'w', encoding='utf-8').close()
+        return open(path, 'a', encoding='utf-8', newline='\n')
 
-        The current file stays open until the new one is ready, so a failed
-        reopen raises OSError and leaves logging untouched.
+    def fork(self) -> 'StructuredLogger':
+        """A logger with no file of its own that shares this one's preamble."""
+        other = StructuredLogger(preamble_types=self._preamble_types)
+        other._preamble = self._preamble
+        return other
+
+    def reopen(self, jsonl_path: str, append: bool = False):
+        """Switch output to the .jsonl at *jsonl_path*.
+
+        A fresh file (the default) is truncated and gets the preamble; with
+        *append* the file is joined as is. The current file stays open until
+        the new one is ready, so a failed reopen raises OSError and leaves
+        logging untouched.
         """
-        new_file = open(jsonl_path, 'w', encoding='utf-8', newline='\n')
-        try:
-            for line in self._preamble:
-                new_file.write(line)
-            new_file.flush()
-        except OSError:
-            new_file.close()
-            raise
-        self.close()
-        self._jsonl = new_file
+        path = os.path.abspath(jsonl_path)
+        new_file = self._open(jsonl_path, truncate=not append)
+        if not append:
+            try:
+                with _WRITE_LOCK:
+                    for line in self._preamble.lines:
+                        new_file.write(line)
+                    new_file.flush()
+                    self._preamble.written[path] = len(self._preamble.lines)
+            except OSError:
+                new_file.close()
+                raise
+        with _WRITE_LOCK:
+            self._preamble.written.setdefault(path, len(self._preamble.lines))
+            old_file, self._jsonl = self._jsonl, new_file
+            self._path = path
+        if old_file is not None:
+            old_file.close()
 
     @property
     def active(self) -> bool:
@@ -127,22 +170,32 @@ class StructuredLogger:
         record = {'type': entry_type}
         record.update(data)
         line = json.dumps(record, default=_json_default, ensure_ascii=False) + '\n'
-        if keep_for_preamble:
-            self._preamble.append(line)
-        if self._jsonl is not None:
+        with _WRITE_LOCK:
+            preamble = self._preamble
+            if keep_for_preamble:
+                preamble.lines.append(line)
+            if self._jsonl is None:
+                return
+            # A preamble record is itself the last unwritten preamble line.
+            pending = preamble.lines[preamble.written[self._path]:]
+            if not keep_for_preamble:
+                pending.append(line)
             try:
-                self._jsonl.write(line)
+                self._jsonl.write(''.join(pending))
+                preamble.written[self._path] = len(preamble.lines)
                 if flush:
                     self._jsonl.flush()
+                return
             except OSError as exc:
-                # Losing log storage (e.g. ENOSPC) must not stop detection.
-                print(f'WARNING: structured log write failed ({exc}); '
-                      f'continuing stdout-only', file=sys.stderr, flush=True)
-                try:
-                    self._jsonl.close()
-                except OSError:
-                    pass
-                self._jsonl = None
+                failure = exc
+                broken, self._jsonl = self._jsonl, None
+        # Losing log storage (e.g. ENOSPC) must not stop detection.
+        print(f'WARNING: structured log write failed ({failure}); '
+              f'continuing stdout-only', file=sys.stderr, flush=True)
+        try:
+            broken.close()
+        except OSError:
+            pass
 
     def emit_raw(self, human: str, flush: bool = True):
         """Write a human-only line (not recorded in .jsonl)."""
@@ -150,9 +203,10 @@ class StructuredLogger:
 
     def close(self):
         """Flush and close the .jsonl file."""
-        if self._jsonl is not None:
-            self._jsonl.close()
-            self._jsonl = None
+        with _WRITE_LOCK:
+            old_file, self._jsonl = self._jsonl, None
+            if old_file is not None:
+                old_file.close()
 
 
 # ---------------------------------------------------------------------------

@@ -109,12 +109,15 @@ void UDPPulseReceiver::_receive()
                 TagTrackerDetectorProtocol::PulsePayload pulsePayload {};
                 TagTrackerDetectorProtocol::FailedPayload failedPayload {};
                 TagTrackerDetectorProtocol::SliceProgressPayload progressPayload {};
+                TagTrackerDetectorProtocol::ComputeProgressPayload computePayload {};
                 const auto messageType = static_cast<TagTrackerDetectorProtocol::MessageType>(header.message_type);
                 const bool hasPulsePayload =
                     messageType == TagTrackerDetectorProtocol::MessageType::Pulse
                     || messageType == TagTrackerDetectorProtocol::MessageType::NoDetection;
                 const bool hasProgressPayload =
                     messageType == TagTrackerDetectorProtocol::MessageType::SliceProgress;
+                const bool hasComputePayload =
+                    messageType == TagTrackerDetectorProtocol::MessageType::ComputeProgress;
                 if (hasPulsePayload) {
                     std::memcpy(&pulsePayload,
                                 buffer.data() + sizeof(header),
@@ -127,11 +130,16 @@ void UDPPulseReceiver::_receive()
                     std::memcpy(&progressPayload,
                                 buffer.data() + sizeof(header),
                                 sizeof(progressPayload));
+                } else if (hasComputePayload) {
+                    std::memcpy(&computePayload,
+                                buffer.data() + sizeof(header),
+                                sizeof(computePayload));
                 }
                 _commandHandler->handlePythonDetectorMessage(
                     header, hasPulsePayload ? &pulsePayload : nullptr,
                     failedPayload.error_code,
-                    hasProgressPayload ? &progressPayload : nullptr);
+                    hasProgressPayload ? &progressPayload : nullptr,
+                    hasComputePayload ? &computePayload : nullptr);
                 continue;
             }
         }

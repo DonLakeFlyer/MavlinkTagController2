@@ -70,7 +70,7 @@ Without hardware use the simulator: `simulator/run_sim_pipeline.sh` or
 | --- | --- |
 | IQ in | UDP datagrams of `complex64` at `--fs`; the first sample is a header whose float lanes are bit-cast `uint32` seconds / nanoseconds (`decode_timestamp`), the rest are IQ (decimator format) |
 | Control in | TTDP `ARM(heading_deg)` on `--control-port` |
-| Reports out | TTDP `READY`, `ARMED`, `PULSE`, `NO_DETECTION`, `CYCLE_COMPLETE`, `FAILED`, `HEARTBEAT` (1 Hz) to `--pulse-port` — layout in [shared/README.md](../shared/README.md#ttdp-detector-protocol) |
+| Reports out | TTDP `READY`, `ARMED`, `SLICE_PROGRESS`, `SLICE_CAPTURED`, `COMPUTE_PROGRESS`, `PULSE`, `NO_DETECTION`, `CYCLE_COMPLETE`, `FAILED`, `HEARTBEAT` (1 Hz) to `--pulse-port` — layout in [shared/README.md](../shared/README.md#ttdp-detector-protocol) |
 | Console | one line per cycle, e.g. `[   7 08:43:10]  DETECTED  146.609080 MHz  (-1920.0 Hz)  SNR 18.4 dB  score_ratio 1.599  noise 5.230e-12  171 ms  [LOW]`; `MEASURED …` lines for locked measurements; `no detection … best=…` otherwise |
 | Structured log | `detector_<tag>.jsonl`, entry types in `shared/log_schema.py`; when armed, one file per `heading-NNN/`. One `cycle_threshold` record per cycle carries the null's Gumbel fit, permutation count and blanked fraction |
 
