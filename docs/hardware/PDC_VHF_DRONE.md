@@ -56,7 +56,8 @@ Ferrites on the vehicle are Fair-Rite round-cable snap-on (clip-on) cores in
 sizes:
 
 - **0443178181** ([Digi-Key](https://www.digikey.com/en/products/detail/fair-rite-products-corp/0443178181/8594076))
-  on the power leads. Single pass only — the bore does not take a second turn.
+  on the power leads. Single pass only on the main power leads, where the bore
+  does not take a second turn. The thinner GR01 lead takes two turns.
 - **0443164251** ([Digi-Key](https://www.digikey.com/en/products/detail/fair-rite-products-corp/0443164251/8594062))
   on the USB cable. 6.6 mm bore, 32 mm long; takes two turns of the cable.
 
@@ -68,6 +69,7 @@ sizes:
 | USB cable, Discovery end | Two stacked cores, two turns of the cable through each. Bench 2026-09-20: the DUO's residual humps reach the SDR as common-mode on the USB cable; one 2-turn core cut them 9 → 3 dB, the second to ~2 dB. |
 | USB cable, RPi end | One core, two turns. Bench 2026-09-20: removed the last ~2 dB of hump. |
 | ESC power lines | At the exit of each motor arm (added for the 2026-09-16 lake-front flights). |
+| Skydroid GR01 power lead | 0443178181, two turns, right where the lead exits the receiver box. Bench 2026-10-13: no measurable change in the ≈1.6 dB bumps the powered vehicle adds at rest (the GR01 is not confirmed as their source). Kept fitted. |
 
 ## Companion computer
 
