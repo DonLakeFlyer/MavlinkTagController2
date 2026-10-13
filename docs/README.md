@@ -13,6 +13,9 @@ Documents are filed by the question they answer, not by component.
 Component READMEs (beside the code) answer only *what is this and how do I run
 it* — see the contract below.
 
+[ISSUES.md](ISSUES.md) — living list of known problems from field data and
+the suggested changes, not yet implemented. Items are removed when fixed.
+
 ## hardware/
 
 | Doc | Scope |
