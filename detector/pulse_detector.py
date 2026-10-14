@@ -111,8 +111,8 @@ DETECTION_STATUS_NO_DETECTION   = 3  # Searched but no pulse found
 
 # Rate-switch hypothesis outcome carried in PythonPulseInfo_t.rate_state.
 # Fixed enum, independent of K. For single-rate tags always RATE_STATE_A.
-RATE_STATE_A = 0        # rate A only (resting)
-RATE_STATE_B = 1        # rate B only (moving)
+RATE_STATE_A = 0        # rate A only (--tip, the tag's first configured rate)
+RATE_STATE_B = 1        # rate B only (--tip-secondary, the second)
 RATE_STATE_A_TO_B = 2   # switched A->B within the K-group
 RATE_STATE_B_TO_A = 3   # switched B->A within the K-group
 

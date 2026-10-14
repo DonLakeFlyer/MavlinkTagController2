@@ -290,6 +290,25 @@ class TestPlainSession:
         assert 'Decimator: 1 dropped ZMQ packets' in md
         assert 'No anomalies detected' not in md
 
+    def test_either_configured_rate_is_normal(self, tmp_path):
+        # Rate A and rate B are just the tag's first and second configured rates.
+        entries = _detector_entries(3, 2, 24.0)
+        for e in entries:
+            if e['type'] == 'detection':
+                e['hyp_label'] = 'B'
+        _jsonl(tmp_path / 'detector_3.jsonl', entries)
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        md = generate_report(str(tmp_path))
+        assert 'No anomalies detected' in md
+
+    def test_rate_switch_within_dwell_is_reported(self, tmp_path):
+        entries = _detector_entries(3, 2, 24.0)
+        [e for e in entries if e['type'] == 'detection'][0]['hyp_label'] = 'A_to_B_c13'
+        _jsonl(tmp_path / 'detector_3.jsonl', entries)
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        md = generate_report(str(tmp_path))
+        assert 'Tag 3: rate switch within the dwell in 1 cycle(s) (A_to_B_c13)' in md
+
     def test_lost_iq_summary_by_stage(self, tmp_path):
         entries = _detector_entries(3, 1, 12.0)
         entries[-1]['rx_ring_dropped'] = 2

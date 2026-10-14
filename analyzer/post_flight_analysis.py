@@ -1535,14 +1535,15 @@ def generate_report(log_dir: str) -> str:
                 f'\u2014 result may be unreliable')
 
     for det in detectors:
+        # Pure A and pure B are both normal: they are only the tag's first and second configured rates.
         switch_cycles = [c for c in det.cycles
                          if c.detected and c.hyp_label
-                         and c.hyp_label != 'A']
+                         and c.hyp_label not in ('A', 'B')]
         if switch_cycles:
-            labels = {c.hyp_label for c in switch_cycles}
+            labels = ', '.join(sorted({c.hyp_label for c in switch_cycles}))
             anomalies.append(
-                f'Tag {det.tag_id}: {len(switch_cycles)} cycle(s) '
-                f'detected with non-primary hypothesis ({labels})')
+                f'Tag {det.tag_id}: rate switch within the dwell in '
+                f'{len(switch_cycles)} cycle(s) ({labels})')
 
     w('## Anomalies & Warnings')
     w()

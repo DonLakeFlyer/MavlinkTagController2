@@ -134,6 +134,9 @@ private:
     void _handleTunnelMessage   (const mavlink_message_t& message);
     void _commandThreadMain     ();
     void _handlePythonPulse     (const TagTrackerDetectorProtocol::Header& header, const TagTrackerDetectorProtocol::PulsePayload& payload);
+    // Rotation slices: the dwell's mean pose. Otherwise the pose at the pulse time. Zeroed (no fix) if neither exists.
+    TelemetryCache::TelemetryCacheEntry_t _pulsePose(const TagTrackerDetectorProtocol::Header& header, double startTimeSeconds);
+    void _storeDwellPose        (uint32_t sliceId, uint32_t tagId);    // _rotationMutex held
     void _sendDetectorHeartbeat (uint32_t tagId, uint32_t detectionMode);
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
     // Adds a started pipeline process and reports it as one start-detection step.
@@ -141,7 +144,8 @@ private:
     void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort = 0);
     bool _writeSessionInfo      (const TunnelProtocol::StartDetectionInfo_t& startDetection, AirSpyDeviceType deviceType, bool isHFMode);
     // SLICE_CAPTURED, or COMPUTE_PROGRESS standing in for a lost one.
-    void _handleDetectorCaptured(const TagTrackerDetectorProtocol::Header& header);
+    // captureInferred: SLICE_CAPTURED was lost, so the capture end (and the dwell pose) is unknown.
+    void _handleDetectorCaptured(const TagTrackerDetectorProtocol::Header& header, bool captureInferred);
     void _sendCollectionStatus(uint32_t collectionId, uint32_t sliceId, uint32_t status, uint32_t errorCode = 0,
                                std::optional<uint32_t> expectedDetectors = std::nullopt,
                                std::optional<uint32_t> completedDetectors = std::nullopt,
@@ -200,7 +204,8 @@ private:
     std::optional<float>                        _pendingRevisitHeadingDeg;          // requested but its slice not yet armed
     float                                       _currentHeadingDeg      = 0;
     std::map<uint32_t, float>                   _rotationSliceHeadings;
-    std::map<uint32_t, TelemetryCache::TelemetryCacheEntry_t> _rotationSliceTelemetry;   // vehicle pose captured at ARM
+    std::map<std::pair<uint32_t, uint32_t>, double> _rotationSliceArmedSeconds;   // (slice, tag) -> first ARM send time
+    std::map<std::pair<uint32_t, uint32_t>, TelemetryCache::TelemetryCacheEntry_t> _rotationSlicePose;   // (slice, tag) -> mean pose over the dwell
     std::vector<RotationSlice>                  _rotationSlices;
     std::map<uint32_t, uint8_t>                 _liveCandidate;         // tag_id -> lock candidate the GCS is currently shown
 

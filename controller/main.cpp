@@ -8,6 +8,7 @@
 #include "SimulatorTelemetryPublisher.h"
 #include "formatString.h"
 #include "LogFileManager.h"
+#include "timeHelpers.h"
 
 #include <cerrno>
 #include <chrono>
@@ -267,7 +268,29 @@ int main(int argc, char** argv)
 
 
     auto ftpServer 			= MavlinkFtpServer { mavlink };
-    auto telemetryCache     = new TelemetryCache(mavlink);
+    // Older than this and the stream has stopped (position lost with GPS, or the link dropped).
+    constexpr double kMaxTelemetryAgeSecs = 1.0;
+    auto telemetryCache     = new TelemetryCache([mavlink, kMaxTelemetryAgeSecs, wasCurrent = false]() mutable -> std::optional<TelemetryCache::TelemetryCacheEntry_t> {
+        Telemetry& telemetry = mavlink->telemetry();
+        const auto position  = telemetry.freshPosition(kMaxTelemetryAgeSecs);
+        const auto attitude  = telemetry.freshAttitudeEuler(kMaxTelemetryAgeSecs);
+        const bool current   = position && attitude;
+        if (current != wasCurrent) {
+            if (current) {
+                logDebug() << "Telemetry cache: position and attitude current";
+            } else {
+                logError() << "Telemetry cache: no" << (position ? "attitude" : attitude ? "position" : "position or attitude")
+                           << "for over" << kMaxTelemetryAgeSecs << "s - pulses and dwells in this gap get no pose";
+            }
+            wasCurrent = current;
+        }
+        if (!current) {
+            return std::nullopt;
+        }
+        return TelemetryCache::TelemetryCacheEntry_t { secondsSinceEpoch(), *position, *attitude };
+    }, [](double stepSeconds) {
+        logError() << formatString("Telemetry cache: system clock stepped back %.1f s, earlier samples dropped", stepSeconds);
+    });
     auto commandHandler 	= CommandHandler { mavlink, telemetryCache, simulatorMode, simulatorPreset, debugDetector, simulatorSnrDb,
                                            simulatorTxBearingDeg, simulatorInterfererSnrDb, simulatorAntenna, simulatorPriPpm,
                                            simulatorNoiseSource, detectorImpulseBlankFactor, simulatorRateSwitch };

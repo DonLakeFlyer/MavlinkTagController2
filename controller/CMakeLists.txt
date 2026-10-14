@@ -118,6 +118,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_python_pulse_mapper PRIVATE mavlink tunnel_protocol)
     add_test(NAME test_python_pulse_mapper COMMAND test_python_pulse_mapper)
 
+    add_executable(test_telemetry_cache
+        tests/test_telemetry_cache.cpp
+        TelemetryCache.cpp TelemetryCache.h
+    )
+    target_include_directories(test_telemetry_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_telemetry_cache PRIVATE mavlink)
+    add_test(NAME test_telemetry_cache COMMAND test_telemetry_cache)
+
     add_executable(test_tag_database
         tests/test_tag_database.cpp
     )

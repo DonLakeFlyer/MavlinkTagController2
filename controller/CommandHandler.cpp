@@ -750,7 +750,12 @@ void CommandHandler::handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo)
     pulseInfo.tag_id                        = (uint32_t)udpPulseInfo.tag_id;
     pulseInfo.frequency_hz                  = (uint32_t)udpPulseInfo.frequency_hz;
 
-    TelemetryCache::TelemetryCacheEntry_t telemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
+    const auto cachedTelemetry = _telemetryCache->telemetryForTime(udpPulseInfo.start_time_seconds);
+    if (!cachedTelemetry) {
+        logError() << formatString("Pulse pose: no telemetry within 1 s of %.3f (tag_id %u); sending no-fix pose",
+                                   udpPulseInfo.start_time_seconds, pulseInfo.tag_id);
+    }
+    const TelemetryCache::TelemetryCacheEntry_t telemetry = cachedTelemetry.value_or(TelemetryCache::TelemetryCacheEntry_t {});
 
     if (std::isfinite(udpPulseInfo.detection_status)
               && static_cast<uint8_t>(udpPulseInfo.detection_status) == kNoPulseDetectionStatus) {
@@ -824,6 +829,50 @@ void CommandHandler::_sendDetectorHeartbeat(uint32_t tagId, uint32_t detectionMo
     _mavlink->sendTunnelMessage(&heartbeat, sizeof(heartbeat));
 }
 
+void CommandHandler::_storeDwellPose(uint32_t sliceId, uint32_t tagId)
+{
+    const auto armedIt = _rotationSliceArmedSeconds.find({sliceId, tagId});
+    if (armedIt == _rotationSliceArmedSeconds.end()) {
+        logError() << "Dwell pose: no ARM time for slice:" << sliceId << "tag_id:" << tagId;
+        return;
+    }
+    const double capturedSeconds = secondsSinceEpoch();
+    const auto pose = _telemetryCache->meanTelemetry(armedIt->second, capturedSeconds);
+    if (!pose) {
+        logError() << formatString("Dwell pose: telemetry does not cover slice %u tag_id %u (%.1f s dwell)",
+                                   sliceId, tagId, capturedSeconds - armedIt->second);
+        return;
+    }
+    _rotationSlicePose.insert_or_assign({sliceId, tagId}, *pose);
+    logDebug() << formatString("Dwell pose: slice %u tag_id %u yaw %.1f over %.1f s",
+                               sliceId, tagId, pose->attitudeEuler.yawDegrees, capturedSeconds - armedIt->second);
+}
+
+TelemetryCache::TelemetryCacheEntry_t CommandHandler::_pulsePose(const TagTrackerDetectorProtocol::Header& header,
+                                                                 double startTimeSeconds)
+{
+    {
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        const bool rotationSlice = _inRotation
+            && _collectionCoordinator.collectionId() == header.collection_id
+            && _rotationSliceHeadings.count(header.slice_id) != 0;
+        if (rotationSlice) {
+            const auto poseIt = _rotationSlicePose.find({header.slice_id, header.tag_id});
+            if (poseIt != _rotationSlicePose.end()) {
+                return poseIt->second;
+            }
+            logError() << "Pulse pose: no dwell pose for slice:" << header.slice_id << "tag_id:" << header.tag_id
+                       << "- using the pose at the pulse time";
+        }
+    }
+    if (const auto pose = _telemetryCache->telemetryForTime(startTimeSeconds)) {
+        return *pose;
+    }
+    logError() << formatString("Pulse pose: no telemetry within 1 s of %.3f (tag_id %u slice %u); sending no-fix pose",
+                               startTimeSeconds, header.tag_id, header.slice_id);
+    return TelemetryCache::TelemetryCacheEntry_t {};
+}
+
 void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header& header,
                                         const TagTrackerDetectorProtocol::PulsePayload& payload)
 {
@@ -831,18 +880,7 @@ void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header
     const uint32_t sliceId      = header.slice_id;
     const uint8_t  candidateId  = payload.candidate_id;
 
-    TelemetryCache::TelemetryCacheEntry_t telemetry = _telemetryCache->telemetryForTime(payload.start_time_seconds);
-    {
-        // Post-lock retro-measured slices can be many minutes old, well past the
-        // TelemetryCache window; the pose captured at ARM is the slice's pose.
-        std::lock_guard<std::mutex> lock(_rotationMutex);
-        const auto sliceTelemetryIt = _rotationSliceTelemetry.find(sliceId);
-        if (_inRotation
-            && _collectionCoordinator.collectionId() == collectionId
-            && sliceTelemetryIt != _rotationSliceTelemetry.end()) {
-            telemetry = sliceTelemetryIt->second;
-        }
-    }
+    TelemetryCache::TelemetryCacheEntry_t telemetry = _pulsePose(header, payload.start_time_seconds);
 
     PythonPulseInfo_t pulseInfo = buildPythonPulseInfo(header, payload, telemetry);
 
@@ -1042,7 +1080,7 @@ void CommandHandler::heartbeatTick()
     }
 }
 
-void CommandHandler::_handleDetectorCaptured(const TagTrackerDetectorProtocol::Header& header)
+void CommandHandler::_handleDetectorCaptured(const TagTrackerDetectorProtocol::Header& header, bool captureInferred)
 {
     bool accepted = false;
     bool sliceComplete = false;
@@ -1058,6 +1096,14 @@ void CommandHandler::_handleDetectorCaptured(const TagTrackerDetectorProtocol::H
                    << "result:" << CollectionCoordinator::resultName(result)
                    << "captured:" << _collectionCoordinator.completedDetectorCount() << "/" << _collectionCoordinator.expectedDetectorCount()
                    << (awaitAnalysis ? "(last slice: SLICE_COMPLETE waits for analysis)" : "");
+        if (accepted) {
+            if (captureInferred) {
+                logError() << "Dwell pose: capture end unknown (SLICE_CAPTURED lost) for slice:" << header.slice_id
+                           << "tag_id:" << header.tag_id;
+            } else {
+                _storeDwellPose(header.slice_id, header.tag_id);
+            }
+        }
     }
     if (accepted) {
         _rotationProgress.analysisQueued(header.tag_id);
@@ -1160,7 +1206,7 @@ void CommandHandler::handlePythonDetectorMessage(
     }
 
     if (messageType == MessageType::SliceCaptured) {
-        _handleDetectorCaptured(header);
+        _handleDetectorCaptured(header, false);
         return;
     }
 
@@ -1181,7 +1227,7 @@ void CommandHandler::handlePythonDetectorMessage(
             // Both SLICE_CAPTURED copies were lost; waiting for CYCLE_COMPLETE would trip the GCS stall watchdog.
             logDebug() << "Detector COMPUTE_PROGRESS implies lost SLICE_CAPTURED: tag_id:" << header.tag_id
                        << "slice:" << header.slice_id;
-            _handleDetectorCaptured(header);
+            _handleDetectorCaptured(header, true);
         }
         _rotationProgress.computeProgress(header.slice_id, header.tag_id, computePayload->stage,
                                           computePayload->done, computePayload->total);
@@ -1380,7 +1426,8 @@ std::string CommandHandler::startCollection(const mavlink_tunnel_t& tunnel)
             _pendingRevisitHeadingDeg.reset();
             _currentHeadingDeg = 0;
             _rotationSliceHeadings.clear();
-            _rotationSliceTelemetry.clear();
+            _rotationSliceArmedSeconds.clear();
+            _rotationSlicePose.clear();
             _rotationSlices.clear();
             _liveCandidate.clear();   // a stopped (unfinished) rotation must not carry its live pick over
             startPipeline = true;
@@ -1585,8 +1632,6 @@ std::string CommandHandler::startCollectionSlice(const mavlink_tunnel_t& tunnel)
         if (!replayComplete) {
             _currentHeadingDeg = sliceInfo.heading_deg;
             _rotationSliceHeadings[sliceInfo.slice_id] = sliceInfo.heading_deg;
-            // A duplicate ARM is a GCS retry; keep the pose from the first one.
-            _rotationSliceTelemetry.try_emplace(sliceInfo.slice_id, _telemetryCache->telemetryForTime(secondsSinceEpoch()));
             // Only a slice flown at the requested heading is the confirmation
             // dwell; any other slice leaves the revisit outstanding so the
             // next FINISH asks again instead of finalizing unconfirmed.
@@ -1617,10 +1662,14 @@ std::string CommandHandler::startCollectionSlice(const mavlink_tunnel_t& tunnel)
         arm.header.slice_id = sliceInfo.slice_id;
         arm.header.tag_id = tagInfo.id;
         arm.payload.heading_deg = sliceInfo.heading_deg;
+        const double sentSeconds = secondsSinceEpoch();
         if (!_sendDetectorControl(tagInfo.id, arm)) {
             // The NACK carries the reason; a FAILED status here would pre-empt it with error 0
             return "Failed to arm detector";
         }
+        // First successful send wins across GCS retries: a retry's ARMED reply must not shorten the dwell window.
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        _rotationSliceArmedSeconds.try_emplace({sliceInfo.slice_id, tagInfo.id}, sentSeconds);
     }
 
     logDebug() << "START_COLLECTION_SLICE: ARM sent to" << _tagDatabase.size()
@@ -1768,7 +1817,8 @@ std::string CommandHandler::finishCollection(const mavlink_tunnel_t& tunnel)
         _rotationSlices.clear();
         _liveCandidate.clear();
         _rotationSliceHeadings.clear();
-        _rotationSliceTelemetry.clear();
+        _rotationSliceArmedSeconds.clear();
+        _rotationSlicePose.clear();
         _detectorControlPorts.clear();
         _pendingRevisitHeadingDeg.reset();
         _inRotation = false;
