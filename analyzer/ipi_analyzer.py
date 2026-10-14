@@ -2,7 +2,7 @@
 """
 Inter-Pulse Interval (IPI) Analyzer — measure every pulse-to-pulse gap in
 real time from the decimated IQ stream and classify each interval as
-rate A (resting), rate B (moving), or anomalous (transition artifact).
+rate A (--tip-a), rate B (--tip-b), or anomalous (transition artifact).
 
 Reads from the same UDP pipeline as pulse_detector.py:
 
@@ -251,9 +251,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
     ap.add_argument('--tip-a', type=float, required=True,
-                    help='Rate A (resting) inter-pulse interval in seconds')
+                    help='Rate A inter-pulse interval in seconds')
     ap.add_argument('--tip-b', type=float, required=True,
-                    help='Rate B (moving) inter-pulse interval in seconds')
+                    help='Rate B inter-pulse interval in seconds')
     ap.add_argument('--expected-freq', type=float, required=True,
                     help='Expected signal frequency in MHz (e.g. 146.639)')
     ap.add_argument('--freq-offset', type=float, default=None,
@@ -287,8 +287,8 @@ def main():
     time_step_s = n_ws / Fs
 
     print('=== Inter-Pulse Interval Analyzer ===')
-    print(f'  Rate A (resting)  {tip_a:.3f} s')
-    print(f'  Rate B (moving)   {tip_b:.3f} s')
+    print(f'  Rate A            {tip_a:.3f} s')
+    print(f'  Rate B            {tip_b:.3f} s')
     print(f'  Expected freq     {args.expected_freq:.6f} MHz')
     print(f'  Sample rate       {Fs:.1f} Hz')
     print(f'  STFT              window={n_w}  overlap={n_ol}  step={n_ws}')

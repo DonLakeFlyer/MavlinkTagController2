@@ -32,6 +32,7 @@ void Telemetry::_positionCallback(const mavlink_message_t& message)
     lastPosition.relativeAltitude   = globalPositionInt.relative_alt * 1e-3f;
 
     _lastPosition = lastPosition;
+    _lastPositionTime = std::chrono::steady_clock::now();
 }
 
 float Telemetry::_toDegFromRad(float rad)
@@ -76,6 +77,7 @@ void Telemetry::_attitudeCallback(const mavlink_message_t& message)
     lastAttitudeEuler.yawDegrees   = _radiansToDegrees(attitude.yaw);
 
     _lastAttitudeEuler = lastAttitudeEuler;
+    _lastAttitudeTime = std::chrono::steady_clock::now();
 }
 
 std::optional<Telemetry::Position_t> Telemetry::lastPosition()
@@ -87,5 +89,23 @@ std::optional<Telemetry::Position_t> Telemetry::lastPosition()
 std::optional<Telemetry::EulerAngle_t> Telemetry::lastAttitudeEuler()
 {
     std::lock_guard<std::mutex> lock(_accessMutex);
+    return _lastAttitudeEuler;
+}
+
+std::optional<Telemetry::Position_t> Telemetry::freshPosition(double maxAgeSeconds)
+{
+    std::lock_guard<std::mutex> lock(_accessMutex);
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - _lastPositionTime).count() > maxAgeSeconds) {
+        return std::nullopt;
+    }
+    return _lastPosition;
+}
+
+std::optional<Telemetry::EulerAngle_t> Telemetry::freshAttitudeEuler(double maxAgeSeconds)
+{
+    std::lock_guard<std::mutex> lock(_accessMutex);
+    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - _lastAttitudeTime).count() > maxAgeSeconds) {
+        return std::nullopt;
+    }
     return _lastAttitudeEuler;
 }

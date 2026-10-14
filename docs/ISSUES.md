@@ -2,7 +2,13 @@
 
 Problems found in field data and the changes suggested for them. Living
 document: items are added as they are found and removed when fixed (the fix
-then lands in `design/`). Items 1–7 were fixed in 2026-10 and removed.
+then lands in `design/`). Items 1–7 were fixed in 2026-10 and removed. Item 8
+(in-flight floor regression since 10-01) was traced to DShot on 2026-10-14 and
+the vehicle went back to PWM; see
+[analysis/2026-10_DSHOT_VS_PWM_NOISE.md](analysis/2026-10_DSHOT_VS_PWM_NOISE.md).
+The 10-14 pulse-pose problems (telemetry cache pruned before K=20 results
+arrived; rotation pose taken at ARM, mid-turn) were fixed the same day; see
+`design/RATE_SWITCH_DETECTOR.md`.
 
 Sources, unless stated otherwise: 60-acres flight, 2026-10-13, ~122 m AGL.
 
@@ -33,14 +39,13 @@ brackets are the issues below that each remaining change addresses.
 
 | # | Change | Addresses |
 | --- | --- | --- |
-| S9 | Archive rotation log folders with the raw captures in `/Volumes/Media/PDC Testing/` after every outing (done for 10-13). | — |
+| S9 | Archive rotation log folders with the raw captures in `/Volumes/Media/PDC Testing/` after every outing (done for 10-13 and 10-14). | — |
 | S13 | Put vehicle (GPS) time on detector and controller log lines, or at least log the RPi-clock-to-vehicle-time offset at session start and on every change. | 11 |
 
 ### RF noise / hardware tests
 
 | # | Test | Addresses |
 | --- | --- | --- |
-| S10 | PWM vs DShot A/B: same site and day, low hover (≈3 m) **and** 122 m in each mode, ESCs recalibrated after switching, same capture settings, ULog hover power and per-motor output. | 8 |
 | S11 | Discovery on the desktop: 50 Ω terminator at 147.980 MHz, then antenna at 147.900 MHz. | 9 |
 | S12 | Office capture with only the GR01 power lead unplugged; if the bumps vanish, go beyond the existing 2-turn clamp-on (stacked cores, antenna-lead ferrites, filtered supply). | 10 |
 
@@ -48,73 +53,18 @@ brackets are the issues below that each remaining change addresses.
 
 ## RF noise / hardware
 
-### 8. In-flight noise floor regressed ≈1.5 dB since 10-01 (DShot and altitude confounded)
+### 9. Narrow humps at 147.705 and 147.995 MHz in the 10-13 office captures
 
-| Flight | Site | Hover altitude (ULog) | Mid-band median (dBFS/Hz) |
-| --- | --- | --- | --- |
-| 9-17 (short legs, PWM) | 60 acres | no ULog | −114.7 |
-| 9-21 (short legs, PWM) | Lake front | **≈4 m** | −115.1 |
-| 9-22 (long legs, PWM) | Lake front | **≈1 m** | −117.4 |
-| 10-02 (DShot), `log_79` | ? | 114 m (loiter, at capture time) | −115.0 |
-| **10-13 (long legs, DShot), `log_83`** | 60 acres | **123.6 m** (loiter, at capture time) | **−115.0** |
+≈15 kHz wide, ≈ −116 dBFS/Hz absolute, in the office on 10-13 both with the
+vehicle off (Discovery on the desktop over coax) and with it powered. Absent
+from every September capture at the same tune (9-13 office; 9-16, 9-17, 9-21
+and 9-22 flights), with the same Discovery serial `0xC852AA80BE44463D`
+throughout.
 
-The 60-acres site reads ≈0.8 dB hotter than the lake front (9-16 vs 9-17), so
-≈1.5 dB is left over. Candidates from 10-01 onward:
-- DShot,
-- polymer props,
-- arm tilt,
-- FC rotation.
-
-**But altitude is fully confounded with DShot.** Every PWM flight with a ULog
-was a low hover (1–4 m, antenna about half a metre above the ground). Both
-DShot flights hovered at ≈115–125 m. Height changes what the antenna sees: the
-ground, and line of sight to distant noise sources. So the ≈1.5 dB cannot be
-assigned to DShot on current data.
-
-**Hover load is unchanged** (ULog, airborne, first and last 10 s trimmed):
-
-| Flight | Current | Voltage | Power | Motor outputs | Yaw torque sp |
-| --- | --- | --- | --- | --- | --- |
-| 9-21 | 20.3 A | 24.36 V | 495 W | 0.84 / 0.83 / 0.54 / 0.55 (unbalanced) | +0.145 |
-| 9-22 | 20.7 A | 23.96 V | 497 W | 0.69 / 0.67 / 0.69 / 0.75 | −0.020 |
-| 10-02 | 22.2 A | 23.51 V | 523 W | 0.58 / 0.62 / 0.63 / 0.66 | −0.020 |
-| 10-13 rot 1 | 21.4 A | 23.20 V | 497 W | 0.60 / 0.59 / 0.63 / 0.64 | −0.022 |
-| 10-13 rot 2 | 21.2 A | 23.33 V | 495 W | 0.61 / 0.57 / 0.64 / 0.63 | −0.022 |
-
-- **Electrical power at hover matches 9-22 within 0.5%.** The ≈3% higher
-  current is the lower pack voltage. So the new props and arm tilt did not
-  change the load.
-- **Motor balance on 10-13 is comparable to 9-22.**
-- **ESC RPM (DShot telemetry):** 4116–4486, a ≈9% spread.
-- **Motor output values can't be compared across the PWM → DShot change**,
-  because the output-to-throttle mapping changed.
-- **ESC current telemetry reads 0** on all ESCs.
-
-The lift is tilted: ≈+2.5 dB below 147.95 MHz, ≈+1.3 dB above 148.1 MHz.
-
-The DShot frames and bidirectional replies run continuously when disarmed, and
-the powered-at-rest office capture showed no floor lift. So if DShot is the
-cause, it acts through ESC switching under load, not the signal wires.
-
-**Planned:** PWM vs DShot A/B on 10-14:
-- same site, same day;
-- **in each mode, capture at a low hover (≈3 m) and at 122 m.** This separates
-  altitude from DShot in one outing;
-- ESCs recalibrated after switching to PWM, with motor balance checked;
-- same capture settings;
-- ULog hover power and per-motor output compared with 10-13 (≈496 W).
-
-### 9. Narrow humps at 147.705 and 147.995 MHz in every October capture
-
-≈15 kHz wide, ≈ −116 dBFS/Hz absolute. They appear at the same level:
-- in the office with the vehicle off (Discovery on the desktop over coax),
-- in the office with the vehicle powered,
-- at 400 ft.
-
-They are absent from every September capture at the same tune (9-13 office;
-9-16, 9-17, 9-21 and 9-22 flights), with the same Discovery serial
-`0xC852AA80BE44463D` throughout. In flight they add +1.2 / +2.3 dB; the upper
-one is 25 kHz from the tag. Suspected to be inside the SDR.
+In flight they come with DShot: ≈ +1.5 dB on DShot (10-13 and 10-14), gone on
+PWM (10-14, +0.0 to +0.3 dB on a −118 floor). If they were SDR-internal at the
+office level they would still show ≈ +2 dB on PWM. The vehicle-off office
+capture is still unexplained.
 
 **Test** (desktop, vehicle not involved):
 1. 50 Ω terminator on the input at 147.980 MHz.
@@ -163,10 +113,21 @@ time source:
 | Rotation 2, slice 1 armed vs 000° dwell start | 20:26:45 | 20:50:23 | 23 min 38 s |
 
 The offset also **changed by ≈77 s between the two rotations**, so even a
-single correction per outing is not enough. Lining detector events up with
+single correction per outing is not enough. On 10-14 it grew from 21 min at
+the first capture to ≈27 min by the last rotation. Lining detector events up with
 the ULog (attitude, altitude, motors), or with what people at the collar did,
 currently needs dwell-by-dwell manual mapping.
 
 Example: the rotation-1 rate switch happened in the 045° dwell, which is
 20:14:32–20:15:12 by the RPi clock but **20:36:53–20:37:32 UTC (13:37 local)**
 by GPS.
+
+### 12. TagTracker arms each slice before the turn has settled
+
+Source: 60-acres, 2026-10-14, both rotations, ULog yaw at each ARM. The GCS
+sends `START_COLLECTION_SLICE` while the vehicle is still turning; yaw then
+overshoots by up to ≈8° and settles within ≈1.5–2 s. The segment starts
+≈1 s after ARM, so the first ≈1 s of each dwell is up to ≈4° off heading.
+Effect here ≈0.1 dB per heading (mean dwell yaw within 0.1° of commanded);
+it grows with faster yaw rates or fewer pulses per dwell. Fix belongs in
+TagTracker: arm once yaw error and yaw rate have both been small for ≈1 s.

@@ -88,7 +88,7 @@ class TagSignal:
 
         Before switch_time pulses repeat at self.tip; after it they repeat at
         self.tip_secondary. With switch_back_time set they return to self.tip
-        there (an A->B->A burst, as when a resting collar is bumped). Each
+        there (an A->B->A burst, as when a collar briefly switches rate). Each
         rate's first pulse comes one interval of that rate after the previous
         rate's last pulse, as a collar continues its train at the new rate.
         """

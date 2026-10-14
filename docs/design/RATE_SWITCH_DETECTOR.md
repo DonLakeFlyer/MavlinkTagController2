@@ -2,7 +2,9 @@
 
 ## Problem
 
-A VHF collar transmits pulses at one of two known rates (e.g. 1.5s resting, 2.0s moving). It can switch between them. The detector folds K consecutive pulses to boost SNR. If a rate switch happens mid-segment, a single-rate fold misaligns some pulses and loses sensitivity.
+A VHF collar transmits pulses at one of two known rates (e.g. a Lotek collar: 2.0 s resting, 1.5 s moving). It can switch between them. The detector folds K consecutive pulses to boost SNR. If a rate switch happens mid-segment, a single-rate fold misaligns some pulses and loses sensitivity.
+
+The detector and controller only know **rate A** (`--tip`, the tag's `intra_pulse1_msecs`) and **rate B** (`--tip-secondary`, `intra_pulse2_msecs`). Which one means resting or moving is the collar's business; Tag Tracker holds that as the tag manufacturer's rate names.
 
 ## Key Constraints
 
@@ -85,7 +87,7 @@ Tag Tracker can compare successive `predict_next_start_seconds` values against b
 
 ### Controller → GCS (MAVLink tunnel)
 
-`CommandHandler::_handlePythonPulse()` copies the detector report fields into `PythonPulseInfo_t` and attaches vehicle telemetry (lat/lon/alt/roll/pitch/yaw) from the telemetry cache based on `start_time_seconds`. The struct is sent as raw bytes inside a `TUNNEL` MAVLink message.
+`CommandHandler::_handlePythonPulse()` copies the detector report fields into `PythonPulseInfo_t` and attaches vehicle telemetry (lat/lon/alt/roll/pitch/yaw). For a rotation slice that is the mean pose over the detector's dwell (first ARM send to SLICE_CAPTURED, circular-mean yaw); otherwise the cached sample nearest `start_time_seconds`, if one lies within 1 s. A slice whose SLICE_CAPTURED was lost has no dwell pose. The cache only holds samples while position and attitude are both under 1 s old, and is emptied if the system clock steps back. With neither, the pose is zeroed (no fix) and an error is logged. The struct is sent as raw bytes inside a `TUNNEL` MAVLink message.
 
 Key `PythonPulseInfo_t` fields for rate-switch (defined in `TunnelProtocol.h`; uavrt reports use the separate `PulseInfo_t` with its own `group_ind` = pulse index within the K-group):
 
@@ -103,8 +105,8 @@ Key `PythonPulseInfo_t` fields for rate-switch (defined in `TunnelProtocol.h`; u
 
 | `rate_state` | Constant | Meaning | Hypothesis labels |
 |--------------|----------|---------|-------------------|
-| 0 | `kRateStateA` | Pure rate A (primary/resting TIP) | `"A"` |
-| 1 | `kRateStateB` | Pure rate B (secondary/moving TIP) | `"B"` |
+| 0 | `kRateStateA` | Pure rate A (`intra_pulse1_msecs`) | `"A"` |
+| 1 | `kRateStateB` | Pure rate B (`intra_pulse2_msecs`) | `"B"` |
 | 2 | `kRateStateAToB` | Switched A→B within the K-group | `"A_to_B_c{c}"` |
 | 3 | `kRateStateBToA` | Switched B→A within the K-group | `"B_to_A_c{c}"` |
 
@@ -127,7 +129,7 @@ Because the Python detector is a single process, Tag Tracker receives **one** no
 To support Python rate-switch detection, Tag Tracker must:
 
 1. **Decode `rate_state`** using the table above from `PythonPulseInfo_t` (`COMMAND_ID_PYTHON_PULSE`). No K-dependent decoding is needed.
-2. **Display activity state**: Map `rate_state` to a user-visible label (resting/moving/switching). `kRateStateAToB` / `kRateStateBToA` indicate the tag is transitioning.
+2. **Display rate state**: Map `rate_state` to the tag's configured rate names (rate A = the first, rate B = the second). `kRateStateAToB` / `kRateStateBToA` indicate the tag switched within the K-group.
 3. **Use `predict_next_start_seconds` for timing**: This already reflects the detected rate. No need for Tag Tracker to independently compute next-pulse timing.
 4. **Handle single no-detection per tag**: Only one `detection_status == 3` message per cycle (not two).
 5. **No tag ID splitting**: Both rates report under the same `tag_id`. Do not look for an even-numbered companion tag when `detection_mode == DETECTION_MODE_PYTHON`.

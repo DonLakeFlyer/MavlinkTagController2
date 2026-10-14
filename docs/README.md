@@ -45,6 +45,7 @@ the suggested changes, not yet implemented. Items are removed when fixed.
 | [2026-09_MULTIPATH_ANALYSIS_REVIEW.md](analysis/2026-09_MULTIPATH_ANALYSIS_REVIEW.md) | Re-analysis of the Apr-11 failures: noise detections, not multipath; corrected two-ray geometry |
 | [2026-09_SIMULATOR_E2E_SESSION.md](analysis/2026-09_SIMULATOR_E2E_SESSION.md) | Simulator end-to-end runs of the 8-heading implementation: results, fixes they prompted, how the rotation logs were read, open items — hand-off note |
 | [2026-09_USB_NOISE_TESTING.md](analysis/2026-09_USB_NOISE_TESTING.md) | Lake-front noise-floor captures (powered / flying / grounded box): +13 dB in flight, box grounding no measurable effect in one A/B, USB common-mode vs antenna path, HS02 isolator + floating 5 V plan, test protocol |
+| [2026-10_DSHOT_VS_PWM_NOISE.md](analysis/2026-10_DSHOT_VS_PWM_NOISE.md) | Same-day DShot vs PWM hover captures: DShot costs ≈3 dB of in-flight floor and brings the 147.705/147.995 MHz humps; altitude is not the cause; vehicle back on 100 Hz PWM |
 
 ## proposals/
 

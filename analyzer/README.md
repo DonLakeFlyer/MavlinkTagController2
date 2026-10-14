@@ -5,7 +5,7 @@ Tools in this folder:
 | Tool | Input | Purpose |
 |------|-------|---------|
 | `signal_analyzer.py` (`run_analyzer.sh`) | live SDR | Characterize an unknown collar: pulse width, PRI, frequency offset |
-| `ipi_analyzer.py` (`run_ipi_analyzer.sh`) | live SDR | Observe rate-switch behaviour: log every inter-pulse gap and classify it as resting / moving / anomalous |
+| `ipi_analyzer.py` (`run_ipi_analyzer.sh`) | live SDR | Observe rate-switch behaviour: log every inter-pulse gap and classify it as rate A / rate B / anomalous |
 | `flight_checks.py` | recorded logs | Run the [2026-04_FLIGHT_DATA_ANALYSIS.md](../docs/analysis/2026-04_FLIGHT_DATA_ANALYSIS.md) checks against flight logs (reads **both** the current and the legacy Apr-2026 log layouts) |
 | `post_flight_analysis.py` | one session directory | Markdown report per session: decimator/USB continuity, per-detector and per-heading detections, lock candidates, bearing fit, spectrograms. Run automatically by the controller at session stop |
 | `iq_replay.py` | raw IQ capture | Offline detector replay + fixed-offset amplitude (Check 6) |
@@ -100,13 +100,13 @@ transition that the `--tip-secondary` / switch-time logic in
 
 Unlike `signal_analyzer.py` (fixed 10 s windows, aggregate statistics) it
 keeps a rolling buffer and prints **each individual inter-pulse interval as
-it occurs**, labelled `A` (resting), `B` (moving), or `ANOM` (matches
+it occurs**, labelled `A` (`--tip-a`), `B` (`--tip-b`), or `ANOM` (matches
 neither within `--tolerance`). No pulse is lost at a window boundary, so
 transition intervals are seen exactly once. It does not measure pulse width
 or frequency beyond locating the signal.
 
 ```bash
-# Collar labelled 147.970 MHz, resting 2.0 s, moving 1.5 s, 19 ms pulses
+# Lotek collar at 147.970 MHz: 2.0 s resting (here rate A), 1.5 s moving (rate B), 19 ms pulses
 ./analyzer/run_ipi_analyzer.sh --expected-freq 147.970 --tip-a 2.0 --tip-b 1.5 --tp 0.019
 ```
 
