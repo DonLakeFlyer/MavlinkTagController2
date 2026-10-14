@@ -521,6 +521,38 @@ class TestPersistentRotationSession:
         assert any('| 090° |' in r and '| 1 | 1 | 20.0 |' in r for r in rows)
         assert any('045° (revisit, slice 9)' in r and '| 1 | 1 | 14.0 |' in r for r in rows)
 
+    def test_candidate_verdict_replaces_acquisition_hit(self, tmp_path):
+        # Heading 000's acquisition hit was at another frequency; when the
+        # lock comes on heading 090 the candidate's verdict for 000 is "not
+        # found" and must replace the hit, as it does in the controller.
+        startup = _detector_entries(3, 0, 0.0)[0]
+        (tmp_path / 'heading-000').mkdir()
+        _jsonl(tmp_path / 'heading-000' / 'detector_3.jsonl', [
+            startup,
+            {'type': 'detection', 'cycle': 1, 'freq_hz': 900.0, 'snr_db': 9.0,
+             'score_ratio': 1.4, 'noise_psd': 1e-6, 'proc_ms': 50.0,
+             'confidence': '', 'hyp_label': 'A', 'detection_status': 1}])
+        (tmp_path / 'heading-090').mkdir()
+        _jsonl(tmp_path / 'heading-090' / 'detector_3.jsonl', [
+            startup,
+            {'type': 'no_detection', 'cycle': 1, 'proc_ms': 50.0, 'noise_psd': 1e-6,
+             'heading_deg': 0.0, 'slice_id': 1, 'reported_in_cycle': 2,
+             'candidate_id': 0, 'locked': True},
+            {'type': 'detection', 'cycle': 2, 'freq_hz': 0.0, 'snr_db': 25.0,
+             'score_ratio': 8.0, 'noise_psd': 1e-6, 'proc_ms': 50.0,
+             'confidence': 'LOCKED', 'hyp_label': 'A', 'detection_status': 2,
+             'heading_deg': 90.0, 'slice_id': 2, 'reported_in_cycle': 2},
+            {'type': 'session_end', 'cycles': 2, 'detections': 1, 'elapsed_s': 20.0}])
+        (tmp_path / 'session.json').write_text('{"detection_mode": "python"}')
+        (tmp_path / 'bearing_result.log').write_text(
+            'tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,'
+            'latitude,longitude\n3,90.0,0.5,1,25.0,38.1,-122.2\n')
+        md = generate_report(str(tmp_path))
+        rows = {line.split('|')[1].strip(): line for line in md.splitlines()
+                if line.startswith('| ') and '° |' in line}
+        assert '| 1 | 0 |' in rows['000°'], rows['000°']
+        assert '| 1 | 1 | 25.0 |' in rows['090°']
+
     def test_noise_vs_median_is_per_tag(self, tmp_path):
         # Two tags on flat noise at different floors: each heading must read
         # 0 dB against its own tag's median, not a swing against the pool.

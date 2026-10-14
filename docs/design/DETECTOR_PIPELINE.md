@@ -36,7 +36,7 @@ Timestamp continuity between datagrams is checked against one threshold,
 
 | Gap | Action | Why |
 | --- | --- | --- |
-| < 2·tp | **Zero-fill** the missing samples; segment flagged `had_gap` / `[ZEROFILLED]`; the affected STFT windows are recorded as `gap_windows` and skipped by the PRI fit | A 15 ms hole in a 40 s segment costs ~0.006 dB; discarding the segment would cost the detection |
+| < 2·tp | **Zero-fill** the missing samples; segment flagged `had_gap` / `[ZEROFILLED]`; the affected STFT windows are recorded as `gap_windows` and skipped by the per-heading measurement | A 15 ms hole in a 40 s segment costs ~0.006 dB; discarding the segment would cost the detection |
 | ≥ 2·tp | **Barrier**: the hole is not filled, the segment cursor moves to the first post-gap sample, pre-gap samples stay as history | A missing pulse corrupts fold timing |
 
 There is no "accept as-is" category. Both kinds are logged (`GAP_EVENT`
@@ -122,10 +122,17 @@ remain in the permuted data, the first pass is conservative — badly so for a
 strong tag at small K, which can inflate the null enough that it clears no bin.
 Refinement candidates are therefore the bins that clear the first pass **plus
 the strongest searched bin**. Each candidate must look like a pulse train
-(`max_fold_fraction ≤ DOMINANT_FOLD_THRESHOLD`, at least half its folds above
-`NULL_TRAIN_FOLD_SNR` = 3 × the bin's noise); those that do have their
+(`is_pulse_train`: at least half its folds, and at least two, above
+`NULL_TRAIN_FOLD_SNR` = 3 ×
+the bin's noise; one fold dominating the sum does not disqualify it — on
+2026-10-13 a 60 dB train with one much stronger pulse failed the old
+no-dominant-fold condition, stayed in its own null and went unsighted at a
+threshold five orders of magnitude too high). Those that pass have their
 windows — extended across the whole segment at the winning hypothesis's edge
-spacings — redrawn from the rest of the slice (`resample_windows`) and the
+spacings, plus every window of that bin more than `NULL_TRAIN_OUTLIER_SNR` =
+10 × its noise and 10 × its column's median (the same train off the fold's
+grid after a rate switch restarted it; the column test leaves broadband
+impulses in) — redrawn from the rest of the slice (`resample_windows`) and the
 null is derived again. Detections and their `score_ratio` are then judged
 against this refined threshold. On pure noise the strongest bin passes the
 train gate often (≈ 15 % of slices at K = 20, ≈ 80 % at K = 5), but redrawing

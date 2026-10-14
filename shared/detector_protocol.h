@@ -26,8 +26,8 @@ enum class ComputeStage : uint16_t {
     Spectrogram = 1,
     Search = 2,      // fold search
     Null = 3,        // permutation null; done/total = permutations
-    Refit = 4,       // PRI re-fit; done/total = lock candidates
-    Measure = 5,     // per-slice measurement; done/total = measurements
+    Refit = 4,       // no longer sent (PRI re-fit removed); value reserved
+    Measure = 5,     // per-(slice, candidate) result incl. its re-search; done/total = pending results
 };
 
 enum class ValidationResult {

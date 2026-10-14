@@ -2,7 +2,7 @@
 
 Problems found in field data and the changes suggested for them. Living
 document: items are added as they are found and removed when fixed (the fix
-then lands in `design/`). Nothing here has been implemented yet.
+then lands in `design/`). Items 1–7 were fixed in 2026-10 and removed.
 
 Sources, unless stated otherwise: 60-acres flight, 2026-10-13, ~122 m AGL.
 
@@ -22,37 +22,17 @@ Tag 2: 147.970 MHz, 19 ms pulses, dual rate 1.5 s / 2.0 s, K = 20, 8 headings.
 
 ## Suggested changes
 
-Not implemented. Numbers in brackets are the issues below that each change
-addresses.
-
-### Detector / bearing
-
-| # | Change | Addresses |
-| --- | --- | --- |
-| S1 | **Remove projection and all re-processing of earlier headings.** Each heading's result is final when its dwell ends. If the fold search sighted the tag, measure it at that dwell's own phase and rate. If not, report a non-detection, which the bearing fit already handles as a censored slice. This removes the re-anchor, the measurement of earlier headings when a candidate is admitted after lock, and the PRI refit re-measure. | 1, 2, 5 |
-| S2 | **Frequency-only re-search** (optional, after S1). Once a tag's frequency is known, search each dwell, including earlier buffered ones when the frequency is first found later, at that bin only, with its own threshold. Gives ≈1 dB more per heading, i.e. more headings for the bearing fit near range limits. First measure the real threshold gain (`permutation_null_threshold` with a one-bin `frequency_mask`) and the upward max-search bias on weak headings. | 2 |
-| S3 | **Candidate identity by frequency.** For a configured dual-rate tag: frequency within tolerance and PRI ∈ {tip, tip_secondary}. No phase, no single PRI. | 3 |
-| S4 | **Fold sideband candidates into their carrier.** A candidate with the same pulse timing as a much stronger candidate in the same dwell, at another frequency, is not a separate emitter. Exclude it from candidate slots and bearing selection. | 4 |
-| S5 | **Fix the null-refinement train test** so a strong train is always removed from the first-pass null. A 60 dB train must never go unsighted. Find the cause first (item 6). | 6 |
-
-When S1/S3 are built, update `design/COLLECTION_FLOW.md` (candidate bank,
-locked cycles, re-anchor) and `design/RATE_SWITCH_DETECTOR.md`. The
-fixed-offset estimator rationale in
-`analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md` stays as dated analysis,
-with a pointer to this decision.
-
-### Simulator / tests
-
-| # | Change | Addresses |
-| --- | --- | --- |
-| S6 | Simulator option to switch rate at a chosen point in a rotation, ideally a short A→B→A burst. | 7 |
-| S7 | Detector test with a rate switch between and within dwells. It must fail on current code: earlier headings lose power or wrong values are reported. | 1, 2, 7 |
+Open suggestions. S1–S8 were implemented 2026-10 (per-heading results with
+no cross-heading projection, frequency-only re-search, candidate identity by
+frequency, sideband folding, the null-refinement train test, the simulator
+rate-switch option and its tests, and TagTracker's spectrogram setting
+defaulting on; see `design/COLLECTION_FLOW.md`) and removed. Numbers in
+brackets are the issues below that each remaining change addresses.
 
 ### Field data collection
 
 | # | Change | Addresses |
 | --- | --- | --- |
-| S8 | Enable `dump_spectrogram` on every test flight (≈30 MB per 8-heading rotation; check `dump_ms` against the real-time margin). Lets every item above be replayed offline on real data. **The TagTracker (GCS) setting that sends `dump_spectrogram` in the start command should default to on.** It was off for both 10-13 rotations, so those dwells cannot be replayed. | all |
 | S9 | Archive rotation log folders with the raw captures in `/Volumes/Media/PDC Testing/` after every outing (done for 10-13). | — |
 | S13 | Put vehicle (GPS) time on detector and controller log lines, or at least log the RPi-clock-to-vehicle-time offset at session start and on every change. | 11 |
 
@@ -63,261 +43,6 @@ with a pointer to this decision.
 | S10 | PWM vs DShot A/B: same site and day, low hover (≈3 m) **and** 122 m in each mode, ESCs recalibrated after switching, same capture settings, ULog hover power and per-motor output. | 8 |
 | S11 | Discovery on the desktop: 50 Ω terminator at 147.980 MHz, then antenna at 147.900 MHz. | 9 |
 | S12 | Office capture with only the GR01 power lead unplugged; if the bumps vanish, go beyond the existing 2-turn clamp-on (stacked cores, antenna-lead ferrites, filtered supply). | 10 |
-
----
-
-## Detector / bearing
-
-### 1. Re-anchor overwrites correct measurements on earlier headings
-
-**Seen live:** heading 0 showed a strong detection on the tracker display,
-then dropped to nothing partway through the rotation.
-
-**What happened** (rotation 1, candidate 0):
-
-| Cycle (dwell) | Event | Heading 0 value reported |
-| --- | --- | --- |
-| 1 (000°) | Locked at 2.000 s PRI | 68.5 dB |
-| 2 (045°) | Collar switched 2.0 → 1.5 → 2.0 s inside this dwell (`B_to_A_c9` hypothesis won; candidate 3 admitted at 1.5 s) | 68.5 dB |
-| 3 (090°) | `reanchored`: anchor moved 86.503 s = 43.25 PRIs, i.e. the train restarted ≈0.5 s out of phase (tolerance 19.3 ms) | **16.0 dB (noise)** |
-| 6, 8 | PRI refit, re-measure | 15.6 dB |
-
-Heading 45 was also reduced (61.0 → 55.7 dB). The controller upserts per
-slice, so the latest (wrong) value replaced the real one.
-
-**Mechanism.** In `admit_lock_candidate` (`detector/pulse_detector.py`),
-once the bank is locked, a sighting with the same frequency and PRI as a
-banked candidate but a phase outside tolerance is `reanchored`: the
-candidate's anchor is replaced, and the caller clears `measured` for that
-candidate on every buffered slice, so all earlier headings are re-measured at
-the new timing. `fit_lock_timing` then refits PRI across all buffered slices,
-with the same single-train assumption.
-
-**Why it was added.** `design/COLLECTION_FLOW.md`: on the 2026-09-12
-simulator `moderate` run, a two-dwell PRI fit was ~90 ppm off and the same tag
-was admitted as a duplicate candidate. That was a detector *estimate* error.
-The same commit (`6c28399`) also widened the phase tolerance by
-`pri_ppm_uncertainty × |Δt|`, which covers that case on its own.
-
-**Why it is wrong in the field.** Collar crystal drift over a rotation is
-~9 ms at the fitted +25 ppm (~17 ms at 50 ppm), under the 19.3 ms tolerance.
-So the realistic trigger for a large phase miss is a rate switch, which
-restarts the train. Every heading before the switch was measured at timing
-that was correct for it; re-measuring them at the new timing can only turn
-real readings into noise.
-
-**Bearing impact (this session).** The reported 181.0° (confidence 0.90;
-truth 180.6°) used heading 0 = noise. **The collar was being handled around
-13:37 local** (confirmed by Don), during the 045° dwell, which is what
-triggered the rate switch. So the live 68.5 dB at heading 0 (6 dB above the
-180° front) was probably handling too, not a clean measurement. The bearing
-came out right because the bug overwrote the disturbed heading with noise.
-That is not evidence the system copes with a rate switch: on an undisturbed
-collar the same bug would wipe a real reading.
-
-**Suggested change.** Superseded by S1 (remove projection entirely). The
-earlier, narrower suggestion was to drop only the backward re-measure and keep
-same-bin identity and a forward timing update; once projection goes, there is
-no timing to update, and identity is covered by S3.
-
-### 2. Projecting lock timing onto other headings assumes the collar never switches rate
-
-**The assumption.** Locked measurement (`measure_at_lock_psd`) projects the
-candidate's anchor and PRI ($t_n = \text{anchor} + n \cdot \text{PRI}$) into
-every buffered heading and sums power at those windows. This requires the
-collar to have stayed on one rate, with an unbroken train, from the last
-confirmed sighting (≥ one dwell + turn ≈ 45 s earlier) through the entire
-40 s dwell being measured.
-
-A dual-rate collar on a moving animal can switch any number of times, inside a
-dwell or unseen between dwells. The Lotek collar switches to the moving rate
-as soon as the animal moves and falls back within a few seconds of it stopping.
-
-**Why projection exists.**
-1. To measure weak (back-lobe / null) headings that the fold search cannot
-   find.
-2. To avoid the upward bias of max-search on weak headings (see
-   `analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md`).
-
-The fold search fails on a weak heading not because it looks in the wrong
-place but because the true cell's score is below the permutation-null
-threshold, which must exceed the largest score noise produces anywhere among
-~10⁶ (frequency × phase × hypothesis) combinations. Projection reads that
-same true cell and reports it with no threshold. Its whole advantage is
-knowing which cell is the true one, and that knowledge exists only if the
-timing carried over from another heading is still valid.
-
-**Failure modes:**
-
-| What the collar did | Projected reading |
-| --- | --- |
-| Same rate, train unbroken | Correct |
-| Switched before the dwell (during the turn) | Every window misses → noise |
-| Switched partway through the dwell | Only pre-switch pulses hit → too low |
-| On the other rate for the whole dwell | Windows rarely align → mostly noise |
-
-Every failure reads *too low*. At a weak heading, "tag weak here" and "timing
-no longer valid" give the same near-noise number; nothing can tell them
-apart, and the bearing fit treats it as a real null.
-
-**Where projection adds anything at all.** On a heading the search sights,
-nothing: that heading is measured at its own phase. In this session the
-carrier was sighted on 7 of 8 headings in both rotations. The two exceptions
-were rotation 1, 045° (rate switch inside the dwell) and rotation 2, 315° (a
-bug, item 6). So projection only matters on headings genuinely below the
-search threshold, which is exactly where its timing cannot be verified.
-
-`BearingCalculator` already has an assumption-free way to use a heading where
-the tag was not found: a *censored* slice, meaning the model must predict
-power below a fraction of the weakest detection. Projection's only gain over
-censoring is a number instead of an upper bound, and that number is valid only
-if the collar did not switch rate.
-
-**The fit does not distinguish projected from sighted values.** Every
-locked measurement is reported as a detection. `BearingCalculator` weights a
-slice only by its noise level (`sliceWeights`: (median noise / slice noise)²).
-`sighted` is only counted, not used as a quality input. So a sub-threshold
-projected value whose timing assumption may be false enters the fit with the
-same weight as a 70 dB sighted value at the same noise level. The noise
-weight covers random error only, not the systematic error of measuring at the
-wrong timing.
-
-**Conclusion.** As implemented, projection has no trustworthy value for a
-dual-rate collar and can inject wrong data into the bearing fit. The only
-case that could be made verifiable is a weak heading *bracketed* by sighted
-headings that confirm the same unbroken timing on both sides. Even then a
-moving-rate burst inside the gap can slip through: a 2.0 → 1.5 → 2.0 s burst
-of a multiple of 4 pulses (6 s, 12 s, …) shifts phase by a whole 2.0 s PRI and
-leaves the timing looking unchanged.
-
-**Consequence for re-processing earlier slices.** Every current reason to go
-back to a buffered slice is a projection: a candidate admitted after lock
-being measured on all earlier headings, a PRI refit, and a re-anchor. Without
-projection, each heading's result is final when its own dwell ends: sighted at
-its own phase, or censored. The only remaining reason to revisit buffered
-data would be the frequency-only re-search (above): when a frequency is first
-found on a later heading, earlier dwells could be searched again at that one
-bin with a somewhat lower threshold (≈1 dB, see below). That uses only each dwell's own data
-and carries no phase. Dropping projection also removes the per-heading
-processing growth of item 5.
-
-| | Fold search | Projection |
-| --- | --- | --- |
-| Rate assumption within the dwell | One rate, or one switch (hypotheses) | One rate, no switch hypotheses |
-| Phase | Searched freely in this dwell's data | Fixed, carried from another heading |
-| Needs anything outside the dwell | No | No switch since the last sighting |
-| On failure | Score drops → no detection | Wrong value reported as valid |
-
-**Suggested direction.** The only thing that reliably carries across headings
-is the **frequency** (a rate switch changes timing, not the carrier). Keep
-the known bin; on each dwell re-search phase and rate hypotheses at that bin
-only:
-- ≈200 phases × 38 hypotheses ≈ 8,000 combinations vs ≈10⁶ for the full
-  search. The threshold must exceed the largest noise score among the cells
-  searched, so fewer cells means a lower threshold at the same `pf`, but only
-  slowly (the noise maximum grows roughly with log M). Illustrative Gamma(K=20)
-  score model at `pf` = 0.05: threshold 53.6 → 45.8 (noise mean 20), i.e. the
-  signal needed above noise drops 33.6 → 25.8, **≈1.1 dB**. A modest gain,
-  not a large one. The real figure can be measured with
-  `permutation_null_threshold` and a one-bin `frequency_mask`.
-- **Why it matters (Don, 10-13: "super important"):** it does not extend
-  first-detection range, but it raises the number of headings that reach the
-  threshold for a tag already detected, i.e. real data points for the bearing
-  fit. A lone detection scores confidence 0. In rotation 1 the ±45°
-  neighbours of the front lobe were ≈3.5 dB down, so a 3-heading bearing
-  (front + both neighbours) needs ≈3.5 dB more than first detection: with
-  $1/r^4$ propagation that is ≈0.82 × detection range (≈4.9 km if detection
-  is ≈6 km). +1.1 dB moves that to ≈5.2 km.
-- No cross-heading phase assumption.
-- Cost: some upward max-search bias on weak headings, to be quantified.
-
-Alternatives considered:
-- Drop projection: measure sighted headings at their own phase and send
-  unsighted headings to the bearing fit as censored (non-detections).
-- Measure sighted headings at their own phase and treat projected-only weak
-  headings as *no information* rather than near-zero power.
-- Keep projection but flag the result whenever a rate switch was seen in the
-  rotation.
-
-### 3. The same tag at its other rate becomes a separate candidate
-
-Candidate identity (`locks_agree`, and the `reanchored` branch) requires the
-same PRI. In rotation 1, candidate 3 (157.8 Hz, PRI 1.5 s) is the same tag, in
-the same frequency bin, as candidate 0 (157.8 Hz, PRI 2.0 s), but was admitted
-separately because it was sighted at the other configured rate.
-
-**Suggested change.** For a configured dual-rate tag, identity = frequency
-within tolerance and PRI ∈ {tip, tip_secondary}. Phase plays no part in
-identity.
-
-### 4. Sideband components become lock candidates; one was selected
-
-A strong collar (60–75 dB) shows components at ≈ ±975 Hz (and +1525 Hz in
-rotation 2), 30–35 dB below the carrier, with the same anchor and PRI. They
-took 3 of the 4 `MAX_LOCK_CANDIDATES` slots in both rotations.
-
-| Rotation | Candidate | Offset | Bearing | Confidence | Selected |
-| --- | --- | --- | --- | --- | --- |
-| 2 | 0 (carrier) | +184 Hz | 225.0° | 0.000 | |
-| 2 | 1 (sideband) | +1157 Hz | 207.5° | 0.591 | **yes** |
-| 2 | 2 (sideband) | −815 Hz | 225.0° | 0.000 | |
-| 2 | 3 (sideband) | +1710 Hz | 209.8° | 0.501 | |
-
-In rotation 2 the collar was nearly straight below. The carrier pattern is a
-front/back-symmetric figure-8 (peaks 045°/225° and 000°/180° within 1 dB,
-nulls −12 dB at 135° and −16 dB at 315°) that carries no azimuth information;
-the carrier candidate correctly scored confidence 0. The selector then picked
-a sideband with the same pattern shape and reported 207.5°. It should have
-reported no bearing.
-
-**Suggested change.** Fold candidates that share anchor/PRI with a much
-stronger candidate into it (or exclude them from selection).
-
-### 5. Detector real-time margin shrinks with every heading
-
-`total_ms` minus (`stft_ms` + `fold_ms`) grows ≈1.9 s per heading. Total
-rose from 22.4 s to 36.2 s of the 40.1 s segment over 8 headings, a margin of
-1.1× at heading 8, in both rotations. The growth is the re-measurement of
-every buffered slice × every candidate after refits. A 12-heading rotation or
-more candidates would fall behind real time. Fixing 1 and 4 removes most of
-it.
-
-### 6. Rotation 2, heading 315: a 60 dB train went undetected (null threshold not refined)
-
-`cycle_threshold`: `refined = false`, `dropped_windows = 0`, threshold
-3.89e7 (others ≈73), null time 10.2 s (others ≈20.5 s). The first-pass
-null was inflated by the tag's own train, and the refinement that exists to
-remove it did not run (its train test rejected a 60 dB train). With a
-threshold five orders of magnitude too high, the fold search could not sight
-it. This is a bug: a 60 dB train must never be missed.
-
-Projection then measured 59.7 dB there, which **masked the bug**: the bearing
-input looked normal. Without the bug the search would have sighted the train
-and measured it at its own phase; projection added nothing for this heading.
-Cause not yet known. Candidates: a rate switch inside the dwell (half the
-folds miss, failing the "most folds above noise" test), or the
-`DOMINANT_FOLD_THRESHOLD` test.
-
----
-
-## Simulator
-
-### 7. A simulated rotation never contains a rate switch
-
-The dual-rate 4-phase pattern (clean A / A→B / clean B / B→A) in
-`CommandHandler::_simulatorCommand` advances `_simPhase` once per
-`START_DETECTION`. A rotation sends one (`_simPhase` resets to 0 on stop), so
-every simulated rotation is phase 0: a single-rate, continuous train. The
-pattern was designed for the older one-start-per-slice flow.
-
-The default `--sim-pri-ppm 43` is a real, constant offset (bench Lotek
-collar, stable to < 25 ppm over 12.7 min), not drift.
-
-**Suggested change.**
-- A simulator option to switch rate at a chosen point in the rotation,
-  ideally a short A→B→A burst like a collar being bumped.
-- A detector unit test that feeds buffered headings with a phase restart and
-  checks that pre-switch headings keep their measured power.
 
 ---
 

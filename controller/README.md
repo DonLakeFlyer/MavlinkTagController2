@@ -37,6 +37,8 @@ make controller           # or: cmake --preset controller && cmake --build --pre
 | `--sim-tx-bearing-deg <deg>` | `135` | True bearing of the simulated transmitter from the first vehicle pose |
 | `--sim-antenna ra2a\|ra23k` | `ra2a` | Gain pattern applied to the simulated tag (independent of the GCS `antenna_id`) |
 | `--sim-pri-ppm <ppm>` | `43` | Collar crystal offset; `0` = perfect crystal |
+| `--sim-rate-switch <s>` | off | Dual-rate tags: switch to the secondary rate this many seconds after the simulator starts (the rotation's `START_DETECTION`) instead of the per-start 4-phase pattern |
+| `--sim-rate-burst <s>` | off (stay) | With `--sim-rate-switch`: switch back to the primary rate after this long (an A→B→A burst) |
 | `--sim-noise-source-db <dB>` | `0` (`15` for `power-line`) | Directional noise source: its power relative to the base floor at boresight, added to the base noise and seen through the antenna pattern |
 | `--sim-noise-source-bearing-deg <deg>` | `270` | True bearing of the noise source |
 | `--sim-noise-source-impulsive` | off | Make the noise source heavy-tailed (Student-t) |

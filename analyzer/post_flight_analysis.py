@@ -529,6 +529,15 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
             had_gap=e.get('had_gap', False),
             best_candidate=e.get('best_candidate'),
         )
+        # A candidate's result on an earlier heading is written to the
+        # heading file open at the time; re-filed like a detection.
+        heading_deg = e.get('heading_deg')
+        if heading_deg is not None:
+            c.heading = f'{float(heading_deg) % 360.0:03.0f}'
+        if e.get('slice_id') is not None:
+            c.slice_id = int(e['slice_id'])
+        if e.get('reported_in_cycle') is not None:
+            c.reported_in_cycle = int(e['reported_in_cycle'])
         det.cycles.append(c)
 
     det.cycles.sort(key=lambda c: c.cycle)
@@ -596,11 +605,12 @@ def _refile_retro_cycles(detectors: List['DetectorSummary']) -> None:
     (first) summary for that heading. Records without a slice_id fall back
     to heading alone.
 
-    Every PRI refit that moves a pulse re-measures and re-reports all
-    buffered slices, so one cycle can arrive several times. One record is
-    kept per cycle: the detection reported latest (reported_in_cycle; file
-    order when absent), a no-detection only if there is no detection, as in
-    the controller.
+    Only candidate 0 (the first lock) is parsed; alternate candidates'
+    records (candidate_measurement) are not. Candidate 0 gets one final
+    result per slice, but a slice analysed before the first lock also has
+    its acquisition record. One record is kept per cycle: the latest
+    result (reported_in_cycle), detection or not, as in the controller;
+    otherwise a detection over a no-detection, then file order.
     """
     by_key: Dict[Tuple[Optional[int], str], 'DetectorSummary'] = {}
     by_slice: Dict[Tuple[Optional[int], int], 'DetectorSummary'] = {}
@@ -631,12 +641,17 @@ def _refile_retro_cycles(detectors: List['DetectorSummary']) -> None:
         latest: Dict[int, DetectionCycle] = {}
         for c in det.cycles:
             prior = latest.get(c.cycle)
-            if prior is None or (c.detected and not prior.detected):
+            if prior is None:
+                latest[c.cycle] = c
+            elif c.reported_in_cycle is not None or prior.reported_in_cycle is not None:
+                if (prior.reported_in_cycle is None
+                        or (c.reported_in_cycle is not None
+                            and c.reported_in_cycle >= prior.reported_in_cycle)):
+                    latest[c.cycle] = c
+            elif c.detected and not prior.detected:
                 latest[c.cycle] = c
             elif c.detected == prior.detected:
-                if (c.reported_in_cycle is None or prior.reported_in_cycle is None
-                        or c.reported_in_cycle >= prior.reported_in_cycle):
-                    latest[c.cycle] = c
+                latest[c.cycle] = c
         det.cycles = sorted(latest.values(), key=lambda c: c.cycle)
 
 

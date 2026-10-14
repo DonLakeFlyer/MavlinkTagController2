@@ -73,6 +73,7 @@ class TagSignal:
     phase_offset: float = 0.0         # Initial pulse phase offset in seconds
     tip_secondary: float = 0.0        # Secondary TIP for rate-switch (0 = disabled)
     switch_time: float = 0.0          # Absolute time in seconds to switch from tip → tip_secondary (0 = disabled)
+    switch_back_time: float = 0.0     # Absolute time to switch back to tip (0 = stay at tip_secondary)
 
     def pulse_on(self, t: np.ndarray) -> np.ndarray:
         """Return a boolean mask: True where the pulse is active."""
@@ -83,39 +84,57 @@ class TagSignal:
         return t_mod < self.tp
 
     def _pulse_on_rate_switch(self, t: np.ndarray) -> np.ndarray:
-        """Generate pulse mask with a one-shot rate switch at switch_time.
+        """Generate pulse mask with a rate switch at switch_time.
 
-        Before switch_time pulses repeat at self.tip; after switch_time
-        they repeat at self.tip_secondary.  The first post-switch pulse
-        is placed one tip_secondary interval after the last pre-switch
-        pulse, keeping phase continuous.
+        Before switch_time pulses repeat at self.tip; after it they repeat at
+        self.tip_secondary. With switch_back_time set they return to self.tip
+        there (an A->B->A burst, as when a resting collar is bumped). Each
+        rate's first pulse comes one interval of that rate after the previous
+        rate's last pulse, as a collar continues its train at the new rate.
         """
         mask = np.zeros(len(t), dtype=bool)
         t_switch = self.switch_time
 
-        # --- pre-switch region (rate = tip) ---
-        pre = t < t_switch
-        if np.any(pre):
-            t_mod = (t[pre] - self.phase_offset) % self.tip
-            mask[pre] = t_mod < self.tp
+        # Last pre-switch pulse start: largest multiple of tip before switch_time.
+        # Guard against switch_time <= phase_offset (no pre-switch pulses):
+        # anchor post-switch pulses directly at phase_offset.
+        if t_switch <= self.phase_offset:
+            n_pre_pulses = 0
+        else:
+            n_pre_pulses = _whole_intervals(t_switch - self.phase_offset, self.tip)
+        last_pre_pulse = self.phase_offset + n_pre_pulses * self.tip
+        post_phase = last_pre_pulse + self.tip_secondary
 
-        # --- post-switch region (rate = tip_secondary) ---
-        post = t >= t_switch
-        if np.any(post):
-            # Last pre-switch pulse start: largest multiple of tip before switch_time.
-            # Guard against switch_time <= phase_offset (no pre-switch pulses):
-            # anchor post-switch pulses directly at phase_offset.
-            if t_switch <= self.phase_offset:
-                n_pre_pulses = 0
+        # (from, to, interval, a pulse start) per rate region
+        regions = [(-np.inf, t_switch, self.tip, self.phase_offset)]
+        t_back = self.switch_back_time
+        if t_back and t_back > t_switch:
+            if t_back < post_phase:
+                last_burst_pulse = last_pre_pulse
             else:
-                n_pre_pulses = int((t_switch - self.phase_offset) / self.tip)
-            last_pre_pulse = self.phase_offset + n_pre_pulses * self.tip
-            # First post-switch pulse starts one tip_secondary after the last pre-switch pulse
-            post_phase = last_pre_pulse + self.tip_secondary
-            t_mod = (t[post] - post_phase) % self.tip_secondary
-            mask[post] = t_mod < self.tp
+                n_burst = _whole_intervals(t_back - post_phase, self.tip_secondary)
+                last_burst_pulse = post_phase + n_burst * self.tip_secondary
+                # A rate-B pulse before t_switch was never emitted.
+                if last_burst_pulse < t_switch:
+                    last_burst_pulse = last_pre_pulse
+            regions.append((t_switch, t_back, self.tip_secondary, post_phase))
+            regions.append((t_back, np.inf, self.tip, last_burst_pulse + self.tip))
+        else:
+            regions.append((t_switch, np.inf, self.tip_secondary, post_phase))
+
+        for lo, hi, interval, phase in regions:
+            sel = (t >= lo) & (t < hi)
+            if np.any(sel):
+                t_mod = (t[sel] - phase) % interval
+                mask[sel] = t_mod < self.tp
 
         return mask
+
+
+def _whole_intervals(span, interval):
+    """floor(span / interval), counting a span that is a whole number of
+    intervals up to float rounding as that number (1.333 * 3 / 1.333 < 3)."""
+    return math.floor(span / interval + 1e-9)
 
 
 @dataclass
@@ -605,6 +624,8 @@ def run(cfg: SimConfig) -> None:
             line += f"  rate-switch: tip_secondary={tag.tip_secondary:.3f} s"
             if tag.switch_time > 0:
                 line += f"  switch_time={tag.switch_time:.1f} s"
+                if tag.switch_back_time > tag.switch_time:
+                    line += f"  switch_back_time={tag.switch_back_time:.1f} s"
         print(line, file=sys.stderr)
 
     # Let subscribers connect
@@ -779,6 +800,9 @@ Examples:
                     help="Secondary TIP for rate-switch in seconds (0 = disabled). Repeat for multiple tags.")
     p.add_argument("--switch-time", type=float, action="append", default=None,
                     help="Time in seconds to switch from tip to tip-secondary (0 = disabled). Repeat for multiple tags.")
+    p.add_argument("--switch-back-time", type=float, action="append", default=None,
+                    help="Time in seconds to switch back from tip-secondary to tip, after "
+                         "--switch-time (0 = stay). Repeat for multiple tags.")
 
     # Distance model
     p.add_argument("--distance-m", type=float, default=0.0,
@@ -885,6 +909,7 @@ Examples:
         phases = _pad_list(args.phase_offset, n_tags, 0.0)
         tips_secondary = _pad_list(args.tip_secondary, n_tags, 0.0)
         switch_times = _pad_list(args.switch_time, n_tags, 0.0)
+        switch_back_times = _pad_list(args.switch_back_time, n_tags, 0.0)
 
         cfg.tags = []
         for i in range(n_tags):
@@ -896,6 +921,7 @@ Examples:
                 phase_offset=phases[i],
                 tip_secondary=tips_secondary[i],
                 switch_time=switch_times[i],
+                switch_back_time=switch_back_times[i],
             ))
 
     # Apply distance model to first tag

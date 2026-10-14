@@ -45,7 +45,7 @@ int main(int argc, char** argv)
     double      simulatorSnrDb = 20.0;
     std::optional<double> simulatorTxBearingDegArg;   // explicit --sim-tx-bearing-deg
     // Off the first heading (0) for every level so the lock happens partway
-    // round and earlier headings are always filled in retrospectively.
+    // round and earlier headings are always re-searched at the candidate's frequency.
     double      simulatorTxBearingDeg = 135.0;
     double      simulatorInterfererSnrDb = std::numeric_limits<double>::quiet_NaN();
     CommandHandler::SimulatorNoiseSource simulatorNoiseSource;
@@ -53,6 +53,7 @@ int main(int argc, char** argv)
     std::optional<double> simulatorNoiseSourceBearingDegArg; // explicit --sim-noise-source-bearing-deg
     std::string simulatorAntenna = "ra2a";
     double      simulatorPriPpm = 43.0;      // bench RA-2A collar; 0 = ideal crystal
+    CommandHandler::SimulatorRateSwitch simulatorRateSwitch;
 	std::string simulatorTelemetryEndpoint = "tcp://127.0.0.1:6001";
     bool        debugDetector = false;
     double      detectorImpulseBlankFactor = 0.0;   // 0 = detector default (off)
@@ -75,9 +76,10 @@ int main(int argc, char** argv)
             // detector-side SNR is ~23 dB higher than the number here.
             // Chosen around the K=20 lock ratio of 3.0 (see simulator/README.md):
             //   strong          20 dB (~43 dB at detector)  -> sighted on every heading, confirmed;
-            //                  bench-level, strong enough that sidelobe images fill the bank (#148)
+            //                  bench-level, strong enough to show spectral sidebands, which the
+            //                  detector folds into the carrier (#148)
             //   moderate        -8 dB (~15 dB at detector)  -> sighted on every heading, confirmed,
-            //                  no sidelobe images; long-range realistic level
+            //                  no sidebands; long-range realistic level
             //   marginal       -27 dB (~-4 dB at detector)  -> one sighting, revisit requested
             //                  (-21 dB gave three sightings, ratios 21/8/8, on 2026-09-12)
             //   below-marginal -33 dB (~-10 dB at detector) -> never locks; sub-lock hits at the tag
@@ -87,8 +89,8 @@ int main(int argc, char** argv)
             //   competing      -18 dB tag + flat -18 dB interferer +1 kHz:
             //                  the interferer takes the provisional lock on the first
             //                  heading, the tag is only admitted as an alternate near
-            //                  its bearing, so earlier headings are filled in
-            //                  retrospectively and the finish-time candidate selection
+            //                  its bearing, so earlier headings are re-searched for it
+            //                  and the finish-time candidate selection
             //                  must pick the tag.
             //   power-line     moderate tag (-8 dB) at 135 + a directional Gaussian noise
             //                  source +15 dB at bearing 270, seen through the antenna
@@ -165,6 +167,18 @@ int main(int argc, char** argv)
             simulatorNoiseSourceBearingDegArg = value;
         } else if (strcmp(argv[i], "--sim-noise-source-impulsive") == 0) {
             simulatorNoiseSource.impulsive = true;
+        } else if (strcmp(argv[i], "--sim-rate-switch") == 0 || strcmp(argv[i], "--sim-rate-burst") == 0) {
+            // Dual-rate tags only: switch to the secondary rate this many seconds
+            // after the simulator starts (the rotation's START_DETECTION), and
+            // optionally back after --sim-rate-burst seconds.
+            const bool isBurst = strcmp(argv[i], "--sim-rate-burst") == 0;
+            double value = 0.0;
+            if (i + 1 >= argc || !parseDouble(argv[i + 1], value) || value <= 0.0) {
+                logError() << argv[i] << "requires a number of seconds > 0, got" << (i + 1 < argc ? argv[i + 1] : "<none>");
+                return 2;
+            }
+            ++i;
+            (isBurst ? simulatorRateSwitch.burstSeconds : simulatorRateSwitch.atSeconds) = value;
 		} else if (strcmp(argv[i], "--sim-telemetry-endpoint") == 0) {
 			if (i + 1 < argc) {
 				simulatorTelemetryEndpoint = argv[++i];
@@ -217,6 +231,10 @@ int main(int argc, char** argv)
             logError() << "--sim-noise-source-db must be >= 0, got" << simulatorNoiseSource.db;
             return 2;
         }
+        if (simulatorRateSwitch.burstSeconds > 0.0 && simulatorRateSwitch.atSeconds <= 0.0) {
+            logError() << "--sim-rate-burst requires --sim-rate-switch";
+            return 2;
+        }
         const bool isLevelPreset = simulatorPreset == "strong" || simulatorPreset == "moderate" || simulatorPreset == "marginal"
                                    || simulatorPreset == "below-marginal" || simulatorPreset == "competing"
                                    || simulatorPreset == "silent" || simulatorPreset == "power-line";
@@ -226,7 +244,8 @@ int main(int argc, char** argv)
                       << " interferer snr:" << simulatorInterfererSnrDb << "dB"
                       << " noise source:" << simulatorNoiseSource.db << "dB at" << simulatorNoiseSource.bearingDeg << "deg"
                       << (simulatorNoiseSource.impulsive ? " impulsive" : "")
-                      << " antenna:" << simulatorAntenna << " pri ppm:" << simulatorPriPpm << ")";
+                      << " antenna:" << simulatorAntenna << " pri ppm:" << simulatorPriPpm
+                      << " rate switch at:" << simulatorRateSwitch.atSeconds << "s burst:" << simulatorRateSwitch.burstSeconds << "s)";
         } else {
             logDebug() << "Simulator mode enabled (preset:" << simulatorPreset << ", used only when no tag is configured)";
         }
@@ -251,7 +270,7 @@ int main(int argc, char** argv)
     auto telemetryCache     = new TelemetryCache(mavlink);
     auto commandHandler 	= CommandHandler { mavlink, telemetryCache, simulatorMode, simulatorPreset, debugDetector, simulatorSnrDb,
                                            simulatorTxBearingDeg, simulatorInterfererSnrDb, simulatorAntenna, simulatorPriPpm,
-                                           simulatorNoiseSource, detectorImpulseBlankFactor };
+                                           simulatorNoiseSource, detectorImpulseBlankFactor, simulatorRateSwitch };
     auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), CommandHandler::kPulseUdpPort, &commandHandler };
 
 	globalMavlinkSystem		= mavlink;

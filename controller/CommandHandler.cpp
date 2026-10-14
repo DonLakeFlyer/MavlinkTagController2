@@ -48,7 +48,8 @@ using namespace TunnelProtocol;
 CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode, const std::string& simulatorPreset, bool debugDetector, double simulatorSnrDb,
                                double simulatorTxBearingDeg, double simulatorInterfererSnrDb,
                                const std::string& simulatorAntenna, double simulatorPriPpm,
-                               const SimulatorNoiseSource& simulatorNoiseSource, double detectorImpulseBlankFactor)
+                               const SimulatorNoiseSource& simulatorNoiseSource, double detectorImpulseBlankFactor,
+                               const SimulatorRateSwitch& simulatorRateSwitch)
     : _mavlink          (mavlink)
     , _telemetryCache   (telemetryCache)
     , _progress         ([mavlink](const OperationProgress_t& frame) { OperationProgress_t copy = frame; mavlink->sendTunnelMessage(&copy, sizeof(copy)); },
@@ -65,6 +66,7 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetry
     , _simulatorPriPpm  (simulatorPriPpm)
     , _debugDetector    (debugDetector)
     , _detectorImpulseBlankFactor (detectorImpulseBlankFactor)
+    , _simulatorRateSwitch (simulatorRateSwitch)
 {
     if (isRunningOnRPi()) {
         // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
@@ -906,7 +908,8 @@ void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header
             slice.heading_deg       = headingIt->second;
             slice.detected          = pulseInfo.detection_status != kNoPulseDetectionStatus;
             // Locked measurements carry the fold score of an independent
-            // sighting of this candidate on this slice, 0 if only measured.
+            // sighting of this candidate on this slice, 0 if found only by a
+            // frequency-only re-search of the slice.
             slice.sighted           = pulseInfo.detection_status == kConfirmedDetectionStatus
                                       && pulseInfo.score_ratio > 0.0;
             slice.snr_db            = pulseInfo.snr;
@@ -918,21 +921,19 @@ void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header
             slice.longitude         = pulseInfo.longitude;
             slice.altitude_rel      = pulseInfo.altitude_rel;
             slice.pulse_info        = pulseInfo;
-            const auto existing = std::find_if(
+            auto stored = std::find_if(
                 _rotationSlices.begin(), _rotationSlices.end(),
                 [&slice](const RotationSlice& item) {
                     return item.slice_id == slice.slice_id
                         && item.tag_id == slice.tag_id
                         && item.candidate_id == slice.candidate_id;
                 });
-            if (existing == _rotationSlices.end()) {
-                _rotationSlices.push_back(slice);
-            } else if (slice.detected
-                       && (!existing->detected
-                           || slice.confirmed_status >= existing->confirmed_status)) {
-                // A detection replaces a no-detection; a confirmed (locked)
-                // measurement replaces an acquisition hit. Never the reverse.
-                *existing = slice;
+            if (stored == _rotationSlices.end()) {
+                stored = _rotationSlices.insert(_rotationSlices.end(), slice);
+            } else if (CollectionCoordinator::replacesStoredReport(
+                           stored->pulse_info.detection_status, stored->confirmed_status,
+                           pulseInfo.detection_status, slice.confirmed_status)) {
+                *stored = slice;
             }
 
             if (slice.detected) {
@@ -947,8 +948,17 @@ void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header
                     replay = _updateLiveCandidate(slice.tag_id);
                 }
             } else {
-                logDebug() << "Rotation no-detection stored: tag_id:" << slice.tag_id
+                const bool storedAsNoDetection = !stored->detected;
+                logDebug() << (storedAsNoDetection ? "Rotation no-detection stored:"
+                                                   : "Rotation no-detection ignored, locked result kept:")
+                          << " tag_id:" << slice.tag_id
+                          << " candidate:" << static_cast<unsigned>(slice.candidate_id)
                           << " heading:" << slice.heading_deg;
+                // Lets the GCS clear a value it holds for this heading (e.g.
+                // an acquisition hit, or a previous live candidate's).
+                if (storedAsNoDetection && candidateId == _liveCandidateFor(slice.tag_id)) {
+                    replay.push_back(pulseInfo);
+                }
             }
         }
     }
@@ -972,7 +982,7 @@ BearingCalculator CommandHandler::_bearingCalculatorFor(const std::vector<Rotati
             calculator.addSlice(slice.heading_deg, slice.signal_power, slice.tag_id, slice.snr_db,
                                 slice.candidate_id, slice.sighted, slice.noise_psd);
         } else {
-            calculator.addNoDetection(slice.heading_deg, slice.tag_id, slice.noise_psd);
+            calculator.addNoDetection(slice.heading_deg, slice.tag_id, slice.noise_psd, slice.candidate_id);
         }
     }
     return calculator;
@@ -1013,8 +1023,8 @@ std::vector<TunnelProtocol::PythonPulseInfo_t> CommandHandler::_updateLiveCandid
     _liveCandidate[tagId] = best->candidate_id;
     std::vector<PythonPulseInfo_t> replay;
     for (const auto& slice : _rotationSlices) {
-        if (slice.tag_id == tagId && slice.candidate_id == best->candidate_id && slice.detected
-            && slice.pulse_info.detection_status == kConfirmedDetectionStatus) {
+        if (slice.tag_id == tagId && slice.candidate_id == best->candidate_id
+            && CollectionCoordinator::shownOnGcs(slice.pulse_info.detection_status)) {
             replay.push_back(slice.pulse_info);
         }
     }
@@ -1877,7 +1887,7 @@ std::string CommandHandler::finishCollection(const mavlink_tunnel_t& tunnel)
             unsigned replayed = 0;
             for (const auto& slice : slicesCopy) {
                 if (slice.tag_id == result.tag_id && slice.candidate_id == result.candidate_id
-                    && slice.detected && slice.pulse_info.detection_status == kConfirmedDetectionStatus) {
+                    && CollectionCoordinator::shownOnGcs(slice.pulse_info.detection_status)) {
                     PythonPulseInfo_t replay = slice.pulse_info;
                     _sendFinishFrame(outcome, &replay, sizeof(replay));
                     ++replayed;
@@ -2391,6 +2401,13 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
                                _simulatorNoiseSource.impulsive ? " --noise-source-impulsive" : "");
     }
 
+    if (_simulatorRateSwitch.atSeconds > 0.0
+        && (_simulatorPreset == "silent"
+            || std::none_of(_tagDatabase.begin(), _tagDatabase.end(),
+                            [](const auto& tag) { return tag.intra_pulse2_msecs != 0; }))) {
+        logError() << "--sim-rate-switch ignored: no dual-rate tag configured";
+    }
+
     // Noise only, whatever tags are configured: the "nothing heard" case.
     if (_simulatorPreset == "silent") {
         return formatString("%s -u %s --preset noise-only -P 5555%s",
@@ -2434,46 +2451,58 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
     uint32_t phase = _simPhase;
     _simPhase = (_simPhase + 1) % 4;
 
+    // iq_simulator pairs each repeated per-tag flag with the tags by position,
+    // so every tag passes all of them (0 = off) to keep them aligned.
     std::string tagArgs;
     for (const auto& tagInfo : _tagDatabase) {
         int32_t freqOffsetHz = static_cast<int32_t>(tagInfo.frequency_hz) - static_cast<int32_t>(radioCenterFrequencyHz);
         double tp  = tagInfo.pulse_width_msecs / 1000.0;
-        double tipA = tagInfo.intra_pulse1_msecs / 1000.0;
+        double tip = tagInfo.intra_pulse1_msecs / 1000.0;
+        double tipSecondary   = 0.0;
+        double switchTime     = 0.0;
+        double switchBackTime = 0.0;
 
         if (tagInfo.intra_pulse2_msecs != 0) {
-            double tipB = tagInfo.intra_pulse2_msecs / 1000.0;
+            const double tipA = tip;
+            const double tipB = tagInfo.intra_pulse2_msecs / 1000.0;
             const uint32_t k = tagInfo.k;   // validated in _handleTag
 
-            switch (phase) {
-            case 0: // Clean A
-                tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f",
-                                        freqOffsetHz, _simulatorSnrDb, tp, tipA);
-                break;
-            case 1: { // A → B transition
-                double switchTime = warmupSeconds + (k + k / 2) * tipA;
-                tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f --tip-secondary %f --switch-time %f",
-                                        freqOffsetHz, _simulatorSnrDb, tp, tipA, tipB, switchTime);
-                break;
+            if (_simulatorRateSwitch.atSeconds > 0.0) {
+                // A rotation is one START_DETECTION, so the 4-phase pattern
+                // below never switches inside one; this puts the switch (and
+                // optional switch back) at a chosen time in the rotation.
+                tipSecondary = tipB;
+                switchTime   = _simulatorRateSwitch.atSeconds;
+                if (_simulatorRateSwitch.burstSeconds > 0.0) {
+                    switchBackTime = switchTime + _simulatorRateSwitch.burstSeconds;
+                }
+            } else {
+                switch (phase) {
+                case 0: // Clean A
+                    break;
+                case 1: // A → B transition
+                    tipSecondary = tipB;
+                    switchTime   = warmupSeconds + (k + k / 2) * tipA;
+                    break;
+                case 2: // Clean B
+                    tip = tipB;
+                    break;
+                case 3: // B → A transition
+                    tip          = tipB;
+                    tipSecondary = tipA;
+                    switchTime   = warmupSeconds + (k + k / 2) * tipB;
+                    break;
+                }
             }
-            case 2: // Clean B
-                tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f",
-                                        freqOffsetHz, _simulatorSnrDb, tp, tipB);
-                break;
-            case 3: { // B → A transition
-                double switchTime = warmupSeconds + (k + k / 2) * tipB;
-                tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f --tip-secondary %f --switch-time %f",
-                                        freqOffsetHz, _simulatorSnrDb, tp, tipB, tipA, switchTime);
-                break;
-            }
-            }
-        } else {
-            tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f",
-                                    freqOffsetHz, _simulatorSnrDb, tp, tipA);
         }
+        tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f --phase-offset 0"
+                                " --tip-secondary %f --switch-time %f --switch-back-time %f",
+                                freqOffsetHz, _simulatorSnrDb, tp, tip, tipSecondary, switchTime, switchBackTime);
     }
 
     logDebug() << "_simulatorCommand: simPhase=" << phase
-              << " (" << (phase == 0 ? "clean A" : phase == 1 ? "A->B" : phase == 2 ? "clean B" : "B->A") << ")";
+              << " (" << (phase == 0 ? "clean A" : phase == 1 ? "A->B" : phase == 2 ? "clean B" : "B->A") << ")"
+              << " rate switch at:" << _simulatorRateSwitch.atSeconds << "s burst:" << _simulatorRateSwitch.burstSeconds << "s";
 
     // Only the first simulator tag gets the antenna pattern and path loss.
     // An interferer is therefore heading-independent: exactly the shape of
@@ -2482,7 +2511,8 @@ std::string CommandHandler::_simulatorCommand(uint32_t radioCenterFrequencyHz)
         const auto& tagInfo = _tagDatabase.front();
         int32_t freqOffsetHz = static_cast<int32_t>(tagInfo.frequency_hz) - static_cast<int32_t>(radioCenterFrequencyHz)
                                + kSimulatorInterfererOffsetHz;
-        tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f --phase-offset 0.9",
+        tagArgs += formatString(" --freq-offset-hz %d --snr %f --tp %f --tip %f --phase-offset 0.9"
+                                " --tip-secondary 0 --switch-time 0 --switch-back-time 0",
                                 freqOffsetHz, _simulatorInterfererSnrDb,
                                 tagInfo.pulse_width_msecs / 1000.0, tagInfo.intra_pulse1_msecs / 1000.0);
     }

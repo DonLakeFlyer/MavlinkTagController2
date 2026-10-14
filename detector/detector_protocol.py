@@ -36,7 +36,7 @@ class ComputeStage(IntEnum):
     SPECTROGRAM = 1
     SEARCH = 2
     NULL = 3
-    REFIT = 4
+    REFIT = 4       # no longer sent (PRI re-fit removed); value reserved
     MEASURE = 5
 
 

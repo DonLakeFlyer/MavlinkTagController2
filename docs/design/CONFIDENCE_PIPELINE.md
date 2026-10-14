@@ -15,7 +15,7 @@ The detector uses a layered threshold system. Each layer serves a distinct role:
 | 1 | `false_alarm_prob` (pf) | 0.05 | Sets the noise-floor threshold from a per-dwell permutation null |
 | 2 | `detection_margin` | 1.00 | Optional multiplier on that threshold (< 1 trades false alarms for range) |
 | 3 | `confidence_ratio` | 1.30 | Classifies detections as HIGH or LOW confidence |
-| 3 | `DOMINANT_FOLD_THRESHOLD` | 0.80 | Downgrades to LOW when one fold carries most of the score |
+| 3 | `DOMINANT_FOLD_THRESHOLD` | 0.80 | Downgrades to LOW when one fold carries most of the score and most folds are not clearly above noise |
 
 ## Pipeline flow
 
@@ -43,10 +43,10 @@ The detector uses a layered threshold system. Each layer serves a distinct role:
  NO_DETECTION  SUBTHRESHOLD      │
    (3)         Conf:0 [LOW]      │
                           ┌──────▼──────┐
-                          │ max_fold_   │
-                          │ fraction    │
+                          │ dominant_   │
+                          │ fold        │
                           └──┬──────┬──┘
-                        > 0.8        ≤ 0.8
+                         yes          no
                     SUBTHRESHOLD  SUPERTHRESHOLD
                     Conf:0           Conf:1
                     [DOMINANT_FOLD]
@@ -118,20 +118,22 @@ score ratio:
 score_ratio = best_scores[b] / max(threshold[b], 1e-30)
 ```
 
-This ratio is compared to `confidence_ratio` (default 1.3), and the fold-shape
-metric `max_fold_fraction` to `DOMINANT_FOLD_THRESHOLD` (0.8):
+This ratio is compared to `confidence_ratio` (default 1.3). The fold shape
+gives `fold_info['dominant_fold']`: `max_fold_fraction` above
+`DOMINANT_FOLD_THRESHOLD` (0.8) **and** fewer than half the folds (or fewer
+than two) above 3 × the bin noise (`is_pulse_train`):
 
 ```python
-has_dominant_fold = det.fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
+has_dominant_fold = det.fold_info['dominant_fold']
 is_marginal = det.score_ratio < confidence_ratio or has_dominant_fold
 det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
               else DETECTION_STATUS_SUPERTHRESHOLD)
 ```
 
-| score_ratio | max_fold_fraction | Classification | `detection_status` | `confirmed_status` | Log tag |
+| score_ratio | Fold shape | Classification | `detection_status` | `confirmed_status` | Log tag |
 |-------------|-------------------|----------------|--------------------|--------------------|---------|
-| ≥ 1.3 | ≤ 0.8 | Confident | `SUPERTHRESHOLD` (1) | 1 | *(none)* |
-| ≥ 1.3 | > 0.8 | Single-fold transient | `SUBTHRESHOLD` (0) | 0 | `[DOMINANT_FOLD]` |
+| ≥ 1.3 | not dominant | Confident | `SUPERTHRESHOLD` (1) | 1 | *(none)* |
+| ≥ 1.3 | dominant fold | Single-fold transient | `SUBTHRESHOLD` (0) | 0 | `[DOMINANT_FOLD]` |
 | 1.0 – 1.3 | any | Marginal | `SUBTHRESHOLD` (0) | 0 | `[LOW]` |
 | < 1.0 | — | Below threshold | `NO_DETECTION` (3), carrying `noise_psd` and the best sub-threshold `score_ratio` | 0 | `no detection … best=…` |
 
@@ -139,8 +141,8 @@ The `[LOW]` tag in detector output and `Conf:0` in controller logs both indicate
 a marginal detection — one that only passed because `detection_margin` lowered
 the threshold, and whose score_ratio didn't reach `confidence_ratio`.
 `[DOMINANT_FOLD]` marks a detection that cleared the ratio but whose energy sits
-in one fold. The same `max_fold_fraction` gate also bars a peak from becoming a
-lock candidate.
+in one fold. The same gate also bars a peak from becoming a
+lock candidate, and a frequency-only re-search hit from counting as found.
 
 ### The sensitivity band
 
@@ -178,7 +180,8 @@ max_fold_fraction = max(on_powers) / sum(on_powers)
 |-------------------|---------|--------|
 | ≈ 1/K | Equal power in all folds — consistent pulsed signal | pass |
 | 0.2 – 0.8 | Uneven, normal for a weak signal in noise | pass |
-| > 0.8 | One fold dominates — transient or RFI spike | downgrade to `SUBTHRESHOLD`; ineligible for lock |
+| > 0.8, fewer than half the folds (or fewer than two) > 3 × noise | One fold dominates — transient or RFI spike | `dominant_fold`: downgrade to `SUBTHRESHOLD`; ineligible for lock |
+| > 0.8, at least half the folds (and at least two) > 3 × noise | A train with one much stronger pulse (collar being handled) | pass |
 
 It replaced the earlier `min/max` "uniformity" ratio, which fell to ~0.01 even
 for strong real signals and could not be thresholded. Per-fold SNRs

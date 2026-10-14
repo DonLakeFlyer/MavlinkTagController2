@@ -63,6 +63,33 @@ public:
     /// acquisition/marginal/no-detection reports stay in vehicle logs.
     static bool forwardPulseToGcs(uint8_t detectionStatus) { return detectionStatus == TunnelProtocol::kConfirmedDetectionStatus; }
 
+    /// Whether a rotation report replaces the one stored for the same (slice, tag, candidate).
+    /// A detection replaces a no-detection, and a locked measurement an acquisition hit, never
+    /// the reverse. A slice gets one acquisition report before any lock and one verdict per
+    /// candidate after it, so a no-detection over an acquisition report is the candidate's
+    /// verdict: the hit was elsewhere, or its noise is at the candidate's bin.
+    static bool replacesStoredReport(uint8_t storedStatus, uint8_t storedConfirmed,
+                                     uint8_t incomingStatus, uint8_t incomingConfirmed)
+    {
+        const bool storedDetected   = storedStatus != TunnelProtocol::kNoPulseDetectionStatus;
+        const bool incomingDetected = incomingStatus != TunnelProtocol::kNoPulseDetectionStatus;
+        if (incomingDetected) {
+            if (storedStatus == TunnelProtocol::kConfirmedDetectionStatus) {
+                return incomingStatus == TunnelProtocol::kConfirmedDetectionStatus;
+            }
+            return !storedDetected || incomingConfirmed >= storedConfirmed;
+        }
+        return storedStatus != TunnelProtocol::kConfirmedDetectionStatus;
+    }
+
+    /// Whether a stored rotation report is reflected in the GCS live view: locked measurements
+    /// set a heading's value, no-detections clear it.
+    static bool shownOnGcs(uint8_t storedStatus)
+    {
+        return storedStatus == TunnelProtocol::kConfirmedDetectionStatus
+            || storedStatus == TunnelProtocol::kNoPulseDetectionStatus;
+    }
+
     /// How the last collection ended; distinguishes a FINALIZE retry from a
     /// FINALIZE that follows a CANCEL of the same id (which must not be Duplicate).
     enum class Disposition { None, Finalized, Cancelled };

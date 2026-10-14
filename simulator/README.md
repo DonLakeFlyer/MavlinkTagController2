@@ -77,6 +77,7 @@ why, is in
 Any other word after `--simulator` is treated as a preset name. `strong` is
 both a level (20 dB) and a preset (25 dB); which applies depends on whether a
 tag is configured. `--sim-tx-bearing-deg`, `--sim-antenna`, `--sim-pri-ppm`,
+`--sim-rate-switch`, `--sim-rate-burst`,
 `--sim-noise-source-db`, `--sim-noise-source-bearing-deg` and
 `--sim-noise-source-impulsive` modify the configured scenario under any level
 (see [controller/README.md](../controller/README.md#usage)). Lock mechanics
@@ -190,7 +191,9 @@ In this mode:
 - `pulse_detector.py` processes run unchanged
 - Tag parameters from the MAVLink tag database are mapped to simulator
   `--freq-offset-hz`, `--tp`, `--tip` (and `--tip-secondary`) arguments; the
-  level sets `--snr`
+  level sets `--snr`. With `--sim-rate-switch` / `--sim-rate-burst` a dual-rate
+  tag also gets `--switch-time` / `--switch-back-time`. Every tag passes every
+  per-tag flag (0 = off), since repeated flags pair with tags by position
 - If no tags are configured when detection starts, the selected preset is used
 - The Python venv at `$REPO/.venv` is preferred; falls back to system `python3`
 

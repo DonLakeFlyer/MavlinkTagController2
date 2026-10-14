@@ -9,8 +9,9 @@ A VHF collar transmits pulses at one of two known rates (e.g. 1.5s resting, 2.0s
 1. **Two rates are known exactly.** They come from the collar spec and are configured at startup.
 2. **Crystal oscillator timing.** Pulse timing has ppm-level drift — negligible even at K=20. A fold template built from the configured rates will land exactly on each pulse.
 3. **Clean transitions.** Every inter-pulse gap is exactly rate A or rate B — there are no intermediate or anomalous gaps during a switch. The collar transitions directly from one rate to the other.
-4. **At most one switch per segment.** The collar changes rate infrequently. Within K pulses, there is at most one transition point.
+4. **At most one switch per segment.** The collar changes rate infrequently. Within K pulses, there is at most one transition point. A short burst (A→B→A) inside one dwell breaks this; the best single-switch hypothesis then catches only part of the train.
 5. **The segment must be long enough for K folds at the slowest rate.** This ensures all hypotheses fit within the available data.
+6. **Nothing carries across segments but the frequency.** Every switch restarts the train, and the collar can switch unseen between dwells (the Lotek collar goes to the moving rate as soon as the animal moves). During a rotation a candidate is identified by frequency alone, at either configured rate, and each heading is measured from its own dwell only (see [COLLECTION_FLOW.md](COLLECTION_FLOW.md#lock-candidates)).
 
 ## Hypothesis Enumeration
 
@@ -36,7 +37,7 @@ The best score across all hypotheses and start positions is compared against a t
 
 ## Fold Quality Diagnostic
 
-After thresholding, a max-fold-fraction diagnostic measures whether pulse power is concentrated in a single fold (transient/spike). `max_fold_fraction = max(fold_powers) / sum(fold_powers)`. Values > 0.8 indicate a single transient dominates the score. This is used to downgrade confidence, not to discard detections (matching uavrt_detection's `selectpeakindex` heuristic).
+After thresholding, a max-fold-fraction diagnostic measures whether pulse power is concentrated in a single fold (transient/spike). `max_fold_fraction = max(fold_powers) / sum(fold_powers)`. Values > 0.8 with fewer than half the folds (or fewer than two) above 3 × the bin noise indicate a single transient dominates the score (`fold_info['dominant_fold']`). This is used to downgrade confidence, not to discard detections (matching uavrt_detection's `selectpeakindex` heuristic). A train with one much stronger pulse is still a train.
 
 For a correctly matched hypothesis, all K folds land on real pulses, so power is spread across folds (low fraction). For a transient, one fold dominates (high fraction).
 
@@ -136,8 +137,8 @@ To support Python rate-switch detection, Tag Tracker must:
 The IQ simulator (`simulator/iq_simulator.py`) supports rate switching:
 
 - **Preset**: `--preset rate-switch` (tip=2.0s → tip_secondary=1.333s, switch at 34s).
-- **CLI args**: `--tip-secondary <seconds> --switch-time <seconds>` per tag.
-- **Controller plumbing**: When `intra_pulse2_msecs != 0`, `CommandHandler::_simulatorCommand()` passes `--tip-secondary` and computes `--switch-time` including simulator warmup: `switch_time = warmupSeconds + (K + K/2) * tip` (integer division for `K/2`). This places the rate change halfway through the first post-warmup K-grouping.
+- **CLI args**: `--tip-secondary <seconds> --switch-time <seconds>` per tag, and `--switch-back-time <seconds>` to return to `--tip` there (an A→B→A burst; each new rate continues one interval after the previous rate's last pulse).
+- **Controller plumbing**: When `intra_pulse2_msecs != 0`, `CommandHandler::_simulatorCommand()` passes `--tip-secondary`. By default it computes `--switch-time` including simulator warmup: `switch_time = warmupSeconds + (K + K/2) * tip` (integer division for `K/2`), cycling clean A / A→B / clean B / B→A over successive `START_DETECTION`s. A rotation is one `START_DETECTION`, so it always gets the first phase (no switch); `--sim-rate-switch <s>` instead switches that many seconds after the simulator starts, and `--sim-rate-burst <s>` switches back after that long. Every tag passes every per-tag flag (0 = off) because `iq_simulator.py` pairs repeated flags with tags by position; `--sim-rate-switch` with no dual-rate tag configured is logged as ignored.
 
 ## Integration Status
 
@@ -159,3 +160,5 @@ Complete:
 - Segment length computation for single- and dual-rate.
 - End-to-end `fold_detect` at rate A and across an A→B switch; single-rate regression against the legacy fold path.
 - `hyp_label_to_rate_state` mapping and `last_rate` → predict-TIP selection.
+
+`detector/tests/test_rotation_candidates.py`: rate switches between and inside dwells across a rotation; every heading reports its own power once, as one candidate.

@@ -78,7 +78,7 @@ Without hardware use the simulator: `simulator/run_sim_pipeline.sh` or
 
 | File | Role |
 | --- | --- |
-| `pulse_detector.py` | STFT·W, K-fold, permutation-null threshold, impulse blanking, peak selection, lock-candidate bank, per-slice measurement, PRI refit, reporting |
+| `pulse_detector.py` | STFT·W, K-fold, permutation-null threshold, impulse blanking, peak selection, sideband folding, lock-candidate bank, per-heading measurement and frequency-only re-search, reporting |
 | `iq_stream.py` | Continuous sample timeline, segment cutting, gap zero-fill / barrier |
 | `udp_receiver.py` | Receive thread and bounded ring |
 | `collection_control.py` | `ARM` handling and slice bookkeeping |

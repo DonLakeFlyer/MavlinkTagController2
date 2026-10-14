@@ -40,11 +40,20 @@ public:
         SimulatorNoiseSource() {}      // GCC needs this to use the struct as a default argument below
     };
 
+    // Simulated dual-rate collar switching rate at a chosen point of the
+    // rotation (--sim-rate-switch / --sim-rate-burst).
+    struct SimulatorRateSwitch {
+        double atSeconds = 0.0;        // seconds after the simulator starts; 0 = use the 4-phase per-start pattern
+        double burstSeconds = 0.0;     // time at the secondary rate before switching back; 0 = stay
+        SimulatorRateSwitch() {}
+    };
+
     explicit CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode = false, const std::string& simulatorPreset = "strong", bool debugDetector = false, double simulatorSnrDb = 20.0,
                             double simulatorTxBearingDeg = 0.0, double simulatorInterfererSnrDb = std::numeric_limits<double>::quiet_NaN(),
                             const std::string& simulatorAntenna = "ra2a", double simulatorPriPpm = 43.0,
                             const SimulatorNoiseSource& simulatorNoiseSource = SimulatorNoiseSource{},
-                            double detectorImpulseBlankFactor = 0.0);
+                            double detectorImpulseBlankFactor = 0.0,
+                            const SimulatorRateSwitch& simulatorRateSwitch = SimulatorRateSwitch{});
     ~CommandHandler();
 
     static constexpr int kPulseUdpPort = 50000; // UDP port for pulse/heartbeat reports from detectors
@@ -175,6 +184,7 @@ private:
     double                          _simulatorPriPpm        = 43.0;     // iq_simulator --pri-ppm collar crystal offset
     bool                            _debugDetector          = false;
     double                          _detectorImpulseBlankFactor = 0.0;  // pulse_detector.py --impulse-blank-factor; 0 = omit (off)
+    SimulatorRateSwitch             _simulatorRateSwitch;
     uint32_t                        _simPhase               = 0;        // 4-phase cycle: 0=A, 1=A→B, 2=B, 3=B→A
 
     // Rotation detection state — accessed from both command and UDP threads

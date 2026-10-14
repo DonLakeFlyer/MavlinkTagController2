@@ -82,17 +82,18 @@ stateDiagram-v2
     Folding --> Thresholding : full-K fold search over the acquisition band
     Thresholding --> Reporting : permutation null of this dwell's own windows gives the threshold at pf, re-derived without a detected train's windows. Up to 4 frequency-separated peaks
     state Reporting {
-        [*] --> Acq : pulse_lock is None
-        [*] --> Locked : pulse_lock set
+        [*] --> Acq : bank empty
+        [*] --> Locked : bank holds a candidate
         Acq --> [*] : send PULSE (status 0/1) or NO_DETECTION (3), first qualifying peak becomes candidate 0
-        Locked --> [*] : bank new candidates, PRI refit, send CONFIRMED (2) for every unmeasured (slice, candidate) pair
+        Locked --> [*] : fold sidebands, bank new candidates, then one final result per pending (slice, candidate) pair: CONFIRMED (2) or NO_DETECTION (3)
     }
     Reporting --> [*] : CYCLE_COMPLETE
 
     note right of Locked
-        Qualifying peak: score_ratio ≥ 3.0, no dominant fold, within ±2 kHz.
-        Matches a banked candidate (±200 Hz, same PRI, phase in tolerance) → sighting.
-        New and bank < 4 → admitted, retro-measured on all earlier headings.
+        Qualifying peak: score_ratio ≥ 3.0, no dominant fold, within ±2 kHz,
+        not a sideband of a ≥ 20 dB stronger peak with the same pulse windows.
+        Same emitter as a banked candidate (±200 Hz, PRI either configured rate) → sighting.
+        New and bank < 4 → admitted; every earlier heading re-searched at its frequency.
         New and bank full → dropped. Below 3.0 → not reported after lock.
     end note
     note right of Thresholding
@@ -102,10 +103,10 @@ stateDiagram-v2
 ```
 
 Throughout the analysis the detector sends `COMPUTE_PROGRESS` from the compute
-loop itself — at each stage change (spectrogram, search, null, PRI re-fit,
-measurement) and otherwise at most once a second, from inside the permutation
-loop, each re-fit anchor step and the measurement loop — so a computation that
-hangs goes quiet. Its records are appended to the analysed slice's own
+loop itself — at each stage change (spectrogram, search, null, measurement)
+and otherwise at most once a second, from inside the permutation loop and the
+measurement loop (including each re-search's own null) — so a computation
+that hangs goes quiet. Its records are appended to the analysed slice's own
 `heading-NNN/detector_<tag>.jsonl`, not the heading being captured.
 
 An ARM while a slice is being captured is answered `BUSY`; a repeated ARM for
@@ -142,14 +143,13 @@ wait that runs past its estimate grows the layout.
 
 Every analysis in flight must keep reporting: if a detector with a queued or
 running analysis has sent no `COMPUTE_PROGRESS` for more than
-`kComputeProgressTimeoutSeconds` = 5 heartbeat ticks (one PRI re-fit anchor
-step takes up to ~4 s late in a long rotation), or its current slice's
+`kComputeProgressTimeoutSeconds` = 5 heartbeat ticks, or its current slice's
 analysis has run for more than `kMaxAnalysisSeconds` = 120 ticks (normally
 23–36 s), the step is frozen — during the next heading's dwell too — so the
 GCS stall watchdog (10 s) cancels a hung or runaway analysis within about
 15 s. The message carries the stage of the analysis in flight, e.g.
 `3/8 090 deg | 045 deg: null 24/40` during a dwell or
-`Analysing 315 deg: refit 1/3` while the GCS waits.
+`Analysing 315 deg: measure 1/3` while the GCS waits.
 
 `step_count` is sized at `START_COLLECTION`
 from `n_slices` and a `(K+1)·PRI` dwell estimate, then corrected from
@@ -180,13 +180,14 @@ still found. Constants:
 | `--detection-margin` | 1.0 | Multiplies the per-dwell permutation-null threshold (DETECTOR_PIPELINE.md §6); 1.0 = the threshold is `pf` |
 | `--null-permutations` | 40 | Window permutations per cycle for the null |
 | `--confidence-ratio` | 1.3 | `score_ratio` at or above → HIGH (`detection_status` 1), else LOW (0); subject to the dominant-fold gate below |
-| `DOMINANT_FOLD_THRESHOLD` | 0.8 | `max_fold_fraction` above → LOW, and ineligible for lock |
-| `max_detections` | `MAX_LOCK_CANDIDATES` during a collection, else 1 | Extra peaks feed the candidate bank only; the acquisition report is always the single strongest |
+| `DOMINANT_FOLD_THRESHOLD` | 0.8 | `max_fold_fraction` above, with fewer than half the folds (or fewer than two) over 3× the bin noise → a transient: LOW, and ineligible for lock. A train with one much stronger pulse (a collar being handled) is not a transient |
+| `max_detections` | every separated peak during a collection, else 1 | Extra peaks feed the candidate bank only, after sideband folding, so sidebands never take a bank slot; the acquisition report is always the single strongest |
 
 The slice's power spectrogram is appended to `buffered_slices` (a deque of
 `MAX_BUFFERED_SLICES` = 64; the oldest is evicted with a warning) together
-with its noise estimate, segment start time, heading and a `measured` set of
-candidate ids already reported for it.
+with its noise estimate, segment start time, heading, its full-search
+sightings (`{candidate id: Detection}`) and a `measured` set of candidate ids
+whose result has been reported.
 
 ### Reports in acquisition (no lock yet)
 
@@ -202,120 +203,116 @@ followed by `CYCLE_COMPLETE` once the slice's analysis is done.
 
 **What "lock" does and does not mean.** Nothing is committed to until
 `FinishCollection`: every heading still runs the full-K fold search, up to four
-qualifying peaks from anywhere in the rotation are banked, each is measured on
-every heading, and the controller fits all of them and picks the best. The
-"provisional lock" is simply the first qualifying peak (candidate 0). What it
-*does* change, from that heading onward, is the report stream: acquisition
-reports (status 0/1) stop, and only fixed-coordinate measurements at banked
-candidates (status 2) are sent (`pulse_detector.py`, "Post-lock fold results
-only feed the candidate bank; they are not reported as acquisition hits").
+qualifying emitters from anywhere in the rotation are banked, each gets a
+result on every heading, and the controller fits all of them and picks the
+best. The "provisional lock" is simply the first qualifying peak (candidate
+0). What it *does* change, from that heading onward, is the report stream:
+acquisition reports (status 0/1) stop, and only per-candidate results (status
+2 or 3) are sent (`pulse_detector.py`, "Post-lock fold results only feed the
+candidate bank; they are not reported as acquisition hits").
 
-After the fold search, every peak that satisfies all of
+**A candidate is a frequency, not a pulse train.** A dual-rate collar on a
+moving animal can switch rate any number of times, inside a dwell or unseen
+between dwells, and each switch restarts its train. Timing seen on one heading
+therefore says nothing about another heading; only the carrier frequency
+carries across. No timing is ever projected from one heading onto another,
+and a heading's result, once reported, is final (2026-10-13 rotation 1: a
+re-anchor after a rate switch inside the 045° dwell overwrote heading 0's
+68.5 dB with noise).
+
+After the fold search, the dwell's peaks are first split into emitters and
+**sidebands** (`fold_sidebands`): a peak is a sideband when at least half its
+fold windows lie within `SIDEBAND_TIMING_WINDOWS` = 2 steps of a peak whose
+per-pulse power is at least `SIDEBAND_MIN_DB` = 20 dB higher. A strong collar
+shows such components 30–35 dB down at about ±975 Hz with exactly its pulse
+timing; they are logged (`LOCK_CANDIDATE` `sideband`) and never banked. Every
+emitter peak that satisfies all of
 
 - `score_ratio ≥ --lock-score-ratio` (default **3.0**),
-- `max_fold_fraction ≤ DOMINANT_FOLD_THRESHOLD`,
+- no dominant fold (`fold_info['dominant_fold']`),
 - `|freq − expected_offset| ≤ ACQUISITION_SEARCH_HZ`
 
 is offered to the candidate bank (`admit_lock_candidate`), strongest first.
-Two candidates are *the same* (`locks_agree`) when frequency is within
-`LOCKED_SEARCH_HZ` = 200 Hz, PRI within one STFT step (`n_ws / fs`), and phase
-within `max(LOCK_PHASE_TOLERANCE_STEPS × n_ws / fs, pri_ppm_uncertainty × |Δt|)`
-modulo the PRI. The floor is two steps: a fresh fold anchor is a window index
-(rounded, and up to one window early from local-max pooling) while the banked
-anchor has been refit to a fraction of a step, so the same train can differ
-by ~1.5 steps.
+It is the *same emitter* as a banked candidate (`same_emitter`) when its
+frequency is within `LOCKED_SEARCH_HZ` = 200 Hz and its PRI is either
+configured rate (within one STFT step). Phase plays no part.
 
-| Bank state | Agreeing entry exists | No agreeing entry, bank not full | Bank full |
-| --- | --- | --- | --- |
-| Before lock | `merged` (entry replaced by the combined lock, PRI refined from elapsed cycles) | `admitted` | `replaced` — weakest evicted if the newcomer is stronger, else `dropped` |
-| After lock | `seen` (sighting recorded; entry untouched) | `reanchored` if an entry has the same frequency and PRI but its projected phase missed (entry's anchor moved to this sighting, sighting recorded, every buffered slice re-measured at it); otherwise `admitted` (append) | `dropped` |
-
-`MAX_LOCK_CANDIDATES` = 4. **The first cycle that has any qualifying candidate
-locks immediately**: the strongest is moved to index 0 (`promote_to_lock`) and
-becomes `pulse_lock`. There is no same-heading confirmation cycle. Once locked,
-ids have been reported to the controller, so entries are never renumbered or
-evicted — the bank is append-only. Sightings (`{slice_id: score_ratio}` per
-candidate) are kept in lockstep with the bank.
-
-### What a later heading's strongest peak becomes, once locked
-
-| Strongest fold peak on a later heading | Outcome |
+| Peak | Event |
 | --- | --- |
-| Agrees with a banked candidate (±200 Hz, same PRI, phase within tolerance) | Recorded as a *sighting* of that candidate; the heading is measured at the candidate's coordinates and reported with `score_ratio` = this peak's fold score ratio |
-| Same frequency and PRI as a banked candidate but phase outside tolerance | `reanchored`: one emitter cannot occupy one bin at one PRI twice, so the candidate's anchor is moved to this peak, the sighting is recorded against it, and every buffered heading is re-measured at the new timing (the next PRI refit starts from the new anchor). Seen on the 2026-09-12 `moderate` run when a two-dwell PRI fit was ~90 ppm off and the tag was re-admitted as a duplicate |
-| Different coordinates, `score_ratio ≥ 3.0`, no dominant fold, bank < 4 | `admitted` as candidate 1–3; measured on this **and every earlier** heading in the same cycle; competes at `FinishCollection` |
-| Different coordinates, `score_ratio ≥ 3.0`, bank already 4 | `dropped` — a `LOCK_CANDIDATE dropped` `.jsonl` entry only |
-| Different coordinates, `1.0 ≤ score_ratio < 3.0` (would have been a status 0/1 report before lock) | **Not reported.** Only the lock-coordinate measurement of that heading goes out. The peak is still in the `.jsonl` `DETECTION`/`FOLDS` entries for post-flight analysis |
+| Same emitter as a banked candidate | `seen`: sighting recorded (`{slice_id: score_ratio}`); the candidate's frequency follows the latest sighting |
+| New, bank < `MAX_LOCK_CANDIDATES` = 4 | `admitted` (appended) |
+| New, bank full | `dropped` — a `LOCK_CANDIDATE dropped` `.jsonl` entry only |
 
-Consequence: if the provisional lock is a false peak, a real tag that only
-reaches `score_ratio` 1.3–2.9 on later headings is never banked and is
-invisible live; the rotation ends with a rejected or low-`r_squared` bearing.
-Raising `score_ratio ≥ 3.0` at K=20 makes a false provisional lock unlikely
-(none of the 69 Apr-11 noise detections exceeded 2.55) but the asymmetry is by
-design, not an accident of the code.
+**The first cycle that has any qualifying candidate locks immediately**: the
+strongest becomes candidate 0. There is no same-heading confirmation cycle.
+Ids are reported to the controller, so entries are never renumbered or
+evicted — the bank is append-only. Sightings are kept in lockstep with the
+bank.
 
-For a dual-rate collar (`--tip-secondary`) a candidate's PRI is the primary or
-secondary TIP according to the winning hypothesis' final rate; reports carry
-`rate_state` from `rate_state_for_pri` (see
-[RATE_SWITCH_DETECTOR.md](RATE_SWITCH_DETECTOR.md)).
+On a later heading a peak at `1.0 ≤ score_ratio < 3.0` that is not a banked
+candidate (it would have been a status 0/1 report before lock) is **not
+reported**; it stays in the `.jsonl` `DETECTION`/`FOLDS` entries for
+post-flight analysis. So if the provisional lock is a false peak, a real tag
+that only reaches `score_ratio` 1.3–2.9 is never banked and is invisible live;
+the rotation ends with a rejected or low-`r_squared` bearing. Raising
+`score_ratio ≥ 3.0` at K=20 makes a false provisional lock unlikely (none of
+the 69 Apr-11 noise detections exceeded 2.55) but the asymmetry is by design.
 
 ## Locked cycles
 
-Once `pulse_lock` is set, each cycle does, in order:
+Once the bank holds a candidate, each cycle does, in order:
 
-1. **Fold search at full K** (as above) — new candidates may be appended,
-   existing ones get sightings.
-2. **PRI refit per candidate** — `fit_lock_timing` re-fits each candidate's
-   PRI over *all* buffered slices, searching ±`PRI_FIT_SPAN_PPM` = 300 ppm in
-   `PRI_FIT_STEP_PPM` = 2 ppm steps around the nominal, jointly with the
-   anchor's offset over ±one STFT step (the anchor comes from a fold window
-   index, so it is quantised and may sit a window early; held fixed it would
-   tilt the PRI by hundreds of ppm over one dwell). It sums on-pulse
-   power over the four windows a pulse touches at 50 % overlap (half, full,
-   full, half) — wider than the two-window measurement footprint, because a
-   two-window sum over that symmetric response scores a whole-step alias of
-   the PRI as well as the truth. It returns the plateau centre with a
-   `pri_ppm_uncertainty` half-width that is never below what the fitted span
-   can resolve, `one STFT step / longest lever arm from the anchor` (≈ 250 ppm
-   after one dwell, ≈ 100 after two, ≈ 25 after eight); `locks_agree` scales
-   its phase tolerance by this, so a candidate is not re-admitted as a
-   duplicate because an early, loosely constrained fit was trusted too far. Hypotheses
-   that kept fewer than half the windows of the best-covered one (gaps,
-   segment edges) cannot win. If the refit would move any
-   pulse onto a different STFT window on any buffered slice
-   (`pri_refit_moves_pulses`), that candidate's id is removed from every
-   slice's `measured` set so they are all re-measured and re-sent. A fit that
-   hits the ±300 ppm edge is logged (`pri_fit_clipped`) and not applied.
-3. **Measure every unmeasured (slice, candidate) pair** — for each buffered
-   slice and each candidate id not yet in its `measured` set,
-   `measure_at_lock_psd` sums power at the candidate's frequency over the
-   two-window footprint of each projected pulse (from the candidate's anchor
-   and PRI), subtracts noise, and divides by the number of pulses that fell
-   inside the slice (`per_pulse_power_psd`). This is the fixed-coordinate
-   amplitude the bearing fit uses; it does not re-maximise over frequency or
-   phase, so it is not floor-compressed the way the acquisition `snr` is (see
-   [2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](../analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md)).
+1. **Fold search at full K** (as above) — sidebands folded, new candidates
+   appended, existing ones get sightings.
+2. **One result per pending (slice, candidate) pair**
+   (`RotationCandidates.pending`, `measure_candidate`): this slice for every
+   candidate, and every buffered slice for a candidate admitted this cycle.
+   Each result uses that slice's data only:
+   - **Sighted** — the full search found the candidate on this slice: the
+     train is measured at that sighting's own fold windows and rate.
+   - **Not sighted** — a **frequency-only re-search**: the fold search and its
+     permutation null are re-run on the candidate's nearest bin and
+     `RESEARCH_BIN_RADIUS` = 1 bin either side only, within the usable band. Fewer cells searched
+     means a lower threshold at the same `pf` (≈ 2.1 dB less signal above the
+     noise score at K = 20, dual rate, 2026-10-13 geometry). A train found
+     there without a dominant fold is measured the same way.
+   - **Neither** — a non-detection, which the bearing fit treats as censored.
 
-### Locked measurement report
+   The measurement (`measure_at_pulse_windows`) sums power at the found bin
+   over a two-window footprint per pulse, the footprint start common to all
+   pulses chosen from the fold window or one before it (local-max pooling),
+   subtracts noise and divides by the number of pulses kept
+   (`per_pulse_power_psd`). Pulses touching a zero-filled window are dropped;
+   if that leaves none, the slice gets no result for the candidate (logged as
+   `lock_candidate` event `unmeasurable`) rather than a non-detection.
+   A re-search hit is chosen by a max-search, so it reads high on weak
+   headings: ≈ +0.6 dB at 50 % detection probability, ≈ +1.3 dB at 17 %, a
+   few percent once detection is near certain (simulated, K = 20).
 
-One `PULSE` per (slice, candidate), with:
+### Locked report
 
-| Field | Value |
-| --- | --- |
-| `detection_status` | 2 CONFIRMED |
-| `confirmed_status` | 1 (always, for locked measurements) |
-| `candidate_id` | 0 = provisional lock, 1–3 = alternates |
-| `group_snr` | `per_pulse_power_psd` — the amplitude the fit uses |
-| `snr` | `lock_snr_db` (diagnostic) |
-| `score_ratio` (`stft_score` kwarg in `send_pulse_udp`) | fold score ratio of an independent sighting of this candidate on this slice; **0 when the slice was only measured** |
-| `noise_psd` | slice noise estimate |
-| `collection_id`, `slice_id` | of the *buffered* slice — retro-measurements of earlier headings carry the earlier slice id |
-| `rate_state` | A/B by which TIP the candidate's PRI is closer to |
+One message per (slice, candidate):
 
-A late candidate is therefore measured on every earlier heading in one cycle
+| Field | Found (sighted or re-search) | Not found |
+| --- | --- | --- |
+| message / `detection_status` | `PULSE`, 2 CONFIRMED | `NO_DETECTION`, 3 |
+| `confirmed_status` | 1 | 0 |
+| `candidate_id` | 0 = provisional lock, 1–3 = alternates | same |
+| `frequency_hz` | the bin it was found at | the candidate's frequency |
+| `group_snr` | `per_pulse_power_psd` — the amplitude the fit uses | 0 |
+| `snr` | `lock_snr_db` (diagnostic) | 0 |
+| `score_ratio` | full-search fold score ratio when sighted; **0 for a re-search hit** (it is not an independent sighting for `confirmed` or the revisit) | 0 |
+| `noise_psd` | slice noise at the bin | slice noise at the candidate's bin |
+| `collection_id`, `slice_id` | of the *buffered* slice — results for earlier headings carry the earlier slice id | same |
+| `rate_state` | the dwell's own winning hypothesis (A, B, A→B, B→A) | A |
+
+A late candidate therefore gets a result on every earlier heading in one cycle
 ("retro" in the text log; `heading_deg` in the `.jsonl` record names the
-heading it was measured at, so the analyzer can re-file it). A failed send
-leaves the pair unmeasured and it is retried next cycle.
+heading, so the analyzer can re-file it). The `.jsonl` record carries
+`sighted` and `research_ratio` (the re-search's best score ratio, found or
+not). A failed send leaves the pair pending and it is retried next cycle;
+nothing is ever re-sent once delivered, so per-cycle work no longer grows with
+the number of headings.
 
 ## Controller side
 
@@ -323,18 +320,27 @@ leaves the pair unmeasured and it is retried next cycle.
 
 - Every report during a collection is upserted into `_rotationSlices` keyed by
   `(tag_id, candidate_id, slice_id)`. A detection replaces a no-detection; a
-  CONFIRMED measurement replaces an acquisition hit; never the reverse.
-  No-detections are kept as censored observations (nulls) for the fit.
+  CONFIRMED measurement replaces an acquisition hit; a no-detection replaces
+  an acquisition report (status 0/1/3), since it can only be candidate 0's
+  verdict on that slice: the acquisition hit was at another frequency, or the
+  acquisition no-detection's noise is the band median rather than the
+  candidate's bin. A no-detection
+  never replaces a CONFIRMED result. No-detections are censored observations
+  for **their own candidate's** fit only.
 - **Outside a collection** every report (0/1/3) is forwarded to the GCS.
-- **During a collection** only `detection_status == 2`
-  (`CollectionCoordinator::forwardPulseToGcs`) *and* only for the tag's **live
-  candidate** (`_liveCandidate`, initially 0).
+- **During a collection** only the tag's **live candidate** (`_liveCandidate`,
+  initially 0) is forwarded: its CONFIRMED (2) reports
+  (`CollectionCoordinator::forwardPulseToGcs`), and its no-detections (3)
+  once stored as that heading's result. TagTracker shows a CONFIRMED value per
+  tag and heading; a no-detection removes that tag's value from the heading
+  (a value left by an earlier live candidate, or an acquisition hit).
 - After each CONFIRMED report `_updateLiveCandidate` refits every candidate
   (`BearingCalculator::solveCandidates`). Another candidate takes over the live
   view when it has ≥ `kLiveCandidateMinSlices` = 3 measured slices and its
   `r_squared` exceeds the live one's by more than
   `kLiveCandidateSwitchMargin` = 0.15; the controller then replays all of that
-  candidate's CONFIRMED slice reports so the GCS display corrects mid-rotation.
+  candidate's CONFIRMED and no-detection reports so the GCS display corrects
+  mid-rotation, including headings where the new candidate was not found.
 
 ### Handshake and timing (`CollectionCoordinator`)
 
@@ -381,7 +387,9 @@ not tear the collection down on its own — the GCS decides whether to cancel.
    noise_psd_i)²`, so a heading with an invalid `noise_psd` gets weight 1 and K
    (taken as common to all slices) cancels; a gap-clipped slice that averaged
    fewer pulses is over-weighted by `K/n` (#153). Headings near the floor
-   therefore inform the fit without dominating it. `r_squared` is a composite confidence
+   therefore inform the fit without dominating it. A candidate's
+   no-detection headings are censored: the model must predict less than half
+   its weakest detected power there. `r_squared` is a composite confidence
    (weighted fit × angular span × degrees-of-freedom factors). Per-heading
    residuals are kept on the result for diagnostics.
 3. **Select** per tag the candidate with the highest `r_squared`. A
@@ -390,7 +398,7 @@ not tear the collection down on its own — the GCS decides whether to cancel.
    Otherwise, candidates
    within `kCandidateConfidenceTolerance` = 0.05 of each other are not
    separated by the fit (two candidates measuring the same pulses — a
-   duplicate lock, a sidelobe image — differ by well under 0.01 from noise
+   duplicate lock, a sideband the detector did not fold — differ by well under 0.01 from noise
    alone, a flat interferer against a pattern-shaped tag by tenths); among
    those the one with more *sighted* slices wins, then more detected slices,
    then higher `best_snr`. The selected candidate is `rejected` if
@@ -414,7 +422,7 @@ not tear the collection down on its own — the GCS decides whether to cancel.
    - *Nothing heard*: `bearing_deg` NaN, `n_valid_slices` 0, `best_snr` 0 —
      no detections, or scattered acquisition hits that do not agree.
    If the selected candidate is not the one the GCS was following live, its
-   CONFIRMED slice reports are replayed first.
+   CONFIRMED and no-detection slice reports are replayed first.
 5. **Log** `bearing_result.log`
    (`tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed,heard`)
    and `bearing_candidates.log`
@@ -455,17 +463,20 @@ K=20; the per-dwell permutation-null threshold
 each level produces, so the outcomes below are the intent to verify, not a
 guarantee. The transmitter sits at 135°; with TagTracker's clockwise sweep
 from 0° that is the fourth heading, so the first three headings are always
-measured retrospectively once a lock exists.
+re-searched at the candidate's frequency once a lock exists.
 
 - **`strong`** (20 dB): locks on the first heading that sees the tag (0° is
   45° off-axis, still tens of dB up); sighted on every heading → *confirmed*,
   sector 3, bearing ≈ 135°. The tag is 50–70 dB over noise, so its spectral
-  sidelobe images are admitted as extra candidates (#148).
+  sidebands clear the threshold too; they are folded into it
+  (`LOCK_CANDIDATE` `sideband`), not banked (#148).
 - **`moderate`** (−8 dB): sighted on every heading (deepest pattern null
   still ≈ 20 dB over noise) → *confirmed*, bearing ≈ 135°, one candidate, no
-  sidelobe images.
+  sidebands.
 - **`marginal`** (−27 dB): sighted on one heading only (135°, `score_ratio`
-  ≈ 5 against the lock ratio 3; ±45° ≈ 2, below it). `FINISH_COLLECTION`
+  ≈ 5 against the lock ratio 3; ±45° ≈ 2, below it). The frequency-only
+  re-search may still find the ±45° headings, which then enter the fit but
+  are not sightings. `FINISH_COLLECTION`
   returns `COLLECTION_STATUS_REVISIT_REQUESTED`, the GCS flies that heading
   again, then *confirmed* if the revisit sights it, otherwise *unconfirmed*.
   −21 dB gave three sightings and a confirm without a revisit.
@@ -481,8 +492,8 @@ measured retrospectively once a lock exists.
   noise hits in one bin would wrongly read as *heard*; ~1e-3 per rotation.
 - **`competing`** (−18 dB tag, flat −18 dB tone at +1 kHz): the interferer
   takes the provisional lock (candidate 0) on the first heading; the tag is
-  admitted as an alternate near 135°; every buffered heading is measured at
-  both; the finish-time fit must select the tag (pattern-shaped) over the
+  admitted as an alternate near 135°; every buffered heading gets a result
+  for both; the finish-time fit must select the tag (pattern-shaped) over the
   interferer (flat).
 - **`power-line`** (−8 dB tag, directional Gaussian source +15 dB at
   boresight, bearing 270°, seen through the antenna pattern): the source adds
@@ -495,6 +506,12 @@ measured retrospectively once a lock exists.
   weights ≪ 1 at 225–315°) and the result stays *confirmed* at ≈ 135°.
   `--sim-noise-source-impulsive` makes the source heavy-tailed (Student-t) to
   exercise `--detector-impulse-blank-factor`.
+
+With a dual-rate tag, `--sim-rate-switch <s>` (optionally with
+`--sim-rate-burst <s>`) switches the simulated collar to its secondary rate
+that many seconds into the rotation (and back after the burst), so a rotation
+contains a rate switch at a chosen heading. Every heading must still report
+its own power; the carrier stays one candidate.
 
 ## Log artifacts per collection
 
@@ -516,5 +533,5 @@ file is open when the detector exits.
 - [DETECTOR_PIPELINE.md](DETECTOR_PIPELINE.md) — the per-cycle STFT / fold / threshold processing
 - [CONFIDENCE_PIPELINE.md](CONFIDENCE_PIPELINE.md) — HIGH/LOW classification
 - [shared/README.md](../../shared/README.md#ttdp-detector-protocol) — TTDP message layout
-- [2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](../analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md) — why the fixed-offset amplitude and retrospective lock exist
-- `detector/tests/test_end_to_end.py`, `test_collection_control.py`, `controller/tests/test_collection_coordinator.cpp`, `test_bearing_calculator.cpp`
+- [2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md](../analysis/2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md) — why the fixed-offset amplitude and retrospective lock were introduced; the cross-heading projection it describes was removed after the 2026-10-13 field test (a dual-rate collar restarts its train at every rate switch)
+- `detector/tests/test_rotation_candidates.py`, `test_end_to_end.py`, `test_collection_control.py`, `controller/tests/test_collection_coordinator.cpp`, `test_bearing_calculator.cpp`
