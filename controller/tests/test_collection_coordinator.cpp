@@ -144,5 +144,34 @@ int main()
     CHECK(!CollectionCoordinator::forwardPulseToGcs(TunnelProtocol::kSuperthresholdDetectionStatus));
     CHECK(!CollectionCoordinator::forwardPulseToGcs(TunnelProtocol::kNoPulseDetectionStatus));
 
+    // Stored rotation report per (slice, tag, candidate).
+    {
+        using CC = CollectionCoordinator;
+        constexpr uint8_t sub  = TunnelProtocol::kSubthresholdDetectionStatus;
+        constexpr uint8_t sup  = TunnelProtocol::kSuperthresholdDetectionStatus;
+        constexpr uint8_t lock = TunnelProtocol::kConfirmedDetectionStatus;
+        constexpr uint8_t none = TunnelProtocol::kNoPulseDetectionStatus;
+        // Any detection replaces a no-detection; a locked measurement an acquisition hit.
+        CHECK(CC::replacesStoredReport(none, 0, sub, 0));
+        CHECK(CC::replacesStoredReport(none, 0, lock, 1));
+        CHECK(CC::replacesStoredReport(sup, 1, lock, 1));
+        CHECK(CC::replacesStoredReport(sub, 0, lock, 1));
+        CHECK(!CC::replacesStoredReport(lock, 1, sub, 0));
+        CHECK(!CC::replacesStoredReport(lock, 1, sup, 1));
+        CHECK(CC::replacesStoredReport(lock, 1, lock, 1));
+        // A candidate's no-detection replaces an acquisition hit or no-detection
+        // (its noise is at the candidate's bin), never a locked measurement.
+        CHECK(CC::replacesStoredReport(sub, 0, none, 0));
+        CHECK(CC::replacesStoredReport(sup, 1, none, 0));
+        CHECK(!CC::replacesStoredReport(lock, 1, none, 0));
+        CHECK(CC::replacesStoredReport(none, 0, none, 0));
+
+        // The GCS live view shows locked values and clears on no-detections.
+        CHECK(CC::shownOnGcs(lock));
+        CHECK(CC::shownOnGcs(none));
+        CHECK(!CC::shownOnGcs(sub));
+        CHECK(!CC::shownOnGcs(sup));
+    }
+
     return 0;
 }

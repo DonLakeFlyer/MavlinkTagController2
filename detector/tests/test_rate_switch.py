@@ -29,7 +29,6 @@ from pulse_detector import (
     fold_detect,
     fold_multi_hypothesis,
     hyp_label_to_rate_state,
-    rate_state_for_pri,
 )
 
 
@@ -609,7 +608,7 @@ class TestFoldDetectEndToEnd:
         d = det[0]
         # The detection has a high score_ratio (well above any confidence_ratio)
         # but the dominant fold should trigger SUBTHRESHOLD classification.
-        has_dominant_fold = d.fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
+        has_dominant_fold = d.fold_info['dominant_fold']
         assert has_dominant_fold, (
             f"Expected dominant fold (>{DOMINANT_FOLD_THRESHOLD}), "
             f"got {d.fold_info['max_fold_fraction']:.3f}")
@@ -625,6 +624,25 @@ class TestFoldDetectEndToEnd:
         confirmed = 0 if is_marginal else 1
         assert det_status == DETECTION_STATUS_SUBTHRESHOLD
         assert confirmed == 0
+
+    def test_train_with_one_strong_pulse_is_not_a_dominant_fold(self):
+        """Every fold well above noise and one pulse 20 dB above the rest (a
+        collar being handled): max_fold_fraction > 0.8, but it is a train."""
+        N_A = 50
+        n_time = 500
+        n_freq = 20
+        power = np.ones((n_freq, n_time), dtype=np.float32) * 0.5
+        signal_bin = 5
+        power[signal_bin, 10 + N_A * np.arange(K)] = 50.0
+        power[signal_bin, 10] = 5000.0
+
+        hyps = build_hypothesis_indices(N_A, K, n_time, N_B=None)
+        det, _, _ = fold_detect(
+            power, N_A, 5e-2, 3840.0, n_freq, 58, 29,
+            n_time * 29 + 29, {'fixed_threshold': 50.0}, hypotheses=hyps)
+
+        assert det[0].fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
+        assert not det[0].fold_info['dominant_fold']
 
 
 # ---------------------------------------------------------------------------
@@ -721,23 +739,3 @@ class TestHypLabelToRateState:
         predict_tip = tip_b if last == 'B' else tip_a
         assert predict_tip == tip_a
 
-
-class TestRateStateForPri:
-    """Locked-path rate classification from a (refined) PRI."""
-
-    def test_exact_rates(self):
-        assert rate_state_for_pri(2.0, 2.0, 1.5) == RATE_STATE_A
-        assert rate_state_for_pri(1.5, 2.0, 1.5) == RATE_STATE_B
-
-    def test_refined_rate_b_stays_b(self):
-        # combine_agreeing_locks refines PRI from elapsed cycles, so a
-        # confirmed rate-B lock is never exactly tip_secondary.
-        assert rate_state_for_pri(1.5005, 2.0, 1.5) == RATE_STATE_B
-        assert rate_state_for_pri(1.4993, 2.0, 1.5) == RATE_STATE_B
-
-    def test_refined_rate_a_stays_a(self):
-        assert rate_state_for_pri(2.0007, 2.0, 1.5) == RATE_STATE_A
-
-    def test_single_rate_always_a(self):
-        assert rate_state_for_pri(1.5, 2.0, None) == RATE_STATE_A
-        assert rate_state_for_pri(2.0, 2.0, None) == RATE_STATE_A

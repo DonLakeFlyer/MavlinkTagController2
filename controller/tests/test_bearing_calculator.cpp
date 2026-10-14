@@ -230,23 +230,33 @@ static void testCandidateSelection() {
                 results[0].candidate_id, results[0].bearing_deg, results[0].r_squared);
 }
 
-// ── Test: no-detection headings are censored observations for every candidate ──
-static void testNoDetectionsSharedAcrossCandidates() {
+// ── Test: no-detection headings are censored for their own candidate only ──
+static void testNoDetectionsArePerCandidate() {
     BearingCalculator calc;
-    // Both candidates saw a pulse only at 0°; six other headings were empty.
+    // Candidate 0 was found only at 0°; the detector reported it missing on
+    // the other seven headings.
     calc.addSlice(0.0f, 32.8, 2, 0.0, 0);
-    calc.addSlice(0.0f, 20.0, 2, 0.0, 1);
     for (int i = 1; i < 8; ++i) {
-        calc.addNoDetection(static_cast<float>(i * 45), 2);
+        calc.addNoDetection(static_cast<float>(i * 45), 2, 0.0, 0);
+    }
+    // Candidate 1 was found on every heading, strongest at 180°. Candidate
+    // 0's misses must not censor it there.
+    for (const auto& [hdg, power] : generateSlices(180.0f, 30.0, 5.0, 8)) {
+        calc.addSlice(hdg, power, 2, 0.0, 1);
     }
     auto candidates = calc.solveCandidates();
     CHECK(candidates.size() == 2);
     for (const auto& c : candidates) {
-        // Without the censored headings a lone detection scores 0.
-        CHECK(c.r_squared > 0.3f);
-        assertNear(c.bearing_deg, 0.0f, 10.0f, "censored shared across candidates");
+        if (c.candidate_id == 0) {
+            // Without its censored headings a lone detection scores 0.
+            CHECK(c.r_squared > 0.3f);
+            assertNear(c.bearing_deg, 0.0f, 10.0f, "candidate 0 pinned by its own misses");
+        } else {
+            CHECK(c.r_squared > 0.9f);
+            assertNear(c.bearing_deg, 180.0f, kBearingToleranceDeg, "candidate 1 unaffected");
+        }
     }
-    std::printf("PASS: testNoDetectionsSharedAcrossCandidates\n");
+    std::printf("PASS: testNoDetectionsArePerCandidate\n");
 }
 
 // ── Test: every candidate below the floor → no bearing, best one reported ──
@@ -809,7 +819,7 @@ int main() {
     testBestSnr();
     testNegativeFloorRejected();
     testCandidateSelection();
-    testNoDetectionsSharedAcrossCandidates();
+    testNoDetectionsArePerCandidate();
     testAllCandidatesRejected();
     testSingleCandidateDefaults();
     testPatternSymmetry();

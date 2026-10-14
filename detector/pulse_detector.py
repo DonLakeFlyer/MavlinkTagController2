@@ -66,40 +66,38 @@ from scipy.stats import gumbel_r
 K = 5  # Default fold count, overridden by --k
 FOLD_LOCAL_RADIUS = 1  # Use local max over [idx-r, ..., idx+r] per fold
 OCCAM_MARGIN = 0.05    # Prefer pure hypothesis if within 5% of switch winner
-# Whole-rotation PRI fit: collar crystals sit tens of ppm off the nominal
-# rate (bench RA-2A collar: +43 ppm) and differ unit to unit, so the true
-# PRI is fitted from the buffered rotation. The grid is centred on the
-# nominal PRI and wide enough for any crystal-timed collar.
-PRI_FIT_SPAN_PPM = 300.0
-PRI_FIT_STEP_PPM = 2.0
-# Before any fit, a single K-pulse sighting pins the PRI to about half an
-# STFT step over its own span (7.5 ms / 40 s).
-INITIAL_PRI_PPM_UNCERTAINTY = 150.0
-# Pre-lock spectrograms kept for retro-measurement once a lock is acquired.
-# Each entry is one full power spectrogram (~0.5 MB at default geometry).
+# Spectrograms kept so a candidate found late can be searched for on every
+# earlier heading. Each entry is one full power spectrogram (~0.5 MB at
+# default geometry).
 MAX_BUFFERED_SLICES = 64
 # Captured segments waiting for analysis. Analysis normally finishes within
 # the next slice's dwell, so a backlog means it is falling behind; once full,
 # capture blocks and its SLICE_PROGRESS stops, which the GCS sees as a stall.
 MAX_PENDING_ANALYSES = 4
-# Competing lock candidates kept from the acquisition cycles. Every buffered
-# and post-lock slice is measured at each of them; the controller picks the
-# candidate whose per-heading powers best fit the antenna pattern (#134).
-# Index 0 is always the provisional lock. Bounded to keep per-cycle
-# measurement and report volume small; once locked the bank is append-only
-# (ids have been reported to the controller), so a full bank drops newcomers.
+# Competing lock candidates (emitters) kept for the rotation. Every heading
+# gets one result per candidate; the controller picks the candidate whose
+# per-heading powers best fit the antenna pattern (#134). Index 0 is the
+# first one found. Append-only (ids have been reported to the controller),
+# so a full bank drops newcomers.
 MAX_LOCK_CANDIDATES = 4
-# Half-width of the frequency search band around the expected tag offset
-# (acquisition) and around the locked frequency (measurement).
+# Half-width of the frequency search band around the expected tag offset.
 ACQUISITION_SEARCH_HZ = 2000.0
+# Candidate identity: a sighting within this of a banked candidate's
+# frequency, at either configured rate, is that candidate. Timing plays no
+# part: a dual-rate collar restarts its train whenever it switches rate.
 LOCKED_SEARCH_HZ = 200.0
-# Phase floor for matching a fresh fold peak to a banked candidate, in STFT
-# steps. A fold anchor is a window index: rounded to a step and, with
-# local-max pooling, up to one window early. The banked anchor has been
-# refit to a fraction of a step. Their difference is therefore up to ~1.5
-# steps for the same train; a one-step floor missed on the second or third
-# sighting in three of three simulator runs (2026-09-12).
-LOCK_PHASE_TOLERANCE_STEPS = 2.0
+# Frequency-only re-search of a heading the full search did not sight a
+# candidate on: the candidate's nearest bin and this many either side, with
+# its own permutation null. One bin of slack covers the frequency moving
+# between headings (one bin over 15 min on 2026-10-13).
+RESEARCH_BIN_RADIUS = 1
+# A detection with the same pulse windows as one at least this much stronger
+# (per-pulse power) is that emitter's spectral sideband, not a separate
+# emitter. Field sidebands sit 30-35 dB below the carrier (2026-10-13).
+SIDEBAND_MIN_DB = 20.0
+# Fold windows of a sideband and its carrier agree to within this many STFT
+# steps (independent rounding and local-max pooling on each).
+SIDEBAND_TIMING_WINDOWS = 2
 # The decimator's last FIR stage has its cutoff at 0.45 x fs (decimator/src/main.cpp),
 # so bins beyond 0.9 x Nyquist are in its transition band: attenuated and
 # partly aliased. They are never searched.
@@ -134,21 +132,35 @@ class Detection(NamedTuple):
     stft_score: float       # Fold score / PSD scale
     score_ratio: float      # Fold score / threshold (>1 = above threshold)
     hyp_label: str          # Winning hypothesis label (e.g. "A", "A_to_B_c2")
-    fold_info: dict         # {'max_fold_fraction': float, 'fold_snrs': list[float]}
+    fold_info: dict         # max_fold_fraction, dominant_fold, fold_snrs, fold_windows
 
 
 class PulseLock(NamedTuple):
+    """A banked candidate. Identity is freq_hz alone (see same_emitter);
+    anchor and PRI are those of the sighting that admitted it, for logs only."""
     freq_hz: float
     anchor_seconds: float
     pri_seconds: float
     score_ratio: float
-    # Collar's configured rate; fit_lock_timing searches around this, not
-    # around the current estimate.
-    nominal_pri_seconds: float = float('nan')
-    pri_ppm_uncertainty: float = INITIAL_PRI_PPM_UNCERTAINTY
-    # Last fit_lock_timing plateau touched the grid edge: pri_seconds is the
-    # retained prior, not a converged estimate.
-    pri_fit_clipped: bool = False
+
+
+class CandidateReport(NamedTuple):
+    """One candidate's final result on one slice (measure_candidate)."""
+    detected: bool
+    sighted: bool             # found by the full fold search (lock-qualifying)
+    freq_hz: float
+    signal_power_psd: float   # per pulse, noise-subtracted; NaN when not detected
+    noise_psd: float
+    n_pulses: int
+    n_windows: int
+    snr_db: float
+    first_pulse_s: float
+    next_pulse_s: float
+    rate_state: int
+    score_ratio: float        # full-search sighting ratio; 0 when not sighted
+    research_ratio: float     # best frequency-only re-search ratio; 0 when not run
+    hyp_label: str
+    measurable: bool = True   # False: found, but every pulse touches a zero-filled window
 
 
 class AnalysisJob(NamedTuple):
@@ -181,18 +193,6 @@ def hyp_label_to_rate_state(label):
     # Fallback for unknown labels — treat as rate A
     return (RATE_STATE_A, 'A')
 
-
-def rate_state_for_pri(pri_seconds, tip, tip_secondary):
-    """Classify a lock's PRI as RATE_STATE_A or RATE_STATE_B.
-
-    combine_agreeing_locks() refines the PRI from elapsed cycles, so it will
-    not equal either configured TIP exactly; pick the nearer one.
-    """
-    if tip_secondary is None:
-        return RATE_STATE_A
-    return (RATE_STATE_B
-            if abs(pri_seconds - tip_secondary) < abs(pri_seconds - tip)
-            else RATE_STATE_A)
 
 # Global flag for graceful shutdown
 _should_stop = False
@@ -636,22 +636,6 @@ def amplitude_at_known_pulse(power, freq_bin, pulse_indices, noise_power):
     return float(power[freq_bin, idx].sum()) - idx.size * noise
 
 
-def pulse_indices_at_known_phase(segment_start_seconds, n_time, anchor_seconds,
-                                 pri_seconds, n_ws, fs, max_pulses):
-    """Project an absolute pulse-time lock into one STFT segment."""
-    if pri_seconds <= 0 or n_time <= 0 or max_pulses <= 0:
-        return np.empty(0, dtype=np.int64)
-    # Negative cycles are pulses before the anchor; buffered pre-lock
-    # segments depend on them.
-    first_cycle = int(np.ceil((segment_start_seconds - anchor_seconds) /
-                              pri_seconds))
-    pulse_times = anchor_seconds + (
-        first_cycle + np.arange(max_pulses, dtype=np.int64)) * pri_seconds
-    indices = np.rint(
-        (pulse_times - segment_start_seconds) * fs / n_ws).astype(np.int64)
-    return indices[(indices >= 0) & (indices < n_time)]
-
-
 def estimate_noise_power(power):
     """Estimate per-frequency-bin noise power using the detector's mask."""
     if power.shape[1] >= 3:
@@ -674,8 +658,9 @@ def slice_noise_power(power, gap_windows):
     """Per-bin noise for a buffered slice, from the columns that hold data.
 
     Zero-filled STFT windows (inclusive index ranges) would drag the estimate
-    down while measure_at_lock excludes the same columns from the signal sum,
-    inflating per-pulse power. An all-gap slice falls back to the full array.
+    down while measure_at_pulse_windows excludes the same columns from the
+    signal sum, inflating per-pulse power. An all-gap slice falls back to the
+    full array.
     """
     if gap_windows:
         n_time = power.shape[1]
@@ -687,79 +672,46 @@ def slice_noise_power(power, gap_windows):
     return estimate_noise_power(power)
 
 
-def measure_at_lock(power, freq_axis, lock_freq_hz, segment_start_seconds,
-                    anchor_seconds, pri_seconds, n_ws, fs, max_pulses,
-                    footprint_windows=2, noise_power=None, gap_windows=()):
-    """Measure one buffered segment at a persistent frequency/phase lock.
+def measure_at_pulse_windows(power, freq_bin, pulse_windows, noise_power,
+                             gap_windows=(), footprint_windows=2,
+                             shifts=(-FOLD_LOCAL_RADIUS, 0)):
+    """Measure one slice at a train found in that slice's own data.
 
+    `pulse_windows` are the fold windows of the detection (one per pulse).
     Each pulse spans `footprint_windows` adjacent STFT windows (two for a
-    pulse-length window with 50% overlap), so all of them are summed. This
-    keeps the estimate a fixed-coordinate sum (linear, unbiased) while not
-    dropping energy when the projected start is a fraction of a window off.
-    `noise_power` is the per-bin estimate for `power`; computed if omitted.
-    Pulses whose footprint touches a zero-filled window (`gap_windows`,
-    inclusive index ranges) are dropped from both the sum and the returned
-    indices, so a gap shortens the measurement instead of biasing it low.
+    pulse-length window with 50% overlap), so all of them are summed. The
+    fold window comes from local-max pooling over +-FOLD_LOCAL_RADIUS, so the
+    footprint may start up to one window early; the footprint start common to
+    every pulse is chosen from `shifts` by the larger sum. Pulses whose
+    pooled span touches a zero-filled window (`gap_windows`, inclusive index
+    ranges) are dropped, so a gap shortens the measurement instead of biasing
+    it low.
+
+    Returns (signal_power, noise_at_bin, kept pulse windows, n_windows), with
+    signal_power the noise-subtracted sum over the footprint.
     """
-    if freq_axis.shape != (power.shape[0],):
-        raise ValueError(
-            f'freq_axis shape {freq_axis.shape} does not match '
-            f'{power.shape[0]} frequency bins')
-    if noise_power is not None and noise_power.shape != (power.shape[0],):
-        raise ValueError(
-            f'noise_power shape {noise_power.shape} does not match '
-            f'{power.shape[0]} frequency bins')
     n_time = power.shape[1]
-    freq_bin = int(np.argmin(np.abs(freq_axis - lock_freq_hz)))
-    pulse_indices = pulse_indices_at_known_phase(
-        segment_start_seconds, n_time, anchor_seconds, pri_seconds,
-        n_ws, fs, max_pulses)
-    offsets = np.arange(footprint_windows, dtype=np.int64)
-    if gap_windows:
+    pulse_windows = np.asarray(pulse_windows, dtype=np.int64)
+    pulse_windows = pulse_windows[(pulse_windows >= 0) & (pulse_windows < n_time)]
+    if gap_windows and pulse_windows.size:
         valid = np.ones(n_time, dtype=bool)
         for start, end in gap_windows:
             valid[max(0, start):min(n_time, end + 1)] = False
-        per_pulse = pulse_indices[:, None] + offsets[None, :]
-        in_range = per_pulse < n_time
-        # A pulse is kept only if every in-range footprint window is valid.
-        keep = np.array([bool(np.all(valid[per_pulse[p][in_range[p]]]))
-                         for p in range(pulse_indices.size)], dtype=bool)
-        pulse_indices = pulse_indices[keep]
-    footprint = (pulse_indices[:, None] + offsets[None, :]).ravel()
-    footprint = footprint[footprint < n_time]
-    if noise_power is None:
-        noise_power = estimate_noise_power(power)
-    signal_power = amplitude_at_known_pulse(
-        power, freq_bin, footprint, noise_power)
-    return (signal_power, float(noise_power[freq_bin]), pulse_indices,
-            int(footprint.size))
-
-
-def predict_next_pulse_seconds(segment_start_seconds, pulse_indices, n_time,
-                               n_ws, fs, pri_seconds):
-    """First pulse of the train after the segment, projected from the last kept pulse.
-
-    Gap filtering leaves pulse_indices sparse (possibly missing the trailing
-    pulses), so neither first + count * PRI nor last + PRI is guaranteed to
-    clear the completed segment; step whole PRIs until it does.
-    """
-    last_kept = segment_start_seconds + pulse_indices[-1] * n_ws / fs
-    segment_end = segment_start_seconds + n_time * n_ws / fs
-    cycles = max(1, int(math.ceil((segment_end - last_kept) / pri_seconds)))
-    return float(last_kept + cycles * pri_seconds)
-
-
-def measure_at_lock_psd(power, freq_axis, lock_freq_hz,
-                        segment_start_seconds, anchor_seconds, pri_seconds,
-                        n_ws, fs, n_w, max_pulses, noise_power=None,
-                        gap_windows=()):
-    signal_power, noise_power, pulse_indices, n_windows = measure_at_lock(
-        power, freq_axis, lock_freq_hz, segment_start_seconds,
-        anchor_seconds, pri_seconds, n_ws, fs, max_pulses,
-        noise_power=noise_power, gap_windows=gap_windows)
-    psd_scale = float(fs * n_w)
-    return (signal_power / psd_scale, noise_power / psd_scale, pulse_indices,
-            n_windows)
+        span = np.arange(min(shifts), max(shifts) + footprint_windows, dtype=np.int64)
+        touched = np.clip(pulse_windows[:, None] + span[None, :], 0, n_time - 1)
+        pulse_windows = pulse_windows[np.all(valid[touched], axis=1)]
+    noise_at_bin = float(noise_power[freq_bin])
+    if pulse_windows.size == 0:
+        return float('nan'), noise_at_bin, pulse_windows, 0
+    offsets = np.arange(footprint_windows, dtype=np.int64)
+    best = None
+    for shift in shifts:
+        footprint = (pulse_windows[:, None] + shift + offsets[None, :]).ravel()
+        footprint = footprint[(footprint >= 0) & (footprint < n_time)]
+        signal = amplitude_at_known_pulse(power, freq_bin, footprint, noise_power)
+        if best is None or signal > best[0]:
+            best = (signal, int(footprint.size))
+    return best[0], noise_at_bin, pulse_windows, best[1]
 
 
 def lock_snr_db(signal_power, noise_power, n_windows):
@@ -779,244 +731,48 @@ def lock_snr_db(signal_power, noise_power, n_windows):
     return float(10.0 * np.log10(total / noise_power))
 
 
-def lock_anchor_fold_index(hyp_label):
-    """Index of the first pulse belonging to the hypothesis' final-rate train.
-
-    Pure hypotheses anchor at pulse 0. For a switch at change-point c, pulses
-    0..c-1 are spaced at the old rate; pulse c is the first one followed by a
-    final-rate gap, so projecting the final PRI from it stays on-train.
-    """
-    if hyp_label.startswith('A_to_B_c') or hyp_label.startswith('B_to_A_c'):
-        return int(hyp_label.split('c')[1])
-    return 0
+def detection_pri_seconds(hyp_label, tip, tip_secondary):
+    """PRI in force at the end of a detection's train (its final rate)."""
+    _, last_rate = hyp_label_to_rate_state(hyp_label)
+    return tip_secondary if last_rate == 'B' and tip_secondary else tip
 
 
-def lock_candidate_from_detection(detection, segment_start_seconds, n_ws, fs,
-                                  pri_seconds):
-    anchor_window = detection.fold_info['fold_windows'][
-        lock_anchor_fold_index(detection.hyp_label)]
+def candidate_from_detection(detection, segment_start_seconds, n_ws, fs,
+                             pri_seconds):
     return PulseLock(
         freq_hz=float(detection.freq_hz),
-        anchor_seconds=segment_start_seconds + anchor_window * n_ws / fs,
+        anchor_seconds=(segment_start_seconds
+                        + detection.fold_info['fold_windows'][0] * n_ws / fs),
         pri_seconds=float(pri_seconds),
         score_ratio=float(detection.score_ratio),
-        nominal_pri_seconds=float(pri_seconds),
     )
 
 
-def fit_lock_timing(buffered_slices, freq_axis, lock, n_ws, fs,
-                    span_ppm=PRI_FIT_SPAN_PPM, step_ppm=PRI_FIT_STEP_PPM,
-                    footprint_offsets=(-1, 0, 1, 2), anchor_steps=11,
-                    on_step=None):
-    """Refit a lock's PRI and sub-step anchor from every buffered slice.
-
-    Sums on-pulse power at the lock's frequency across all slices for each
-    (anchor offset, PRI) on a grid: ``anchor_steps`` offsets spanning ±one
-    STFT step around the current anchor, by ``step_ppm`` over ±``span_ppm``
-    around the nominal PRI. Returns the lock at the best anchor offset and
-    the centre of the PRI plateau within one noise sigma of the maximum.
-
-    The anchor comes from a fold window index, which is quantised to a step
-    and may sit a whole window early (local-max pooling); with the anchor
-    held fixed, the fit would tilt the PRI by up to a few hundred ppm over
-    one dwell just to re-centre the far pulses on their windows. Fitting the
-    offset jointly removes that bias.
-
-    The fit footprint is the four windows a pulse touches at 50 % overlap
-    (half, full, full, half around the projected start), wider than the
-    two-window measurement footprint: a two-window sum over that symmetric
-    response scores a whole-step alias of the PRI exactly as well as the
-    truth, and the fit then picks either.
-
-    pri_ppm_uncertainty is the plateau half-width, but never less than what
-    the fitted span can resolve: one STFT step over the longest lever arm
-    from the anchor (anchor offset and PRI tilt trade against each other, so
-    the drift across the span is only pinned to about a step). With a strong
-    tag the noise-sigma plateau collapses to the grid step, which says
-    nothing about how well two dwells 50 s apart can pin a 2 s PRI.
-
-    Zero-filled windows (a slice's 'gap_windows', inclusive index ranges)
-    are excluded: they hold no signal, so counting them would pull the fit
-    toward whichever PRI keeps pulses out of the hole. A slice that is all
-    gap contributes nothing.
-
-    A plateau that touches either grid edge is a clipped fit: the true PRI
-    may lie outside the span, so the prior estimate is kept, its uncertainty
-    widened to the span, and pri_fit_clipped set for the caller to log.
-
-    ``on_step()`` is called after each anchor offset is scanned; the cost of
-    one grows with the number of buffered slices.
-    """
-    if not math.isfinite(lock.nominal_pri_seconds):
-        raise ValueError('fit_lock_timing needs a lock with nominal_pri_seconds')
-    nominal = lock.nominal_pri_seconds
-    ppm_grid = np.arange(-span_ppm, span_ppm + step_ppm / 2.0, step_ppm)
-    freq_bin = int(np.argmin(np.abs(freq_axis - lock.freq_hz)))
-    rows = []
-    for buffered in buffered_slices:
-        power = buffered['power']
-        noise_power = buffered.get('noise_power')
-        if noise_power is None:
-            noise_power = estimate_noise_power(power)
-        n_time = power.shape[1]
-        valid = np.ones(n_time, dtype=bool)
-        for start, end in buffered.get('gap_windows', ()):
-            valid[max(0, start):min(n_time, end + 1)] = False
-        rows.append((power[freq_bin], float(noise_power[freq_bin]),
-                     buffered['segment_start_s'], n_time, buffered['k'], valid))
-    if not rows:
-        return lock
-
-    footprint_offsets = np.asarray(footprint_offsets, dtype=np.int64)
-    step_s = n_ws / fs
-    anchor_grid = np.linspace(-1.0, 1.0, anchor_steps) * step_s
-
-    def _scan(anchor_seconds):
-        energy = np.zeros(ppm_grid.size)
-        variance = np.zeros(ppm_grid.size)
-        n_used = np.zeros(ppm_grid.size, dtype=np.int64)
-        for i, ppm in enumerate(ppm_grid):
-            pri = nominal * (1.0 + ppm * 1e-6)
-            for row, noise, segment_start, n_time, max_pulses, valid in rows:
-                idx = pulse_indices_at_known_phase(
-                    segment_start, n_time, anchor_seconds, pri, n_ws, fs, max_pulses)
-                footprint = (idx[:, None] + footprint_offsets[None, :]).ravel()
-                footprint = footprint[(footprint >= 0) & (footprint < n_time)]
-                footprint = footprint[valid[footprint]]
-                n_used[i] += footprint.size
-                energy[i] += float(row[footprint].sum()) - footprint.size * noise
-                variance[i] += footprint.size * noise * noise
-        # A hypothesis whose every footprint fell in a gap has no evidence;
-        # its zero must not outscore data-backed (possibly negative) ones.
-        # Nor may one that kept only a sliver of its windows win on
-        # starvation alone.
-        if n_used.max() > 0:
-            energy[n_used < 0.5 * n_used.max()] = -np.inf
-        return energy, variance, n_used
-
-    best_anchor = lock.anchor_seconds
-    energy = variance = n_used = None
-    for offset in anchor_grid:
-        candidate_anchor = lock.anchor_seconds + float(offset)
-        e, v, n = _scan(candidate_anchor)
-        if on_step is not None:
-            on_step()
-        if energy is None or e.max() > energy.max():
-            best_anchor, energy, variance, n_used = candidate_anchor, e, v, n
-
-    best = int(np.argmax(energy))
-    if n_used[best] == 0:
-        return lock   # nothing to fit anywhere on the grid
-    sigma = math.sqrt(max(variance[best], 0.0))
-    plausible = energy >= energy[best] - sigma
-    lo = hi = best
-    while lo > 0 and plausible[lo - 1]:
-        lo -= 1
-    while hi < ppm_grid.size - 1 and plausible[hi + 1]:
-        hi += 1
-    if lo == 0 or hi == ppm_grid.size - 1:
-        return lock._replace(
-            nominal_pri_seconds=nominal,
-            pri_ppm_uncertainty=max(lock.pri_ppm_uncertainty, float(span_ppm)),
-            pri_fit_clipped=True)
-    centre_ppm = 0.5 * (ppm_grid[lo] + ppm_grid[hi])
-    # Lever arm to the farthest window that actually held data: zero-filled
-    # windows were excluded above and pin nothing.
-    lever_s = 0.0
-    for _, _, segment_start, _, _, valid in rows:
-        valid_idx = np.flatnonzero(valid)
-        if valid_idx.size == 0:
-            continue
-        lever_s = max(lever_s,
-                      abs(segment_start + valid_idx[0] * step_s - best_anchor),
-                      abs(segment_start + (valid_idx[-1] + 1) * step_s - best_anchor))
-    resolution_ppm = (step_s / lever_s * 1e6) if lever_s > 0 else span_ppm
-    uncertainty = max(step_ppm, 0.5 * (ppm_grid[hi] - ppm_grid[lo]), resolution_ppm)
-    return lock._replace(anchor_seconds=best_anchor,
-                         pri_seconds=nominal * (1.0 + centre_ppm * 1e-6),
-                         nominal_pri_seconds=nominal,
-                         pri_ppm_uncertainty=float(uncertainty),
-                         pri_fit_clipped=False)
-
-
-def pri_refit_moves_pulses(previous, refined, buffered_slices, n_ws, fs):
-    """True if the refit projects any buffered pulse onto a different STFT window.
-
-    Compares the projected window indices slice by slice: a pulse already
-    near a rounding boundary can move on a shift far smaller than half a
-    window, while a larger shift may leave every index unchanged.
-    """
-    if not buffered_slices:
+def same_emitter(existing, candidate, frequency_tolerance_hz, allowed_pris,
+                 pri_tolerance_seconds):
+    """Candidate identity: same frequency, at one of the collar's configured
+    rates. Phase and the particular rate play no part: a dual-rate collar
+    restarts its train at every switch, and the frequency is what carries
+    across headings."""
+    if abs(existing.freq_hz - candidate.freq_hz) > frequency_tolerance_hz:
         return False
-    if (refined.pri_seconds == previous.pri_seconds
-            and refined.anchor_seconds == previous.anchor_seconds):
-        return False
-    for buffered in buffered_slices:
-        n_time = buffered['power'].shape[1]
-        before = pulse_indices_at_known_phase(
-            buffered['segment_start_s'], n_time, previous.anchor_seconds,
-            previous.pri_seconds, n_ws, fs, buffered['k'])
-        after = pulse_indices_at_known_phase(
-            buffered['segment_start_s'], n_time, refined.anchor_seconds,
-            refined.pri_seconds, n_ws, fs, buffered['k'])
-        if not np.array_equal(before, after):
-            return True
-    return False
+    return any(abs(candidate.pri_seconds - pri) <= pri_tolerance_seconds
+               for pri in allowed_pris)
 
 
-def locks_agree(previous, current, frequency_tolerance_hz,
-                pri_tolerance_seconds, phase_tolerance_seconds):
-    if abs(previous.freq_hz - current.freq_hz) > frequency_tolerance_hz:
-        return False
-    if abs(previous.pri_seconds - current.pri_seconds) > pri_tolerance_seconds:
-        return False
-    phase_delta = current.anchor_seconds - previous.anchor_seconds
-    # The projected phase is only as good as the PRI times the elapsed span.
-    tolerance = max(phase_tolerance_seconds,
-                    previous.pri_ppm_uncertainty * 1e-6 * abs(phase_delta))
-    phase_error = abs(
-        (phase_delta + previous.pri_seconds / 2.0) % previous.pri_seconds
-        - previous.pri_seconds / 2.0)
-    return phase_error <= tolerance
-
-
-def combine_agreeing_locks(previous, current):
-    """Combine two qualified candidates and refine PRI from elapsed cycles."""
-    elapsed = current.anchor_seconds - previous.anchor_seconds
-    cycle_count = max(1, int(round(elapsed / previous.pri_seconds)))
-    refined_pri = elapsed / cycle_count if elapsed > 0 else previous.pri_seconds
-    return PulseLock(
-        freq_hz=(previous.freq_hz + current.freq_hz) / 2.0,
-        anchor_seconds=previous.anchor_seconds,
-        pri_seconds=refined_pri,
-        score_ratio=min(previous.score_ratio, current.score_ratio),
-        nominal_pri_seconds=previous.nominal_pri_seconds,
-        pri_ppm_uncertainty=previous.pri_ppm_uncertainty,
-    )
-
-
-def admit_lock_candidate(bank, candidate, frequency_tolerance_hz,
-                         pri_tolerance_seconds, phase_tolerance_seconds,
+def admit_lock_candidate(bank, candidate, frequency_tolerance_hz, allowed_pris,
+                         pri_tolerance_seconds,
                          max_candidates=MAX_LOCK_CANDIDATES,
-                         locked=False, sightings=None, slice_id=None):
+                         sightings=None, slice_id=None):
     """Offer `candidate` to `bank` (a list of PulseLock), mutating it in place.
 
     Returns (index, event):
-      'merged'   agreed with an existing entry, which is replaced by the
-                 combined lock (a second sighting: confirms that entry);
+      'seen'     same emitter as an existing entry (same_emitter); its
+                 frequency follows the latest sighting, slow drift included;
       'admitted' appended as a new entry;
-      'replaced' bank was full; evicted the weakest entry (pre-lock only);
-      'seen'     agreed with an existing entry but the bank is locked, so the
-                 entry is left as reported (index of that entry);
-      'reanchored' locked bank; same frequency and PRI as an existing entry
-                 but the phase projected from that entry's timing missed.
-                 One emitter cannot occupy one bin at one PRI twice, so the
-                 entry's anchor is moved to this sighting and its PRI left
-                 for the next refit; the sighting is recorded against it.
-                 The caller must re-measure every buffered slice at it;
       'dropped'  no room (index None).
-    Once `locked`, candidate ids have been reported to the controller, so
-    entries are never renumbered or evicted; new candidates only append.
+    Candidate ids are reported to the controller, so entries are never
+    renumbered or evicted.
 
     `sightings`, when given, is the list parallel to `bank` of
     {slice_id: strongest score_ratio} per candidate; it is kept in lockstep
@@ -1028,56 +784,205 @@ def admit_lock_candidate(bank, candidate, frequency_tolerance_hz,
         raise ValueError(
             f'sightings has {len(sightings)} entries but bank has {len(bank)}')
 
-    def _record(index, reset):
+    def _record(index):
         if sightings is None:
             return
-        if reset:
-            if index == len(sightings):
-                sightings.append({})
-            else:
-                sightings[index] = {}
+        if index == len(sightings):
+            sightings.append({})
         entry = sightings[index]
         entry[slice_id] = max(entry.get(slice_id, 0.0), float(candidate.score_ratio))
 
     for index, existing in enumerate(bank):
-        if locks_agree(existing, candidate,
-                       frequency_tolerance_hz=frequency_tolerance_hz,
-                       pri_tolerance_seconds=pri_tolerance_seconds,
-                       phase_tolerance_seconds=phase_tolerance_seconds):
-            if locked:
-                _record(index, reset=False)
-                return index, 'seen'
-            bank[index] = combine_agreeing_locks(existing, candidate)
-            _record(index, reset=False)
-            return index, 'merged'
-    if locked:
-        for index, existing in enumerate(bank):
-            if (abs(existing.freq_hz - candidate.freq_hz) <= frequency_tolerance_hz
-                    and abs(existing.pri_seconds - candidate.pri_seconds) <= pri_tolerance_seconds):
-                bank[index] = existing._replace(anchor_seconds=candidate.anchor_seconds)
-                _record(index, reset=False)
-                return index, 'reanchored'
+        if same_emitter(existing, candidate, frequency_tolerance_hz,
+                        allowed_pris, pri_tolerance_seconds):
+            bank[index] = existing._replace(freq_hz=candidate.freq_hz)
+            _record(index)
+            return index, 'seen'
     if len(bank) < max_candidates:
         bank.append(candidate)
-        _record(len(bank) - 1, reset=True)
+        _record(len(bank) - 1)
         return len(bank) - 1, 'admitted'
-    if locked:
-        return None, 'dropped'
-    weakest = min(range(len(bank)), key=lambda i: bank[i].score_ratio)
-    if candidate.score_ratio > bank[weakest].score_ratio:
-        bank[weakest] = candidate
-        _record(weakest, reset=True)
-        return weakest, 'replaced'
     return None, 'dropped'
 
 
-def promote_to_lock(bank, sightings, index):
-    """Move entry `index` to position 0 (the provisional lock) in both lists."""
-    if len(sightings) != len(bank):
-        raise ValueError(
-            f'sightings has {len(sightings)} entries but bank has {len(bank)}')
-    bank.insert(0, bank.pop(index))
-    sightings.insert(0, sightings.pop(index))
+def fold_sidebands(detections, min_db=SIDEBAND_MIN_DB,
+                   timing_windows=SIDEBAND_TIMING_WINDOWS):
+    """Split one dwell's detections into emitters and spectral sidebands.
+
+    A strong pulse train shows weaker components at other frequencies with
+    exactly its pulse timing (30-35 dB down on 2026-10-13). A detection is
+    such a sideband when at least half of its fold windows lie within
+    `timing_windows` of the stronger detection's and that detection's
+    per-pulse power is at least `min_db` higher. Two real collars sharing a
+    pulse grid to a few STFT steps within one dwell are not a practical case.
+
+    Returns (emitters, sidebands) with sidebands a list of
+    (sideband, carrier) pairs; order within `emitters` is preserved.
+    """
+    ratio = 10.0 ** (min_db / 10.0)
+    emitters, sidebands = [], []
+    for det in sorted(detections, key=lambda d: -d.signal_power):
+        windows = np.asarray(det.fold_info['fold_windows'], dtype=np.int64)
+        carrier = None
+        for stronger in emitters:
+            if not (np.isfinite(stronger.signal_power) and stronger.signal_power > 0):
+                continue
+            if not (det.signal_power * ratio <= stronger.signal_power):
+                continue
+            ref = np.asarray(stronger.fold_info['fold_windows'], dtype=np.int64)
+            near = np.min(np.abs(windows[:, None] - ref[None, :]), axis=1) <= timing_windows
+            if np.count_nonzero(near) * 2 >= windows.size:
+                carrier = stronger
+                break
+        if carrier is None:
+            emitters.append(det)
+        else:
+            sidebands.append((det, carrier))
+    order = {id(d): i for i, d in enumerate(detections)}
+    emitters.sort(key=lambda d: order[id(d)])
+    return emitters, sidebands
+
+
+def research_bins(freq_axis, freq_hz, radius=RESEARCH_BIN_RADIUS):
+    """Bin indices searched by a frequency-only re-search around freq_hz."""
+    centre = int(np.argmin(np.abs(freq_axis - freq_hz)))
+    return np.arange(max(0, centre - radius), min(freq_axis.size, centre + radius + 1))
+
+
+def measure_candidate(buffered, candidate_id, candidate, research, freq_axis,
+                      n_ws, fs, n_w, tip, tip_secondary):
+    """Final result for one candidate on one slice, from that slice alone.
+
+    If the full fold search sighted the candidate on this slice
+    (`buffered['sightings']`), the train is measured at that sighting's own
+    windows and rate. Otherwise `research(power, bins)` searches the
+    candidate's bins only (RESEARCH_BIN_RADIUS) with its own null and
+    returns fold_detect's ``(detections, best_candidate)``; a train found
+    there without a dominant fold is measured the same way. Nothing found
+    is a non-detection, which the bearing fit treats as censored. A train
+    found but with every pulse in a zero-filled window has no power to
+    report and is returned with measurable=False. No timing is ever carried
+    over from another slice.
+    """
+    psd_scale = float(fs * n_w)
+    power = buffered['power']
+    noise_power = buffered['noise_power']
+    detection = buffered['sightings'].get(candidate_id)
+    sighted = detection is not None
+    research_ratio = 0.0
+    if detection is None:
+        found, best = research(power, research_bins(freq_axis, candidate.freq_hz))
+        if found:
+            research_ratio = max(float(d.score_ratio) for d in found)
+        found = [d for d in found if not d.fold_info['dominant_fold']]
+        if found:
+            detection = found[0]
+            research_ratio = float(detection.score_ratio)
+        elif best is not None:
+            research_ratio = float(best['score_ratio'])
+    nan = float('nan')
+    if detection is not None:
+        freq_bin = int(np.argmin(np.abs(freq_axis - detection.freq_hz)))
+        signal, noise_at_bin, kept, n_windows = measure_at_pulse_windows(
+            power, freq_bin, detection.fold_info['fold_windows'], noise_power,
+            gap_windows=buffered['gap_windows'])
+        if kept.size and np.isfinite(signal):
+            segment_start = buffered['segment_start_s']
+            windows = detection.fold_info['fold_windows']
+            rate_state, _ = hyp_label_to_rate_state(detection.hyp_label)
+            # The train may continue past its K folds inside the dwell (the
+            # dwell is sized for the slower rate): step whole PRIs past its end.
+            pri = detection_pri_seconds(detection.hyp_label, tip, tip_secondary)
+            last_pulse_s = segment_start + windows[-1] * n_ws / fs
+            segment_end_s = segment_start + power.shape[1] * n_ws / fs
+            next_pulse_s = last_pulse_s + max(1, math.ceil((segment_end_s - last_pulse_s) / pri)) * pri
+            return CandidateReport(
+                detected=True, sighted=sighted,
+                freq_hz=float(detection.freq_hz),
+                signal_power_psd=signal / kept.size / psd_scale,
+                noise_psd=noise_at_bin / psd_scale,
+                n_pulses=int(kept.size), n_windows=int(n_windows),
+                snr_db=lock_snr_db(signal / psd_scale, noise_at_bin / psd_scale, n_windows),
+                first_pulse_s=segment_start + kept[0] * n_ws / fs,
+                next_pulse_s=float(next_pulse_s),
+                rate_state=rate_state,
+                score_ratio=float(detection.score_ratio) if sighted else 0.0,
+                research_ratio=research_ratio,
+                hyp_label=detection.hyp_label)
+    freq_bin = int(np.argmin(np.abs(freq_axis - candidate.freq_hz)))
+    return CandidateReport(
+        detected=False, sighted=sighted, freq_hz=float(candidate.freq_hz),
+        signal_power_psd=nan, noise_psd=float(noise_power[freq_bin]) / psd_scale,
+        n_pulses=0, n_windows=0, snr_db=0.0,
+        first_pulse_s=buffered['segment_start_s'], next_pulse_s=0.0,
+        rate_state=RATE_STATE_A, score_ratio=0.0, research_ratio=research_ratio,
+        hyp_label='', measurable=detection is None)
+
+
+class RotationCandidates:
+    """Candidate bank for one collection: who the emitters are, which slice
+    sighted which, and which (slice, candidate) results are still owed.
+
+    Each buffered slice dict carries 'slice_id', 'sightings'
+    ({candidate_id: Detection}) and 'measured' (candidate ids whose result
+    has been reported). A result, once reported, is final.
+    """
+
+    def __init__(self, tip, tip_secondary, n_ws, fs, lock_score_ratio,
+                 expected_offset_hz=None, max_candidates=MAX_LOCK_CANDIDATES):
+        self.tip = tip
+        self.tip_secondary = tip_secondary
+        self.n_ws = n_ws
+        self.fs = fs
+        self.lock_score_ratio = lock_score_ratio
+        self.expected_offset_hz = expected_offset_hz
+        self.max_candidates = max_candidates
+        self.allowed_pris = tuple(p for p in (tip, tip_secondary) if p)
+        self.bank = []
+        self.sightings = []
+
+    def qualifies(self, detection):
+        if detection.score_ratio < self.lock_score_ratio:
+            return False
+        if detection.fold_info['dominant_fold']:
+            return False
+        if (self.expected_offset_hz is not None
+                and abs(detection.freq_hz - self.expected_offset_hz) > ACQUISITION_SEARCH_HZ):
+            return False
+        return True
+
+    def offer(self, buffered, detections, segment_start_s):
+        """Bank this slice's full-search detections, strongest first.
+
+        Returns (events, sidebands): events is a list of
+        (index, event, candidate, detection) for every qualifying emitter,
+        sidebands the (sideband, carrier) pairs left out of the bank.
+        """
+        emitters, sidebands = fold_sidebands(detections)
+        events = []
+        for detection in sorted((d for d in emitters if self.qualifies(d)),
+                                key=lambda d: d.score_ratio, reverse=True):
+            candidate = candidate_from_detection(
+                detection, segment_start_s, self.n_ws, self.fs,
+                detection_pri_seconds(detection.hyp_label, self.tip, self.tip_secondary))
+            index, event = admit_lock_candidate(
+                self.bank, candidate,
+                frequency_tolerance_hz=LOCKED_SEARCH_HZ,
+                allowed_pris=self.allowed_pris,
+                pri_tolerance_seconds=self.n_ws / self.fs,
+                max_candidates=self.max_candidates,
+                sightings=self.sightings, slice_id=buffered['slice_id'])
+            if index is not None:
+                buffered['sightings'].setdefault(index, detection)
+            events.append((index, event, candidate, detection))
+        return events, sidebands
+
+    def pending(self, buffered_slices):
+        """(slice, candidate_id, candidate) pairs with no result reported yet."""
+        return [(buffered, candidate_id, candidate)
+                for buffered in buffered_slices
+                for candidate_id, candidate in enumerate(self.bank)
+                if candidate_id not in buffered['measured']]
 
 
 def compute_segment_samples(n_ws, n_ol, K, N_A, N_B=None):
@@ -1211,6 +1116,24 @@ NULL_MIN_PERMUTATIONS = 10
 # A fold counts as a pulse train (and is taken out of the null) only if at
 # least half its folds exceed this multiple of the bin noise.
 NULL_TRAIN_FOLD_SNR = 3.0
+# In a bin that carries a train, any window this far above the bin noise,
+# and this far above the median of its own column, is one of the train's
+# pulses even off the fold's grid (a rate switch inside the dwell restarts
+# the train). The column test keeps broadband impulses in the null.
+NULL_TRAIN_OUTLIER_SNR = 10.0
+
+
+def is_pulse_train(fold_powers, noise):
+    """Most folds well above the bin noise: a train, whatever one fold does.
+
+    A pulse 20 dB stronger than the rest (a collar being handled) makes one
+    fold dominate the sum, but impulses cannot put half of K folds above
+    NULL_TRAIN_FOLD_SNR x noise. At least two folds are required, since half
+    of K=2 is a single fold.
+    """
+    fold_powers = np.asarray(fold_powers)
+    needed = max(2, -(-fold_powers.size // 2))
+    return int(np.count_nonzero(fold_powers > NULL_TRAIN_FOLD_SNR * noise)) >= needed
 
 
 def permutation_null_threshold(power, noise_power, pf, n_perm,
@@ -1621,10 +1544,12 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         # neighbouring bins) inflate the null they are tested against, badly
         # so for a strong tag at small K. Take the bins that clear it plus the
         # strongest bin; for each whose fold looks like a pulse train (most
-        # folds well above the bin noise, no single dominant fold), redraw
-        # the train's windows from the rest of the slice and re-derive the
-        # null without it. A few coincident impulses fail the train test and
-        # stay in the null.
+        # folds well above the bin noise), redraw the train's windows from the
+        # rest of the slice and re-derive the null without it. A few
+        # coincident impulses fail the train test and stay in the null. One
+        # dominant fold does not fail it: on 2026-10-13 (rotation 2, 315 deg)
+        # that left a 60 dB train in its own null, five orders of magnitude
+        # too high, and unsighted.
         norm_scores = best_scores / noise_power
         provisional = norm_scores > base_threshold * detection_margin
         if frequency_mask is not None:
@@ -1635,17 +1560,25 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         candidates = set(np.flatnonzero(provisional).tolist())
         candidates.add(strongest)
         drop_windows = []
+        column_median = None
         for b in sorted(candidates):
             on_idx = _winning_windows(b)
             on_powers = _local_peak_powers_1d(power[b], on_idx, local_radius=FOLD_LOCAL_RADIUS)
-            if float(np.max(on_powers)) / max(float(np.sum(on_powers)), 1e-30) > DOMINANT_FOLD_THRESHOLD:
-                continue
-            if int(np.count_nonzero(on_powers > NULL_TRAIN_FOLD_SNR * noise_power[b])) < -(-len(on_powers) // 2):
+            if not is_pulse_train(on_powers, noise_power[b]):
                 continue
             # The segment holds more than K pulses of the train (it is sized
             # for the slowest rate); extend the fold's grid across the whole
             # segment so those pulses do not stay in the null either.
             train = _extend_pulse_grid(on_idx, n_time)
+            # Pulses off that grid (the train restarted at a rate switch) are
+            # caught by level: tone-like windows far above this bin's noise.
+            if column_median is None:
+                column_median = np.median(power / noise_power[:, None], axis=0)
+            level = power[b] / noise_power[b]
+            outliers = np.flatnonzero(
+                (level > NULL_TRAIN_OUTLIER_SNR)
+                & (level > NULL_TRAIN_OUTLIER_SNR * np.maximum(column_median, 1.0)))
+            train = np.union1d(train, outliers)
             # A pulse spans up to 3 windows at 50 % overlap, the fold index may
             # sit one window early (pooling), and the grid rounds by up to one
             # window, so drop from r+2 before to r+3 after each start.
@@ -1825,6 +1758,10 @@ def fold_detect(power, N, pf, Fs, nfft, n_w, n_ol, samples_needed,
         p_sum = float(np.sum(on_powers))
         max_fold_fraction = float(np.max(on_powers) / max(p_sum, 1e-30))
         fold_info = {'max_fold_fraction': max_fold_fraction,
+                     # A transient, not a train: one fold dominates and most
+                     # folds are not clearly above noise.
+                     'dominant_fold': (max_fold_fraction > DOMINANT_FOLD_THRESHOLD
+                                       and not is_pulse_train(on_powers, noise_power[b])),
                      'fold_snrs': fold_snrs_db,
                      'fold_windows': [int(x) for x in on_idx]}
         # Per pulse, so the bearing fit sees the same scale whatever K was.
@@ -2223,15 +2160,13 @@ def main():
     det_total  = 0
     run_start  = time.monotonic()
     last_detection_ts = None  # Track last detection time for inter-pulse delta
-    # Competing lock candidates; index 0 becomes the provisional lock
-    # (pulse_lock). Entries are frozen and append-only once it is set.
-    lock_candidates = []
-    # Parallel to lock_candidates: {slice_id: fold score_ratio} for every
-    # slice on which the candidate was independently found by the fold
-    # search. Reported on measured slices so the controller can count how
-    # many headings saw the train, not just how many were measured at it.
-    lock_sightings = []
-    pulse_lock = None
+    # Emitters found so far in the collection; once any is banked every
+    # heading is reported per candidate instead of as an acquisition hit.
+    candidates = RotationCandidates(
+        tip=args.tip, tip_secondary=args.tip_secondary, n_ws=n_ws, fs=args.fs,
+        lock_score_ratio=args.lock_score_ratio,
+        expected_offset_hz=(args.freq - args.center_freq * 1e6
+                            if args.freq and args.center_freq > 0 else None))
     buffered_slices = deque(maxlen=MAX_BUFFERED_SLICES)
     buffered_slices_evicted = 0
     slice_log_dirs = {}   # slice_id -> heading log dir opened by this process
@@ -2545,6 +2480,22 @@ def main():
             send_compute_progress_udp(pulse_sock, pulse_dest, args.tag_id,
                                       *analysing_ids, stage, done, total)
 
+    def _research(power_arr, bins, on_progress):
+        """Fold search of `bins` only, with a null over those bins alone."""
+        bins = bins[usable_band_mask[bins]]
+        found, _, best = fold_detect(
+            power_arr[bins], N, args.pf, args.fs, nfft, n_w, n_ol, samples_needed,
+            threshold_state, fold_offsets=fold_offsets, Wf=Wf[bins],
+            detection_margin=args.detection_margin,
+            hypotheses=rate_switch_hypotheses, N_B=N_B,
+            N_A_exact=N_exact, N_B_exact=N_B_exact,
+            max_detections=1, k_folds=K,
+            n_null_permutations=args.null_permutations,
+            null_time_budget_s=(args.null_time_budget
+                                if args.null_time_budget > 0 else None),
+            on_null_progress=on_progress)
+        return found, best
+
     try:
         while not _should_stop:
             if capture_failure:
@@ -2644,8 +2595,10 @@ def main():
                                      slog=slog,
                                      frequency_mask=frequency_mask,
                                      # Extra peaks feed the candidate bank
-                                     # only; reports stay single-peak.
-                                     max_detections=(MAX_LOCK_CANDIDATES
+                                     # only; reports stay single-peak. No cap:
+                                     # sidebands are folded out before the
+                                     # bank applies MAX_LOCK_CANDIDATES.
+                                     max_detections=(nfft
                                                      if collection_control is not None
                                                      else 1),
                                      k_folds=K,
@@ -2661,7 +2614,7 @@ def main():
             detections = detections[:1]
 
             # Stream time only: a wall-clock fallback would put this slice on a
-            # different time base from the lock anchor.
+            # different time base from the rest of the collection.
             segment_start_s = current_ts / 1e9
             if collection_control is not None:
                 if len(buffered_slices) == buffered_slices.maxlen:
@@ -2669,121 +2622,92 @@ def main():
                     if buffered_slices_evicted == 1:
                         print(f'WARNING: rotation slice buffer full '
                               f'({MAX_BUFFERED_SLICES}); dropping oldest cycle; '
-                              f'candidates admitted from now on cannot measure it',
+                              f'candidates admitted from now on cannot be searched for on it',
                               file=sys.stderr, flush=True)
                 # Kept for the whole rotation (bounded by maxlen) so a candidate
-                # admitted late can be measured on every earlier heading.
-                # Zero-filled STFT windows are recorded so the PRI fit can skip them.
+                # admitted late can be searched for on every earlier heading.
+                # Zero-filled STFT windows are recorded so measurement can skip them.
                 gap_windows = [
                     (max(0, (gf_offset - n_ol) // n_ws), (gf_offset + gf_len - 1) // n_ws)
                     for gf_offset, gf_len in (had_gap_fills or ())]
-                buffered_slices.append({
+                current_slice = {
                     'collection_id': cycle_collection_id,
                     'slice_id': cycle_slice_id,
                     'cycle': cycle,
                     'power': power,
                     'noise_power': slice_noise_power(power, gap_windows),
                     'segment_start_s': segment_start_s,
-                    'k': K,
                     'had_gap': had_gap,
                     'gap_windows': gap_windows,
                     'heading_deg': armed_heading_deg,
-                    'measured': set(),   # candidate ids already reported
-                })
+                    'sightings': {},     # candidate id -> this slice's full-search Detection
+                    'measured': set(),   # candidate ids whose result was reported
+                }
+                buffered_slices.append(current_slice)
 
-                qualified = [
-                    detection for detection in bank_detections
-                    if detection.score_ratio >= args.lock_score_ratio
-                    and detection.fold_info['max_fold_fraction'] <= DOMINANT_FOLD_THRESHOLD
-                ]
-                if args.freq and args.center_freq > 0:
-                    expected_offset_hz = args.freq - args.center_freq * 1e6
-                    qualified = [
-                        detection for detection in qualified
-                        if abs(detection.freq_hz - expected_offset_hz) <= ACQUISITION_SEARCH_HZ
-                    ]
-                if qualified:
-                    # Strongest first so it claims index 0 before weaker
-                    # candidates are banked behind it.
-                    for detection in sorted(qualified, key=lambda item: item.score_ratio,
-                                            reverse=True):
-                        _, last_rate = hyp_label_to_rate_state(detection.hyp_label)
-                        candidate_pri = (
-                            args.tip_secondary
-                            if last_rate == 'B' and args.tip_secondary else args.tip)
-                        current_candidate = lock_candidate_from_detection(
-                            detection, segment_start_s, n_ws, args.fs, candidate_pri)
-                        bank_index, event = admit_lock_candidate(
-                            lock_candidates, current_candidate,
-                            frequency_tolerance_hz=LOCKED_SEARCH_HZ,
-                            pri_tolerance_seconds=n_ws / args.fs,
-                            phase_tolerance_seconds=LOCK_PHASE_TOLERANCE_STEPS * n_ws / args.fs,
-                            locked=pulse_lock is not None,
-                            sightings=lock_sightings, slice_id=cycle_slice_id)
-                        if bank_index is None:
-                            slog.emit(LOCK_CANDIDATE,
-                                      f'  [CANDIDATE] dropped freq={current_candidate.freq_hz:+.1f} Hz '
-                                      f'score_ratio={detection.score_ratio:.1f} (bank full)',
-                                      cycle=cycle, event='dropped',
-                                      freq_hz=current_candidate.freq_hz,
-                                      anchor_seconds=current_candidate.anchor_seconds,
-                                      pri_seconds=current_candidate.pri_seconds,
-                                      score_ratio=detection.score_ratio,
-                                      hyp_label=detection.hyp_label,
-                                      slice_id=cycle_slice_id)
-                            continue
-                        sightings = lock_sightings[bank_index]
-                        banked = lock_candidates[bank_index]
-                        if pulse_lock is None:
-                            # Any qualifying candidate becomes the provisional
-                            # lock at once: every heading is measured at it and
-                            # the controller confirms retrospectively (a second
-                            # sighting on another heading, or a revisit).
-                            promote_to_lock(lock_candidates, lock_sightings, bank_index)
-                            bank_index = 0
-                            pulse_lock = banked
-                            print(f'LOCKED freq={pulse_lock.freq_hz:+.1f} Hz '
-                                  f'phase={pulse_lock.anchor_seconds:.6f} s '
-                                  f'PRI={pulse_lock.pri_seconds:.6f} s '
-                                  f'(score_ratio={detection.score_ratio:.1f}, '
-                                  f'{len(lock_candidates)} candidate(s) banked)',
-                                  flush=True)
-                            event = 'locked'
-                        elif event == 'admitted':
-                            print(f'CANDIDATE {bank_index} admitted after lock: '
-                                  f'freq={banked.freq_hz:+.1f} Hz '
-                                  f'score_ratio={detection.score_ratio:.1f}; '
-                                  f'measuring all buffered headings', flush=True)
-                        elif event == 'seen':
-                            print(f'CANDIDATE {bank_index} sighted again on slice '
-                                  f'{cycle_slice_id} ({len(sightings)} slice(s))',
-                                  flush=True)
-                        elif event == 'reanchored':
-                            # Earlier headings were measured at the timing
-                            # that just missed; measure them all again.
-                            for buffered in buffered_slices:
-                                buffered['measured'].discard(bank_index)
-                            print(f'CANDIDATE {bank_index} re-anchored on slice '
-                                  f'{cycle_slice_id}: phase projected from its '
-                                  f'timing missed; re-measuring all buffered headings',
-                                  flush=True)
+                was_locked = bool(candidates.bank)
+                bank_events, sidebands = candidates.offer(
+                    current_slice, bank_detections, segment_start_s)
+                for sideband, carrier in sidebands:
+                    slog.emit(LOCK_CANDIDATE,
+                              f'  [CANDIDATE] sideband freq={sideband.freq_hz:+.1f} Hz '
+                              f'score_ratio={sideband.score_ratio:.1f} folded into '
+                              f'{carrier.freq_hz:+.1f} Hz',
+                              cycle=cycle, event='sideband',
+                              freq_hz=float(sideband.freq_hz),
+                              carrier_freq_hz=float(carrier.freq_hz),
+                              power_ratio_db=float(10.0 * np.log10(
+                                  carrier.signal_power / max(sideband.signal_power, 1e-300))),
+                              score_ratio=sideband.score_ratio,
+                              slice_id=cycle_slice_id)
+                for bank_index, event, offered, detection in bank_events:
+                    if bank_index is None:
                         slog.emit(LOCK_CANDIDATE,
-                                  f'  [CANDIDATE {bank_index}] {event} '
-                                  f'freq={banked.freq_hz:+.1f} Hz '
-                                  f'phase={banked.anchor_seconds:.6f} s '
-                                  f'PRI={banked.pri_seconds:.6f} s '
-                                  f'score_ratio={detection.score_ratio:.1f}',
-                                  cycle=cycle, event=event,
-                                  candidate_id=bank_index,
-                                  freq_hz=banked.freq_hz,
-                                  anchor_seconds=banked.anchor_seconds,
-                                  pri_seconds=banked.pri_seconds,
+                                  f'  [CANDIDATE] dropped freq={offered.freq_hz:+.1f} Hz '
+                                  f'score_ratio={detection.score_ratio:.1f} (bank full)',
+                                  cycle=cycle, event='dropped',
+                                  freq_hz=offered.freq_hz,
+                                  anchor_seconds=offered.anchor_seconds,
+                                  pri_seconds=offered.pri_seconds,
                                   score_ratio=detection.score_ratio,
                                   hyp_label=detection.hyp_label,
-                                  slice_id=cycle_slice_id,
-                                  locked=pulse_lock is not None,
-                                  n_candidates=len(lock_candidates),
-                                  n_sightings=len(sightings))
+                                  slice_id=cycle_slice_id)
+                        continue
+                    sightings = candidates.sightings[bank_index]
+                    banked = candidates.bank[bank_index]
+                    if not was_locked and bank_index == 0:
+                        # The first qualifying candidate locks at once; the
+                        # controller confirms it from later headings or a revisit.
+                        print(f'LOCKED freq={banked.freq_hz:+.1f} Hz '
+                              f'PRI={banked.pri_seconds:.6f} s '
+                              f'(score_ratio={detection.score_ratio:.1f})', flush=True)
+                        event = 'locked'
+                    elif event == 'admitted':
+                        print(f'CANDIDATE {bank_index} admitted: '
+                              f'freq={banked.freq_hz:+.1f} Hz '
+                              f'score_ratio={detection.score_ratio:.1f}; '
+                              f'searching all buffered headings at its frequency', flush=True)
+                    elif event == 'seen':
+                        print(f'CANDIDATE {bank_index} sighted again on slice '
+                              f'{cycle_slice_id} ({len(sightings)} slice(s))',
+                              flush=True)
+                    slog.emit(LOCK_CANDIDATE,
+                              f'  [CANDIDATE {bank_index}] {event} '
+                              f'freq={banked.freq_hz:+.1f} Hz '
+                              f'phase={offered.anchor_seconds:.6f} s '
+                              f'PRI={offered.pri_seconds:.6f} s '
+                              f'score_ratio={detection.score_ratio:.1f}',
+                              cycle=cycle, event=event,
+                              candidate_id=bank_index,
+                              freq_hz=banked.freq_hz,
+                              anchor_seconds=offered.anchor_seconds,
+                              pri_seconds=offered.pri_seconds,
+                              score_ratio=detection.score_ratio,
+                              hyp_label=detection.hyp_label,
+                              slice_id=cycle_slice_id,
+                              locked=True,
+                              n_candidates=len(candidates.bank),
+                              n_sightings=len(sightings))
             stft_ms = (t_stft_end - t_stft_start) * 1000.0
             fold_ms = (t_fold_end - t_fold_start) * 1000.0
 
@@ -2825,165 +2749,107 @@ def main():
             report_attempted = False
             report_sent = True
             locked_current_sent = False
-            if pulse_lock is not None and collection_control is not None:
-                # Refit each candidate's PRI over the whole rotation so far.
-                # Earlier measurements are only invalidated when the change
-                # can move a pulse onto a different STFT window; below that
-                # the re-measurement would just repeat the same numbers.
-                for candidate_id, candidate in enumerate(lock_candidates):
-                    def _refit_step(done=candidate_id):
-                        _report_compute(ComputeStage.REFIT, done, len(lock_candidates))
-                    _refit_step()
-                    refined = fit_lock_timing(
-                        buffered_slices, Wf, candidate, n_ws, args.fs,
-                        on_step=_refit_step)
-                    if refined == candidate:
-                        continue
-                    lock_candidates[candidate_id] = refined
-                    if refined.pri_fit_clipped:
-                        nominal = refined.nominal_pri_seconds
-                        slog.emit(LOCK_CANDIDATE,
-                                  f'  [CANDIDATE {candidate_id}] WARNING: PRI fit plateau '
-                                  f'reached the ±{PRI_FIT_SPAN_PPM:.0f} ppm search edge over '
-                                  f'{len(buffered_slices)} slice(s); keeping '
-                                  f'{(refined.pri_seconds / nominal - 1.0) * 1e6:+.0f} ppm '
-                                  f'±{refined.pri_ppm_uncertainty:.0f}',
-                                  cycle=cycle, event='pri_fit_clipped',
-                                  candidate_id=candidate_id,
-                                  freq_hz=refined.freq_hz,
-                                  anchor_seconds=refined.anchor_seconds,
-                                  pri_seconds=refined.pri_seconds,
-                                  pri_ppm=(refined.pri_seconds / nominal - 1.0) * 1e6,
-                                  pri_ppm_uncertainty=refined.pri_ppm_uncertainty,
-                                  span_ppm=PRI_FIT_SPAN_PPM,
-                                  n_slices=len(buffered_slices),
-                                  slice_id=cycle_slice_id)
-                        continue
-                    remeasure = pri_refit_moves_pulses(
-                        candidate, refined, buffered_slices, n_ws, args.fs)
-                    if remeasure:
-                        for buffered in buffered_slices:
-                            buffered['measured'].discard(candidate_id)
-                    nominal = refined.nominal_pri_seconds
-                    slog.emit(LOCK_CANDIDATE,
-                              f'  [CANDIDATE {candidate_id}] PRI fit '
-                              f'{(refined.pri_seconds / nominal - 1.0) * 1e6:+.0f} ppm '
-                              f'±{refined.pri_ppm_uncertainty:.0f} over '
-                              f'{len(buffered_slices)} slice(s)'
-                              f'{"; re-measuring" if remeasure else ""}',
-                              cycle=cycle, event='pri_fit',
-                              candidate_id=candidate_id,
-                              freq_hz=refined.freq_hz,
-                              anchor_seconds=refined.anchor_seconds,
-                              pri_seconds=refined.pri_seconds,
-                              pri_ppm=(refined.pri_seconds / nominal - 1.0) * 1e6,
-                              pri_ppm_uncertainty=refined.pri_ppm_uncertainty,
-                              n_slices=len(buffered_slices),
-                              remeasure=remeasure,
-                              slice_id=cycle_slice_id)
-                pulse_lock = lock_candidates[0]
-
-                # Every retained cycle is reported once per candidate: new
-                # cycles for every candidate, every cycle for a candidate
-                # admitted this cycle, and every cycle again after a PRI
-                # refit. The controller upserts per slice, so the latest
-                # report wins. A failed send is retried next cycle.
-                measure_total = len(buffered_slices) * len(lock_candidates)
-                measure_done = 0
-                for buffered in buffered_slices:
-                    for candidate_id, candidate in enumerate(lock_candidates):
-                        _report_compute(ComputeStage.MEASURE, measure_done, measure_total)
-                        measure_done += 1
-                        if candidate_id in buffered['measured']:
-                            continue
-                        (signal_power_psd, noise_power_psd, locked_indices,
-                         locked_windows) = measure_at_lock_psd(
-                            buffered['power'], Wf, candidate.freq_hz,
-                            buffered['segment_start_s'], candidate.anchor_seconds,
-                            candidate.pri_seconds, n_ws, args.fs, n_w, buffered['k'],
-                            noise_power=buffered['noise_power'],
-                            gap_windows=buffered['gap_windows'])
-                        if locked_indices.size == 0 or not np.isfinite(signal_power_psd):
-                            buffered['measured'].add(candidate_id)
-                            continue
-                        first_pulse_s = (buffered['segment_start_s'] +
-                                         locked_indices[0] * n_ws / args.fs)
-                        locked_snr_db = lock_snr_db(
-                            signal_power_psd, noise_power_psd, locked_windows)
-                        # Per pulse: a slice clipped by a gap or the segment
-                        # edge holds fewer than K; the bearing fit must not see that.
-                        per_pulse_power_psd = signal_power_psd / locked_indices.size
-                        # Fold score of this candidate's independent sighting
-                        # on this slice; 0 when the slice was only measured.
-                        sighting_ratio = lock_sightings[candidate_id].get(
-                            buffered['slice_id'], 0.0)
-                        report_attempted = True
-                        sent = send_pulse_udp(
-                            pulse_sock, pulse_dest,
-                            tag_id=args.tag_id,
-                            frequency_hz=report_frequency_hz(
-                                args.center_freq, args.freq, candidate.freq_hz),
-                            start_time_seconds=first_pulse_s,
-                            predict_next_start_seconds=predict_next_pulse_seconds(
-                                buffered['segment_start_s'], locked_indices,
-                                buffered['power'].shape[1], n_ws, args.fs,
-                                candidate.pri_seconds),
-                            snr=locked_snr_db,
-                            stft_score=sighting_ratio,
-                            group_seq_counter=cycle,
-                            rate_state=rate_state_for_pri(
-                                candidate.pri_seconds, args.tip, args.tip_secondary),
-                            group_snr=per_pulse_power_psd,
-                            detection_status=DETECTION_STATUS_CONFIRMED,
-                            confirmed_status=1,
-                            noise_psd=noise_power_psd,
-                            collection_id=buffered['collection_id'],
-                            slice_id=buffered['slice_id'],
-                            candidate_id=candidate_id,
-                        )
-                        report_sent = sent and report_sent
-                        if not sent:
-                            continue
+            if candidates.bank and collection_control is not None:
+                # One final result per (slice, candidate): this slice for every
+                # candidate, and every buffered slice for a candidate admitted
+                # this cycle. Each comes from that slice's own data (its own
+                # sighting, else a frequency-only re-search), so nothing is
+                # ever re-measured. A failed send is retried next cycle.
+                pending = candidates.pending(buffered_slices)
+                for measure_done, (buffered, candidate_id, candidate) in enumerate(pending):
+                    def _measure_progress(*_, done=measure_done):
+                        _report_compute(ComputeStage.MEASURE, done, len(pending))
+                    _measure_progress()
+                    result = measure_candidate(
+                        buffered, candidate_id, candidate,
+                        lambda power_arr, bins: _research(power_arr, bins, _measure_progress),
+                        Wf, n_ws, args.fs, n_w, args.tip, args.tip_secondary)
+                    report_attempted = True
+                    if not result.measurable:
+                        # A non-detection would tell the bearing fit the tag
+                        # was weak on a heading where it was found.
                         buffered['measured'].add(candidate_id)
-                        retro_flag = ('' if buffered['cycle'] == cycle
-                                      else f'  retro(cycle {buffered["cycle"]})')
-                        seg_dt = datetime.datetime.fromtimestamp(
-                            buffered['segment_start_s'], tz=datetime.timezone.utc)
-                        seg_ts_str = (seg_dt.strftime('%H:%M:%S')
-                                      + f'.{seg_dt.microsecond // 1000:03d}')
-                        freq_str = (f'{args.center_freq + candidate.freq_hz / 1e6:.6f} MHz'
-                                    if args.center_freq > 0
-                                    else f'{candidate.freq_hz:+.1f} Hz')
-                        measured_fields = dict(
-                            cycle=buffered['cycle'],
-                            timestamp_ns=int(buffered['segment_start_s'] * 1e9),
-                            freq_hz=candidate.freq_hz,
-                            snr_db=locked_snr_db,
-                            score_ratio=sighting_ratio,
-                            noise_psd=noise_power_psd,
-                            proc_ms=(time.monotonic() - t0) * 1000.0,
-                            had_gap=buffered['had_gap'],
+                        print(f'WARNING: candidate {candidate_id} found on slice '
+                              f'{buffered["slice_id"]} but every pulse is in a '
+                              f'zero-filled window; no result reported',
+                              file=sys.stderr, flush=True)
+                        slog.emit(LOCK_CANDIDATE,
+                                  f'  [CANDIDATE {candidate_id}] unmeasurable '
+                                  f'slice {buffered["slice_id"]}: every pulse in a gap',
+                                  cycle=buffered['cycle'], event='unmeasurable',
+                                  candidate_id=candidate_id,
+                                  freq_hz=result.freq_hz,
+                                  slice_id=buffered['slice_id'],
+                                  heading_deg=buffered['heading_deg'],
+                                  reported_in_cycle=cycle)
+                        continue
+                    sent = send_pulse_udp(
+                        pulse_sock, pulse_dest,
+                        tag_id=args.tag_id,
+                        frequency_hz=report_frequency_hz(
+                            args.center_freq, args.freq, result.freq_hz),
+                        start_time_seconds=result.first_pulse_s,
+                        predict_next_start_seconds=result.next_pulse_s,
+                        snr=result.snr_db,
+                        stft_score=result.score_ratio,
+                        group_seq_counter=cycle,
+                        rate_state=result.rate_state,
+                        group_snr=result.signal_power_psd if result.detected else 0.0,
+                        detection_status=(DETECTION_STATUS_CONFIRMED if result.detected
+                                          else DETECTION_STATUS_NO_DETECTION),
+                        confirmed_status=1 if result.detected else 0,
+                        noise_psd=result.noise_psd,
+                        collection_id=buffered['collection_id'],
+                        slice_id=buffered['slice_id'],
+                        candidate_id=candidate_id,
+                    )
+                    report_sent = sent and report_sent
+                    if not sent:
+                        continue
+                    buffered['measured'].add(candidate_id)
+                    retro_flag = ('' if buffered['cycle'] == cycle
+                                  else f'  retro(cycle {buffered["cycle"]})')
+                    seg_dt = datetime.datetime.fromtimestamp(
+                        buffered['segment_start_s'], tz=datetime.timezone.utc)
+                    seg_ts_str = (seg_dt.strftime('%H:%M:%S')
+                                  + f'.{seg_dt.microsecond // 1000:03d}')
+                    freq_str = (f'{args.center_freq + result.freq_hz / 1e6:.6f} MHz'
+                                if args.center_freq > 0
+                                else f'{result.freq_hz:+.1f} Hz')
+                    how = ('sighted' if result.sighted
+                           else f're-search {result.research_ratio:.2f}')
+                    measured_fields = dict(
+                        cycle=buffered['cycle'],
+                        timestamp_ns=int(buffered['segment_start_s'] * 1e9),
+                        freq_hz=result.freq_hz,
+                        noise_psd=result.noise_psd,
+                        proc_ms=(time.monotonic() - t0) * 1000.0,
+                        had_gap=buffered['had_gap'],
+                        locked=True,
+                        slice_id=buffered['slice_id'],
+                        candidate_id=candidate_id,
+                        sighted=result.sighted,
+                        research_ratio=result.research_ratio,
+                        # slog is open on the current heading's file;
+                        # the analyzer re-files retro records by this.
+                        heading_deg=buffered['heading_deg'],
+                        reported_in_cycle=cycle)
+                    if result.detected:
+                        measured_fields.update(
+                            snr_db=result.snr_db,
+                            score_ratio=result.score_ratio,
                             confidence='LOCKED',
-                            hyp_label='',
+                            hyp_label=result.hyp_label,
                             detection_status=DETECTION_STATUS_CONFIRMED,
-                            locked=True,
-                            n_pulses=int(locked_indices.size),
-                            per_pulse_power_psd=per_pulse_power_psd,
-                            slice_id=buffered['slice_id'],
-                            candidate_id=candidate_id,
-                            sighted=sighting_ratio > 0.0,
-                            # slog is open on the current heading's file;
-                            # the analyzer re-files retro records by this.
-                            heading_deg=buffered['heading_deg'],
-                            reported_in_cycle=cycle)
+                            n_pulses=result.n_pulses,
+                            per_pulse_power_psd=result.signal_power_psd)
                         measured_human = (
                             f'[{cycle:4d} {seg_ts_str}]  MEASURED  {freq_str}  '
-                            f'({candidate.freq_hz:+.1f} Hz)  '
-                            f'SNR {locked_snr_db:.1f} dB  '
-                            f'pulses {locked_indices.size}  '
-                            f'noise {noise_power_psd:.3e}  '
-                            f'slice {buffered["slice_id"]}'
-                            f'{"  sighted" if sighting_ratio > 0.0 else ""}{retro_flag}')
+                            f'({result.freq_hz:+.1f} Hz)  '
+                            f'SNR {result.snr_db:.1f} dB  '
+                            f'pulses {result.n_pulses}  hyp={result.hyp_label}  '
+                            f'noise {result.noise_psd:.3e}  '
+                            f'slice {buffered["slice_id"]}  {how}{retro_flag}')
                         if candidate_id == 0:
                             if buffered['slice_id'] == cycle_slice_id:
                                 locked_current_sent = True
@@ -2992,10 +2858,23 @@ def main():
                             slog.emit(CANDIDATE_MEASUREMENT,
                                       f'  [CANDIDATE {candidate_id}]{measured_human}',
                                       **measured_fields)
+                    else:
+                        measured_fields.update(
+                            detection_status=DETECTION_STATUS_NO_DETECTION)
+                        measured_human = (
+                            f'[{cycle:4d} {seg_ts_str}]  NOT FOUND  {freq_str}  '
+                            f'noise {result.noise_psd:.3e}  '
+                            f'slice {buffered["slice_id"]}  {how}{retro_flag}')
+                        if candidate_id == 0:
+                            slog.emit(NO_DETECTION, measured_human, **measured_fields)
+                        else:
+                            slog.emit(CANDIDATE_MEASUREMENT,
+                                      f'  [CANDIDATE {candidate_id}]{measured_human}',
+                                      **measured_fields)
 
             if locked_current_sent:
                 det_total += 1
-            elif pulse_lock is not None and collection_control is not None:
+            elif candidates.bank and collection_control is not None:
                 # Locked path already reported (or failed to; REPORT_SEND_FAILED
                 # is raised below). Post-lock fold results only feed the
                 # candidate bank; they are not reported as acquisition hits.
@@ -3021,12 +2900,12 @@ def main():
                 tip_secondary = getattr(args, 'tip_secondary', None)
 
                 for det in detections:
-                    # Fold quality: if any single fold carries >80% of the
-                    # total score, this is likely a transient (not a real
-                    # pulse train).  Matches uavrt_detection's
-                    # selectpeakindex heuristic.  Downgrade to SUBTHRESHOLD
-                    # rather than discarding.
-                    has_dominant_fold = det.fold_info['max_fold_fraction'] > DOMINANT_FOLD_THRESHOLD
+                    # Fold quality: one fold carrying >80% of the score with
+                    # most folds not clearly above noise is a transient, not
+                    # a pulse train (uavrt_detection's selectpeakindex
+                    # heuristic). Downgrade to SUBTHRESHOLD rather than
+                    # discarding.
+                    has_dominant_fold = det.fold_info['dominant_fold']
                     is_marginal = det.score_ratio < confidence_ratio or has_dominant_fold
                     det_status = (DETECTION_STATUS_SUBTHRESHOLD if is_marginal
                                   else DETECTION_STATUS_SUPERTHRESHOLD)

@@ -22,7 +22,7 @@ behaviour, the row here becomes **implemented**, and the proposal file moves to
 | Dual-altitude re-test of suspect slices | [archive/MULTIPATH_ANALYSIS.md](../archive/MULTIPATH_ANALYSIS.md) §2 | invalidated | No fringe pattern at 5 km for a ground-level transmitter (Δr ≈ 2 cm) |
 | Fly higher as a link-budget choice | Review C.9 | open (operational) | Received power ∝ h² in the two-ray regime; ~22 dB ground loss at 400 ft / 5 km / 0.5 m collar |
 | Test-collar capture campaign | [FIELD_TEST_PLAN.md](FIELD_TEST_PLAN.md) | open (field work) | Closes Checks 4, 5 and the full-rotation IQ gap from the April analysis |
-| Fixed-offset amplitude, persistent detector, retrospective lock, frequency priors, single K, whole-rotation PRI fit | 2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md Ch1–5, 7 | implemented | See the status table at the top of that document and [COLLECTION_FLOW.md](../design/COLLECTION_FLOW.md) |
+| Fixed-offset amplitude, persistent detector, retrospective lock, frequency priors, single K, whole-rotation PRI fit | 2026-09_DETECTOR_AMPLITUDE_ANALYSIS.md Ch1–5, 7 | implemented; cross-heading projection and PRI fit removed 2026-10 | Projecting one heading's timing onto another fails whenever a dual-rate collar switches rate (2026-10-13 field test); each heading is now measured from its own dwell, see [COLLECTION_FLOW.md](../design/COLLECTION_FLOW.md#lock-candidates) |
 
 Adding a proposal: create the doc here with a `**Status: open.**` line under the
 title, and add a row above.

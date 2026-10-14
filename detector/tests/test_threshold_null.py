@@ -17,6 +17,7 @@ from pulse_detector import (
     estimate_noise_power,
     fold_detect,
     fold_multi_hypothesis,
+    is_pulse_train,
     permutation_null_threshold,
     resample_windows,
     _compute_fold_scores,
@@ -187,6 +188,67 @@ def test_fold_detect_refines_null_when_tag_clears_first_pass():
     assert thr[0]['dropped_windows'] > 0
     assert thr[0]['n_perm'] == 20
     assert 'blanked_fraction' in thr[0]
+
+
+class _ThresholdLog:
+    def __init__(self):
+        self.record = None
+
+    def emit(self, entry_type, human, **data):
+        if entry_type == 'cycle_threshold':
+            self.record = data
+
+    def emit_raw(self, text):
+        pass
+
+
+def _strong_train_threshold(pulse_times, amplitudes, seed=41):
+    """(refined, threshold, clean threshold) for a strong train on fixed noise."""
+    rng = np.random.default_rng(seed)
+    clean = _gaussian_iq(rng, SAMPLES)
+    iq = clean.copy()
+    pulse_len = int(np.ceil(TP * FS))
+    for start_s, amplitude in zip(pulse_times, amplitudes):
+        start = int(round(start_s * FS))
+        iq[start:start + pulse_len] += np.complex64(amplitude)
+    results = []
+    for data in (iq, clean):
+        power, _ = compute_stft_power(data, N_W, N_OL, NFFT, W=W)
+        log = _ThresholdLog()
+        fold_detect(power, N, PF, FS, NFFT, N_W, N_OL, SAMPLES,
+                    {'rng': np.random.default_rng(0)},
+                    fold_offsets=FOLD_OFFSETS, W=W, Wf=Wf, k_folds=K,
+                    n_null_permutations=20, slog=log)
+        results.append(log.record)
+    return results[0]['refined'], results[0]['threshold'], results[1]['threshold']
+
+
+def test_null_refined_when_one_pulse_dominates_a_strong_train():
+    # 2026-10-13 rotation 2, 315 deg: a 60 dB train with one fold carrying
+    # most of the score failed the old train test (no dominant fold), so the
+    # train stayed in its own null and the threshold sat ~1e7 too high.
+    times = [0.1 + k * TIP for k in range(K)]
+    amplitudes = [1.0] * K
+    amplitudes[2] = 10.0
+    refined, threshold, clean = _strong_train_threshold(times, amplitudes)
+    assert refined
+    assert threshold < 1.3 * clean, (threshold, clean)
+
+
+def test_single_impulsive_fold_is_not_a_train_at_k2():
+    # At K=2 half of K is one fold, so one impulse alone would pass.
+    assert not is_pulse_train([100.0, 0.5], noise=1.0)
+    assert is_pulse_train([100.0, 4.0], noise=1.0)
+
+
+def test_null_drops_train_pulses_off_the_fold_grid():
+    # The train restarts 0.9 s out of phase mid-segment (a rate burst). The
+    # fold's grid only covers the first part; the rest must still leave the
+    # null.
+    times = [0.1, 2.1, 4.1, 5.0, 7.0, 9.0]
+    refined, threshold, clean = _strong_train_threshold(times, [1.0] * len(times))
+    assert refined
+    assert threshold < 1.3 * clean, (threshold, clean)
 
 
 def test_multi_hypothesis_null_matches_search_space():

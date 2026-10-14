@@ -167,11 +167,14 @@ def test_next_slice_is_armed_while_previous_is_analysed(detector):
                 and h.slice_id == 2][1:]
 
     # Each slice's analysis records land in its own heading's log, even though
-    # the next heading's file was already open for capture.
-    def no_detection_slices(heading_dir):
+    # the next heading's file was already open for capture. On noise a slice
+    # is a no-detection or, at the false-alarm rate, an acquisition hit.
+    def analysed_slices(heading_dir):
         lines = (log_dir / heading_dir / f'detector_{TAG_ID}.jsonl').read_text().splitlines()
-        return [json.loads(line)['cycle'] for line in lines
-                if json.loads(line)['type'] == 'no_detection']
+        records = [json.loads(line) for line in lines]
+        return [r['cycle'] for r in records
+                if r['type'] in ('no_detection', 'detection')
+                and r.get('reported_in_cycle', r['cycle']) == r['cycle']]
 
-    assert no_detection_slices('heading-000') == [1]
-    assert no_detection_slices('heading-090') == [2]
+    assert analysed_slices('heading-000') == [1]
+    assert analysed_slices('heading-090') == [2]

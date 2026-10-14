@@ -44,9 +44,10 @@ void BearingCalculator::addSlice(float heading_deg, double signal_power, uint32_
     _slices.push_back({heading_deg, signal_power, tag_id, snr_db, true, candidate_id, sighted, noise_psd});
 }
 
-void BearingCalculator::addNoDetection(float heading_deg, uint32_t tag_id, double noise_psd)
+void BearingCalculator::addNoDetection(float heading_deg, uint32_t tag_id, double noise_psd,
+                                       uint8_t candidate_id)
 {
-    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false, 0, false, noise_psd});
+    _slices.push_back({heading_deg, 0.0, tag_id, 0.0, false, candidate_id, false, noise_psd});
 }
 
 std::vector<double> BearingCalculator::sliceWeights(const std::vector<SliceData>& slices)
@@ -96,20 +97,21 @@ double BearingCalculator::patternLinear(const AntennaPattern& pattern, double of
 
 std::vector<BearingCalculator::Result> BearingCalculator::solveCandidates() const
 {
-    // Detections group by (tag, candidate); no-detections are censored
-    // observations shared by every candidate of their tag.
-    std::map<uint32_t, std::vector<SliceData>> noDetections;
+    // Detections and no-detections both group by (tag, candidate): the
+    // detector reports each candidate's own verdict on every heading, so one
+    // candidate's miss says nothing about another's power there.
+    std::map<std::pair<uint32_t, uint8_t>, std::vector<SliceData>> noDetections;
     std::map<std::pair<uint32_t, uint8_t>, std::vector<SliceData>> groups;
     for (const auto& s : _slices) {
         if (s.detected) {
             groups[{s.tag_id, s.candidate_id}].push_back(s);
         } else {
-            noDetections[s.tag_id].push_back(s);
+            noDetections[{s.tag_id, s.candidate_id}].push_back(s);
         }
     }
     // A tag with only no-detections still gets a (NaN) result.
-    for (const auto& [tagId, slices] : noDetections) {
-        groups.try_emplace({tagId, 0});
+    for (const auto& [key, slices] : noDetections) {
+        groups.try_emplace({key.first, 0});
     }
 
     std::map<uint32_t, uint32_t> candidateCounts;
@@ -120,7 +122,7 @@ std::vector<BearingCalculator::Result> BearingCalculator::solveCandidates() cons
     std::vector<Result> results;
     for (const auto& [key, slices] : groups) {
         std::vector<SliceData> fitSlices = slices;
-        const auto censored = noDetections.find(key.first);
+        const auto censored = noDetections.find(key);
         if (censored != noDetections.end()) {
             fitSlices.insert(fitSlices.end(), censored->second.begin(), censored->second.end());
         }

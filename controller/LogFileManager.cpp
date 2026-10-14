@@ -81,27 +81,39 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
     std::string logDirPrefix;
 
     switch (logType) {
-    case DETECTORS:
-        if (!_logDirDetectors.empty()) {
+    case DETECTORS: {
+        bool wasStarted = false;
+        {
+            std::lock_guard<std::mutex> lock(_dirMutex);
+            wasStarted = !_logDirDetectors.empty();
+        }
+        if (wasStarted) {
             logError() << "Detectors already started";
-            _logDirDetectors.clear();
         }
         logDirPrefix = formatString("%s%s", _logsDirPrefix.c_str(), "Detectors");
         break;
-    case RAW_CAPTURE:
+    }
+    case RAW_CAPTURE: {
+        std::lock_guard<std::mutex> lock(_dirMutex);
         if (!_logDirRawCapture.empty()) {
             // Raw capture log directory is created once per controller run
             return;
         }
         logDirPrefix = formatString("%s%s", _logsDirPrefix.c_str(), "RawCapture");
         break;
-    case ROTATION:
-        if (!_logDirRotation.empty()) {
+    }
+    case ROTATION: {
+        bool wasActive = false;
+        {
+            std::lock_guard<std::mutex> lock(_dirMutex);
+            wasActive = !_logDirRotation.empty();
+        }
+        if (wasActive) {
             logDebug() << "Previous rotation log directory not cleaned up, replacing";
-            _logDirRotation.clear();
         }
         logDirPrefix = formatString("%s%s", _logsDirPrefix.c_str(), "Rotation");
         break;
+    }
     }
 
     auto vehicleTime = MavlinkSystem::instance()->vehicleTimeNow();
@@ -122,17 +134,26 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
     switch (logType) {
     case DETECTORS:
         logDebug() << "Created new detectors log directory:" << logDir;
-        _logDirDetectors = logDir;
-        _logDirClosed.clear();
+        {
+            std::lock_guard<std::mutex> lock(_dirMutex);
+            _logDirDetectors = logDir;
+            _logDirClosed.clear();
+        }
         break;
     case RAW_CAPTURE:
         logDebug() << "Created new raw capture log directory:" << logDir;
-        _logDirRawCapture = logDir;
+        {
+            std::lock_guard<std::mutex> lock(_dirMutex);
+            _logDirRawCapture = logDir;
+        }
         break;
     case ROTATION:
         logDebug() << "Created new rotation log directory:" << logDir;
-        _logDirRotation = logDir;
-        _logDirClosed.clear();
+        {
+            std::lock_guard<std::mutex> lock(_dirMutex);
+            _logDirRotation = logDir;
+            _logDirClosed.clear();
+        }
         break;
     }
 
@@ -140,17 +161,21 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
 
 void LogFileManager::detectorsStarted()
 {
-    if (!_logDirRotation.empty()) {
-        // Rotation: detectors persist across headings, so their logs live at the
-        // rotation root; each detector creates heading-XXX/ for per-slice output.
-        _logDirDetectors = _logDirRotation;
-    } else {
-        _createLogDir(DETECTORS);
+    {
+        std::lock_guard<std::mutex> lock(_dirMutex);
+        if (!_logDirRotation.empty()) {
+            // Rotation: detectors persist across headings, so their logs live at the
+            // rotation root; each detector creates heading-XXX/ for per-slice output.
+            _logDirDetectors = _logDirRotation;
+            return;
+        }
     }
+    _createLogDir(DETECTORS);
 }
 
 void LogFileManager::detectorsStopped()
 {
+    std::lock_guard<std::mutex> lock(_dirMutex);
     // Inside a rotation the detectors dir is the rotation dir, which stays open.
     if (_logDirRotation.empty() && !_logDirDetectors.empty()) {
         _logDirClosed = _logDirDetectors;
@@ -170,6 +195,7 @@ void LogFileManager::rotationStarted()
 
 void LogFileManager::rotationStopped()
 {
+    std::lock_guard<std::mutex> lock(_dirMutex);
     if (!_logDirRotation.empty()) {
         _logDirClosed = _logDirRotation;
     }
@@ -180,16 +206,19 @@ std::string LogFileManager::filename(LogType_t logType, const char* root, const 
 {
     std::string logDir;
 
-    switch (logType) {
-    case DETECTORS:
-        logDir = _logDirDetectors;
-        break;
-    case RAW_CAPTURE:
-        logDir = _logDirRawCapture;
-        break;
-    case ROTATION:
-        logDir = _logDirRotation;
-        break;
+    {
+        std::lock_guard<std::mutex> lock(_dirMutex);
+        switch (logType) {
+        case DETECTORS:
+            logDir = _logDirDetectors;
+            break;
+        case RAW_CAPTURE:
+            logDir = _logDirRawCapture;
+            break;
+        case ROTATION:
+            logDir = _logDirRotation;
+            break;
+        }
     }
 
     return formatString("%s/%s.%s", logDir.c_str(), root, extension);
@@ -197,6 +226,7 @@ std::string LogFileManager::filename(LogType_t logType, const char* root, const 
 
 std::string LogFileManager::logDir(LogFileManager::LogType_t logType) const
 {
+    std::lock_guard<std::mutex> lock(_dirMutex);
     if (logType == DETECTORS) {
         return _logDirDetectors;
     } else if (logType == ROTATION) {
@@ -393,7 +423,10 @@ LogFileManager::LogOpResult LogFileManager::cleanLocalLogs(const ProgressFn& pro
 {
     logDebug() << "Cleaning local logs";
     // The closed session dir is about to be deleted; stop mirroring into it.
-    _logDirClosed.clear();
+    {
+        std::lock_guard<std::mutex> lock(_dirMutex);
+        _logDirClosed.clear();
+    }
 
     bool listingComplete = true;
     auto logDirs = _listLogFileDirs(&listingComplete);
@@ -490,12 +523,17 @@ unsigned int LogFileManager::pruneOnDiskPressure(double minFreePercent, double t
 
         // Skip if this is the currently active detector or raw-capture directory
         fs::path dirPath = _logsRoot + "/" + logDirs.front();
-        if (dirPath.string() == _logDirDetectors || dirPath.string() == _logDirRawCapture) {
+        bool inUse = false;
+        {
+            std::lock_guard<std::mutex> lock(_dirMutex);
+            inUse = dirPath.string() == _logDirDetectors || dirPath.string() == _logDirRawCapture;
+            if (!inUse && dirPath.string() == _logDirClosed) {
+                _logDirClosed.clear();
+            }
+        }
+        if (inUse) {
             logDirs.pop_front();
             continue;
-        }
-        if (dirPath.string() == _logDirClosed) {
-            _logDirClosed.clear();
         }
 
         logDebug() << "LogRetention: removing " << logDirs.front()

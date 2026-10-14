@@ -171,6 +171,75 @@ class TestPulseOnRateSwitch:
             tag_fixed.pulse_on(t),
             tag_zero.pulse_on(t))
 
+    def test_switch_back_makes_a_burst(self):
+        """A->B at switch_time, back to A at switch_back_time; each new rate
+        continues from the previous rate's last pulse."""
+        tip_a, tip_b = 2.0, 1.5
+        tag = TagSignal(tip=tip_a, tp=0.01, tip_secondary=tip_b,
+                        switch_time=7.0, switch_back_time=11.0)
+        fs = 100000
+        t = np.arange(int(20 * fs)) / fs
+        starts = _find_pulse_starts(tag.pulse_on(t), fs)
+        # A at 0, 2, 4, 6; B at 7.5, 9.0, 10.5; A again from 12.5.
+        np.testing.assert_allclose(starts, [0.0, 2.0, 4.0, 6.0, 7.5, 9.0, 10.5,
+                                            12.5, 14.5, 16.5, 18.5], atol=1e-4)
+
+    def test_switches_on_a_pulse_with_fractional_intervals(self):
+        """A switch landing exactly on a pulse keeps it, even when float
+        division puts the boundary a hair short of a whole interval."""
+        tip_a, tip_b = 1.333, 2.0
+        switch_time = 3 * tip_a                     # on the 4th A pulse
+        back_time = switch_time + 2 * tip_b         # on the 2nd B pulse
+        tag = TagSignal(tip=tip_a, tp=0.01, tip_secondary=tip_b,
+                        switch_time=switch_time, switch_back_time=back_time)
+        fs = 100000
+        t = np.arange(int(14 * fs)) / fs
+        starts = _find_pulse_starts(tag.pulse_on(t), fs)
+        expected = [0.0, tip_a, 2 * tip_a, switch_time,
+                    switch_time + tip_b, back_time,
+                    back_time + tip_a, back_time + 2 * tip_a, back_time + 3 * tip_a,
+                    back_time + 4 * tip_a]
+        np.testing.assert_allclose(starts, expected, atol=2e-5)
+
+    def test_switch_back_on_a_fractional_burst_pulse(self):
+        tip_b = 1.333
+        back_time = 6.0 + 3 * tip_b                 # on the 3rd B pulse
+        tag = TagSignal(tip=2.0, tp=0.01, tip_secondary=tip_b,
+                        switch_time=6.5, switch_back_time=back_time)
+        fs = 100000
+        t = np.arange(int(14 * fs)) / fs
+        starts = _find_pulse_starts(tag.pulse_on(t), fs)
+        np.testing.assert_allclose(
+            starts, [0.0, 2.0, 4.0, 6.0, 6.0 + tip_b, 6.0 + 2 * tip_b, back_time,
+                     back_time + 2.0, back_time + 4.0], atol=2e-5)
+
+    def test_switch_back_on_the_first_burst_pulse_keeps_it(self):
+        tag = TagSignal(tip=2.0, tp=0.01, tip_secondary=1.5,
+                        switch_time=7.0, switch_back_time=7.5)
+        fs = 100000
+        t = np.arange(int(14 * fs)) / fs
+        starts = _find_pulse_starts(tag.pulse_on(t), fs)
+        np.testing.assert_allclose(starts, [0.0, 2.0, 4.0, 6.0, 7.5, 9.5, 11.5, 13.5],
+                                   atol=1e-4)
+
+    def test_burst_with_no_secondary_pulse_resumes_from_last_primary_pulse(self):
+        # The first rate-B pulse (6 + 1.5 = 7.5) would fall before the switch
+        # at 7.8, so none is emitted before switching back at 8.0.
+        tag = TagSignal(tip=2.0, tp=0.01, tip_secondary=1.5,
+                        switch_time=7.8, switch_back_time=8.0)
+        fs = 100000
+        t = np.arange(int(13 * fs)) / fs
+        starts = _find_pulse_starts(tag.pulse_on(t), fs)
+        np.testing.assert_allclose(starts, [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0],
+                                   atol=1e-4)
+
+    def test_switch_back_before_switch_is_ignored(self):
+        tag_once = TagSignal(tip=2.0, tp=0.01, tip_secondary=1.5, switch_time=7.0)
+        tag_bad = TagSignal(tip=2.0, tp=0.01, tip_secondary=1.5, switch_time=7.0,
+                            switch_back_time=5.0)
+        t = np.linspace(0, 20, 200000)
+        np.testing.assert_array_equal(tag_once.pulse_on(t), tag_bad.pulse_on(t))
+
 
 # ---------------------------------------------------------------------------
 # encode_header

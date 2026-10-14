@@ -14,7 +14,7 @@ public:
         uint32_t    tag_id;
         double      snr_db;
         bool        detected;
-        uint8_t     candidate_id;   // detector lock candidate; no-detections are candidate-agnostic
+        uint8_t     candidate_id;   // detector lock candidate this observation belongs to
         bool        sighted;        // detector's fold search found this candidate on this slice
         double      noise_psd;      // per-bin noise at the measurement; <= 0 or non-finite = unknown
     };
@@ -51,10 +51,12 @@ public:
     void addSlice(float heading_deg, double signal_power, uint32_t tag_id,
                   double snr_db, uint8_t candidate_id = 0, bool sighted = false,
                   double noise_psd = 0.0);
-    // Armed heading where the detector reported no pulse. Enters the fit as a
-    // censored observation: predicted power must not exceed a fraction of the
-    // weakest detected power in the rotation. Applies to every candidate.
-    void addNoDetection(float heading_deg, uint32_t tag_id, double noise_psd = 0.0);
+    // Armed heading where the detector reported no pulse for this candidate.
+    // Enters that candidate's fit as a censored observation: predicted power
+    // must not exceed a fraction of the weakest detected power. Candidate 0
+    // also covers acquisition no-detections, sent before any lock.
+    void addNoDetection(float heading_deg, uint32_t tag_id, double noise_psd = 0.0,
+                        uint8_t candidate_id = 0);
     // One result per (tag, candidate), unselected and unfloored.
     std::vector<Result> solveCandidates() const;
     // One result per tag: the candidate with the highest confidence, with

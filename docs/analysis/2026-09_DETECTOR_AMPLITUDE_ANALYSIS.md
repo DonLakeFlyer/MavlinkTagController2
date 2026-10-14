@@ -13,7 +13,15 @@
 > | 5 Frequency prior (±2 kHz acquire, ±200 Hz locked) | implemented | `ACQUISITION_SEARCH_HZ`, `LOCKED_SEARCH_HZ` |
 > | 6 Linear-power pattern fit | implemented | fit consumes linear `group_snr` / `signal_power`; `snr_db` is diagnostic only |
 > | 7 Single K per collection (no separate post-lock K) | implemented | K is the tag's (`tagInfo.k`, TagTracker default 20); protocol v3 removed `measurement_k` |
-> | Whole-rotation PRI fit | implemented | `fit_lock_timing` |
+> | Whole-rotation PRI fit | removed 2026-10 | was `fit_lock_timing` |
+>
+> **2026-10 decision:** measuring a heading at timing projected from another
+> heading (change 3's locked measurement, and the PRI fit that served it) was
+> removed after the 2026-10-13 field test: a dual-rate collar restarts its
+> train at every rate switch, so projected timing read noise and overwrote real
+> headings. Each heading is now measured at its own fold sighting or a
+> frequency-only re-search of its own dwell, else censored. The fixed-offset
+> rationale below still applies within a dwell.
 >
 > Current behaviour is documented in
 > [docs/design/COLLECTION_FLOW.md](../design/COLLECTION_FLOW.md).

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <list>
 
@@ -21,13 +22,13 @@ public:
 
  void detectorsStarted();
 	void detectorsStopped();
-    bool detectorsLogging() const { return !_logDirDetectors.empty(); }
+    bool detectorsLogging() const { std::lock_guard<std::mutex> lock(_dirMutex); return !_logDirDetectors.empty(); }
 
 	void rawCaptureStarted();
 
 	void rotationStarted();
 	void rotationStopped();
-	bool rotationActive() const { return !_logDirRotation.empty(); }
+	bool rotationActive() const { std::lock_guard<std::mutex> lock(_dirMutex); return !_logDirRotation.empty(); }
 
 	enum class LogOpResult {
 		Failed,
@@ -57,6 +58,7 @@ public:
 	/// logs are deleted.
 	std::string controllerLogDir() const
 	{
+		std::lock_guard<std::mutex> lock(_dirMutex);
 		if (!_logDirDetectors.empty()) return _logDirDetectors;
 		if (!_logDirRotation.empty())  return _logDirRotation;
 		return _logDirClosed;
@@ -76,6 +78,9 @@ private:
 	std::string _logDirRawCapture;
 	std::string _logDirRotation;
 	std::string _logDirClosed;      // last detectors/rotation dir after it ended
+	// Guards the _logDir* strings, which every logging thread reads. Never held
+	// while logging: the log writer calls controllerLogDir().
+	mutable std::mutex _dirMutex;
 
 	static const std::string _logsDirPrefix;
 
