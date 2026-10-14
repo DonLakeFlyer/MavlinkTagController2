@@ -22,6 +22,7 @@ add_executable(MavlinkTagController2
     log.cpp log.h
     logLevel.cpp logLevel.h
     formatString.h
+    StatusTextChunker.h
     platformHelpers.h
     TagDatabase.cpp TagDatabase.h
     TagUploadCoordinator.cpp TagUploadCoordinator.h
@@ -190,4 +191,11 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_rotation_progress PRIVATE tunnel_protocol)
     add_test(NAME test_rotation_progress COMMAND test_rotation_progress)
+
+    add_executable(test_status_text_chunker
+        tests/test_status_text_chunker.cpp
+    )
+    target_include_directories(test_status_text_chunker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_status_text_chunker PRIVATE mavlink)
+    add_test(NAME test_status_text_chunker COMMAND test_status_text_chunker)
 endif()
