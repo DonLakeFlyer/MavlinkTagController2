@@ -68,6 +68,8 @@ private:
 	std::string 				_connectionUrl {};
 	MavlinkOutgoingMessageQueue _outgoingMessageQueue;
 	std::unique_ptr<Connection> _connection {};
+	std::mutex					_statusTextMutex {};	// guards _statusTextId; keeps one message's chunks contiguous in the queue
+	uint16_t					_statusTextId { 0 };
 	std::mutex 					_subscriptions_mutex {};
 	Telemetry 					_telemetry;
 	std::atomic<uint16_t>		_heartbeatStatus { HEARTBEAT_STATUS_IDLE };

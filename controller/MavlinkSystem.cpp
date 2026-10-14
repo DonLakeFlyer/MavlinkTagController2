@@ -5,6 +5,7 @@
 #include "TunnelProtocol.h"
 #include "TunnelProtocolLog.h"
 #include "formatString.h"
+#include "StatusTextChunker.h"
 
 #include <algorithm>
 #include <mutex>
@@ -127,17 +128,20 @@ void MavlinkSystem::sendStatusText(std::string& text, MAV_SEVERITY severity)
 
 	logDebug() << "statustext:" << text;
 
-	mavlink_statustext_t statustext;
+	// Another STATUSTEXT between two chunks makes the GCS complete the pending message early.
+	std::scoped_lock<std::mutex> lock(_statusTextMutex);
 
-	memset(&statustext, 0, sizeof(statustext));
-	statustext.severity = severity;
+	// Chunk ids must be non-zero (0 means unchunked) and distinct from the previous message's.
+	uint16_t id = ++_statusTextId;
+	if (id == 0) {
+		id = ++_statusTextId;
+	}
 
-	snprintf(statustext.text, sizeof(statustext.text), "%s", text.c_str());
-
-	mavlink_message_t message;
-	mavlink_msg_statustext_encode(ourSystemId().value(), ourComponentId(), &message, &statustext);
-
-	sendMessage(message);
+	for (const mavlink_statustext_t& chunk : splitStatusText(text, severity, id)) {
+		mavlink_message_t message;
+		mavlink_msg_statustext_encode(ourSystemId().value(), ourComponentId(), &message, &chunk);
+		sendMessage(message);
+	}
 }
 
 void MavlinkSystem::sendTunnelMessage(void* tunnelPayload, size_t tunnelPayloadSize)
