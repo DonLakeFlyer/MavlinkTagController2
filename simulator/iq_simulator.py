@@ -284,12 +284,12 @@ _ANTENNA_GAIN_ANGLES = np.array([
 ], dtype=np.float64)
 
 ANTENNA_GAIN_DB = {
-    # Telonics RA-2A / RA-2AHS 2-element
+    # Telonics RA-2AHS 2-element, tuned for 147 MHz (Antennas/RA-2AHS-tuned.jpg)
     "ra2a": np.array([
-        2.5, 2.5, 2.0, 1.5, 0.0, -2.5, -8.0, -12.0, -18.0, -25.0,
-        -17.5, -15.0, -12.0, -10.0, -11.0, -8.0, -8.0, -7.5, -7.5,
+        2.5, 2.5, 2.5, 2.0, 0.5, -3.0, -8.0, -11.5, -21.0, -29.5,
+        -27.5, -17.0, -11.0, -10.0, -9.0, -8.5, -7.5, -7.5, -7.5,
     ], dtype=np.float64),
-    # Telonics RA-23K 3-element (Antennas/RA-23K.jpg), 4 dBd assumed at boresight
+    # Telonics RA-23K 2-element (Antennas/RA-23K.jpg), 4 dBd assumed at boresight
     "ra23k": np.array([
         4.0, 3.5, 3.0, 2.0, 1.0, -1.0, -4.0, -6.5, -12.0, -14.0,
         -13.5, -12.0, -10.0, -9.5, -7.5, -6.5, -6.0, -5.5, -6.0,

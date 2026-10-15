@@ -91,7 +91,7 @@ sizes:
 
 | Item | Part | Notes |
 | --- | --- | --- |
-| Antenna | Telonics RA-2AHS or Telonics RA-23K | Both 2-element "H" antennas (driven dipole + reflector); both under test, one flown at a time |
+| Antenna | Telonics RA-2AHS (custom tuned, 147 MHz) or Telonics RA-23K | Both 2-element "H" antennas (driven dipole + reflector); both under test, one flown at a time |
 | Feed | None | Airspy HF+ Discovery connects directly to the antenna BNC |
 | Mounting | Landing legs, with 26 cm wooden leg extensions | Boom horizontal, element centre ≈22 in (56 cm) below the motor plane, so ≈65 cm from each motor. The frame sits at ≈90° to boresight in the H-plane (little pattern rejection) and the horizontal phase wires are co-polarised with the elements. Both the Zimbabwe vehicle and the test vehicle here have the extensions; without them the antenna was ≈30 cm below the motor plane (≈45 cm from each motor, ~3 dB more motor pickup). |
 

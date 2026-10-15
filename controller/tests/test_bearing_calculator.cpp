@@ -28,7 +28,7 @@ static void assertNear(float actual, float expected, float tolerance, const char
 }
 
 // ── Helper: generate synthetic SNR data for a given true bearing ────
-// Uses the real RA-2AK antenna pattern via BearingCalculator::patternLinear().
+// Uses the real RA-2AHS antenna pattern via BearingCalculator::patternLinear().
 // Model: SNR_i = amplitude * patternLinear(heading_i - trueBearing) + noiseFloor
 static std::vector<std::pair<float, double>> generateSlices(
     float trueBearing, double amplitude, double noiseFloor, int nSlices,
@@ -148,17 +148,23 @@ static void testMultipleTags() {
                 r10->bearing_deg, r11->bearing_deg);
 }
 
-// ── Test: two detections still yield a bearing between them ─────────
+// ── Test: two detections still yield a bearing that fits them ───────
 static void testTwoSlices() {
     BearingCalculator calc;
     calc.setConfidenceFloor(0.0f);  // exercising the fit, not the rejection rule
-    calc.addSlice(0.0f, 40.0, 2, 12.5);
-    calc.addSlice(90.0f, 30.0, 2, 9.0);
+    constexpr double kFrontPower = 40.0;
+    constexpr double kSidePower  = 30.0;
+    calc.addSlice(0.0f, kFrontPower, 2, 12.5);
+    calc.addSlice(90.0f, kSidePower, 2, 9.0);
     auto results = calc.solve();
     CHECK(results.size() == 1);
-    // Stronger slice at 0°, weaker at 90° → bearing leans toward 0° but
-    // must sit between them; mirror solution behind the antenna is rejected.
-    CHECK(results[0].bearing_deg > 0.0f && results[0].bearing_deg < 90.0f);
+    // Two powers cannot pick between the front-flank fit and the rear-lobe
+    // fit, so require only that the bearing reproduces their ratio.
+    // Slack for the 0.5° scan step and the plausible-set midpoint.
+    constexpr double kRatioTolerance = 0.1;
+    const double ratio = ra2aPattern(90.0 - results[0].bearing_deg)
+                       / ra2aPattern(0.0 - results[0].bearing_deg);
+    CHECK(std::fabs(ratio - kSidePower / kFrontPower) < kRatioTolerance);
     // Exact fit, but only two observations for two parameters: low confidence.
     CHECK(results[0].r_squared > 0.0f && results[0].r_squared < 0.5f);
     CHECK(results[0].n_valid_slices == 2);
@@ -422,7 +428,7 @@ static void testNoisyData() {
 
 // ── Test: pattern symmetry — front and back lobes ───────────────────
 static void testPatternSymmetry() {
-    // RA-2AK pattern should be symmetric: pattern(+30°) == pattern(-30°)
+    // RA-2AHS pattern should be symmetric: pattern(+30°) == pattern(-30°)
     CHECK(std::fabs(ra2aPattern(30.0) - ra2aPattern(-30.0)) < 1e-10);
 
     // Boresight should be 1.0 (0 dB)
@@ -435,7 +441,7 @@ static void testPatternSymmetry() {
 
     // Deep null near 90° should be very low
     double p90 = ra2aPattern(90.0);
-    CHECK(p90 < 0.01);  // -27.5 dB ≈ 0.00178
+    CHECK(p90 < 0.01);  // -32 dB ≈ 0.00063
 
     std::printf("PASS: testPatternSymmetry (0°=%.4f, 90°=%.5f, 180°=%.4f)\n", p0, p90, p180);
 }
@@ -465,7 +471,7 @@ static void testAntennaRegistry() {
                         - BearingCalculator::patternLinear(*p, 300.0)) < 1e-10);
         CHECK(p->confidenceFloor > 0.0f && p->confidenceFloor < 1.0f);
     }
-    // The 3-element has a shallower side null than the 2-element.
+    // The RA-23K has a shallower side null than the tuned RA-2AHS.
     CHECK(BearingCalculator::patternLinear(ra23k, 90.0) > BearingCalculator::patternLinear(ra2a, 90.0));
 
     // The calculator fits with the pattern it was built with.

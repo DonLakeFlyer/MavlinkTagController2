@@ -7,19 +7,21 @@
 
 namespace {
 
-// Eyeballed from the Telonics RA-2A reception radiation pattern polar plot
-// (Antennas/RA-2AHS.jpg). Free-space manufacturer plot; the installed
-// pattern with the airframe will differ, especially in the side nulls.
-// Source: datasheet. Replace the values in place with the installed pattern
-// measured on the calibration flight (docs/proposals/FIELD_TEST_PLAN.md).
+// Eyeballed (+/-1.5 dB) from the Telonics tuned-antenna polar plot
+// (Antennas/RA-2AHS-tuned.jpg): tuned for 147 MHz, linear 10 dB rings,
+// 0 dB = front peak. Side nulls end at the plot's centre circle (~-36 dB),
+// so 90/100 deg are a floor.
+// Free-space plot; the installed pattern with the airframe will differ.
+// Replace in place with the pattern measured on the calibration flight
+// (docs/proposals/FIELD_TEST_PLAN.md).
 const AntennaPattern kRa2a = {
     ANTENNA_ID_RA2A,
-    "RA-2A",
+    "RA-2A-tuned-147",
     {
         //  0      10     20     30     40     50     60     70     80     90
-         0.0,   0.0,  -0.5,  -1.0,  -2.5,  -5.0, -10.5, -14.5, -20.5, -27.5,
+         0.0,   0.0,   0.0,  -0.5,  -2.0,  -5.5, -10.5, -14.0, -23.5, -32.0,
         // 100    110    120    130    140    150    160    170    180
-       -20.0, -17.5, -14.5, -12.5, -13.5, -10.5, -10.5, -10.0, -10.0
+       -30.0, -19.5, -13.5, -12.5, -11.5, -11.0, -10.0, -10.0, -10.0
     },
     0.2f,
 };
