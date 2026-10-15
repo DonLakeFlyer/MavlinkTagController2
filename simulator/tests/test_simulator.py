@@ -322,11 +322,12 @@ class TestDirectionalNoise:
         assert directional_noise_db(self._cfg(), 270.0) == pytest.approx(15.0)
 
     def test_follows_antenna_pattern_off_boresight(self):
-        # RA-2A: -27.5 dB relative at 90 deg off, -10 dB at 180.
+        # RA-2AHS tuned: -32 dB relative at 90 deg off, -10 dB at 180.
         cfg = self._cfg()
-        assert directional_noise_db(cfg, 0.0) == pytest.approx(15.0 - 27.5, abs=0.01)
-        assert directional_noise_db(cfg, 90.0) == pytest.approx(15.0 - 10.0, abs=0.01)
-        assert directional_noise_db(cfg, 180.0) == pytest.approx(15.0 - 27.5, abs=0.01)
+        source = cfg.noise_source_bearing_deg
+        assert directional_noise_db(cfg, source - 90.0) == pytest.approx(15.0 - 32.0, abs=0.01)
+        assert directional_noise_db(cfg, source + 90.0) == pytest.approx(15.0 - 32.0, abs=0.01)
+        assert directional_noise_db(cfg, source - 180.0) == pytest.approx(15.0 - 10.0, abs=0.01)
 
     def test_no_pose_is_worst_case(self):
         assert directional_noise_db(self._cfg(), None) == pytest.approx(15.0)

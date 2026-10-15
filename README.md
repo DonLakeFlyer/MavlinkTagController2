@@ -43,7 +43,7 @@ and control flow is described in
 | `setup/` | Raspberry Pi install and auto-start scripts | [setup/README.md](setup/README.md) |
 | `docs/` | Design references, analysis records, proposals, archive | [docs/README.md](docs/README.md) |
 | `cmake/` | `CPM.cmake` (fetches MAVLink headers and `TunnelProtocol.h` at configure time) | — |
-| `Antennas/` | Reference photos of the RA-2AHS and RA-23K antennas | — |
+| `Antennas/` | Reference plots of the tuned RA-2AHS and RA-23K antennas | — |
 
 ## Build
 
