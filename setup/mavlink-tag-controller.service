@@ -1,0 +1,19 @@
+# Installed to /etc/systemd/system by full_setup.sh.
+[Unit]
+Description=MavlinkTagController2
+After=mavlink-router.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+# Lets the controller step the system clock to GPS time (the Pi has no RTC). The
+# controller clears its ambient set at startup so the processes it spawns do not inherit it.
+AmbientCapabilities=CAP_SYS_TIME
+ExecStart=/bin/bash /home/pi/repos/MavlinkTagController2/setup/start-controller.sh
+ExecStopPost=/bin/bash /home/pi/repos/MavlinkTagController2/setup/controller-exited.sh
+# A restarted controller would come back without its uploaded tags; leave it down.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

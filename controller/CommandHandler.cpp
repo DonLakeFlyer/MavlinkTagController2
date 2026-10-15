@@ -30,6 +30,7 @@
 #include "TunnelProtocolLog.h"
 #include "MonitoredProcess.h"
 #include "formatString.h"
+#include "jsonEscape.h"
 #include "platformHelpers.h"
 #include "log.h"
 #include "channelizerTuner.h"
@@ -69,7 +70,7 @@ CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetry
     , _simulatorRateSwitch (simulatorRateSwitch)
 {
     if (isRunningOnRPi()) {
-        // When we are running from a crontab entry on the rPi the PATH environment variable is not fully set yet.
+        // When started at boot on the rPi the PATH environment variable may be minimal.
         // Because of this, the process fails to find the airspy_rx executable. So we need to explicitly specify
         // where the airspy executables are located. apt installs to /usr/bin, a source build to /usr/local/bin.
         for (const char* dir : {"/usr/bin/", "/usr/local/bin/"}) {
@@ -372,6 +373,7 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
     // concurrent stop cannot unfreeze and then be re-frozen by this start.
     _mavlink->setVehicleTimeFrozen(true);
     logFileManager->detectorsStarted();
+    _mavlink->logClockSyncSessionStart();
     if (requestedStart.detection_mode == DETECTION_MODE_PYTHON) {
         // The Python detector is configured entirely via CLI; the legacy .config
         // files are only read by uavrt_detection. Record the request instead.
@@ -1526,7 +1528,10 @@ std::string CommandHandler::startCollection(const mavlink_tunnel_t& tunnel)
             _inRotation = false;
         }
         LogFileManager::instance()->rotationStopped();
-        _mavlink->setVehicleTimeFrozen(false);
+        // A start that never settled may have launched the SDR; keep clock steps blocked until restart.
+        if (startSettled) {
+            _mavlink->setVehicleTimeFrozen(false);
+        }
         _rotationProgress.finish(false, "Detector startup timed out");
         return "Detector startup timed out";
     }
@@ -2126,6 +2131,7 @@ std::string CommandHandler::rawCapture(const mavlink_tunnel_t& tunnel)
         auto                logFileManager = LogFileManager::instance();
 
         logFileManager->rawCaptureStarted();
+        const std::string clockSync = _mavlink->logClockSyncSessionStart();
         auto logDir = logFileManager->logDir(LogFileManager::RAW_CAPTURE);
 
         ++_rawCaptureCount;
@@ -2203,7 +2209,8 @@ std::string CommandHandler::rawCapture(const mavlink_tunnel_t& tunnel)
                 metaFile << "  \"format\": \"complex_float32\",\n";
                 metaFile << formatString("  \"capture_utc\": \"%s\",\n", timeBuf);
                 metaFile << formatString("  \"capture_epoch\": %lld,\n", (long long)epoch_s);
-                metaFile << formatString("  \"data_file\": \"%s\"\n", captureDataPath.c_str());
+                metaFile << formatString("  \"clock_sync\": \"%s\",\n", jsonEscape(clockSync).c_str());
+                metaFile << formatString("  \"data_file\": \"%s\"\n", jsonEscape(captureDataPath).c_str());
                 metaFile << "}\n";
                 metaFile.close();
                 logDebug() << "RAW_CAPTURE - metadata written to" << metaPath;

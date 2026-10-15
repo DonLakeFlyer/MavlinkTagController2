@@ -271,8 +271,8 @@ static void testAllCandidatesRejected() {
     calc.setConfidenceFloor(0.95f);
     auto good = generateSlices(90.0f, 30.0, 5.0, 8);
     for (size_t i = 0; i < good.size(); ++i) {
-        // ±2 dB alternating noise keeps confidence below 0.95
-        calc.addSlice(good[i].first, good[i].second + ((i % 2) ? -2.0 : 2.0), 3, 0.0, 0);
+        // ±4 (linear power) alternating noise keeps confidence below 0.95
+        calc.addSlice(good[i].first, good[i].second + ((i % 2) ? -4.0 : 4.0), 3, 0.0, 0);
         calc.addSlice(good[i].first, 3.0 + 0.1 * i, 3, 0.0, 1);
     }
     auto results = calc.solve();
@@ -412,7 +412,7 @@ static void testNoisyData() {
     float trueBearing = 135.0f;
     auto slices = generateSlices(trueBearing, 30.0, 5.0, 8);
 
-    // Add systematic noise: ±2.0 dB alternating
+    // Add systematic noise: ±2.0 (linear power) alternating
     for (size_t i = 0; i < slices.size(); ++i) {
         double noise = (i % 2 == 0) ? 2.0 : -2.0;
         calc.addSlice(slices[i].first, slices[i].second + noise, 6, 0.0);
@@ -435,13 +435,13 @@ static void testPatternSymmetry() {
     double p0 = ra2aPattern(0.0);
     CHECK(std::fabs(p0 - 1.0) < 1e-10);
 
-    // Back lobe at 180° should be ~0.1 (-10 dB)
+    // Back lobe at 180° should be ~0.23 (-6.4 dB)
     double p180 = ra2aPattern(180.0);
-    CHECK(std::fabs(p180 - 0.1) < 0.001);
+    CHECK(std::fabs(p180 - 0.229) < 0.001);
 
     // Deep null near 90° should be very low
     double p90 = ra2aPattern(90.0);
-    CHECK(p90 < 0.01);  // -32 dB ≈ 0.00063
+    CHECK(p90 < 0.01);  // -24.2 dB ≈ 0.0038
 
     std::printf("PASS: testPatternSymmetry (0°=%.4f, 90°=%.5f, 180°=%.4f)\n", p0, p90, p180);
 }
@@ -777,8 +777,8 @@ static void testTieBreakPrefersFloorClearingCandidate() {
             const auto& [hdg, power] = slices[i];
             // Clean fit, one sighting.
             calc.addSlice(hdg, power, 2, 40.0, cleanId, hdg == 135.0f, 1e-9);
-            // Same pulses with alternating ±12 % error, sighted everywhere.
-            calc.addSlice(hdg, power * (1.0 + ((i % 2) ? 0.12 : -0.12)), 2, 40.0, noisyId, true, 1e-9);
+            // Same pulses with alternating ±20 % error, sighted everywhere.
+            calc.addSlice(hdg, power * (1.0 + ((i % 2) ? 0.20 : -0.20)), 2, 40.0, noisyId, true, 1e-9);
         }
         auto candidates = calc.solveCandidates();
         CHECK(candidates.size() == 2);
@@ -811,6 +811,46 @@ static void testLargestFrequencyCluster() {
     CHECK(BearingCalculator::largestFrequencyCluster({-993.0, -1000.0, 700.0}, 200.0) == 2);
     CHECK(BearingCalculator::largestFrequencyCluster({nan, 0.0, 10.0}, 200.0) == 2);
     std::printf("PASS: testLargestFrequencyCluster\n");
+}
+
+// ── Test: the tuned-antenna table reproduces the 2026-10-15 manual flight ──
+// 60 acres, collar 359 m south at 181.5 deg true, 19 deg below the horizon.
+// Per-heading signal_power and noise_psd are the controller's own log values.
+static void testTunedAntennaFlight_2026_10_15() {
+    constexpr float kTrueBearing = 181.5f;
+    struct Heading { float deg; double power; double snr; double noise; };
+    const Heading flight[] = {
+        {  0.0f, 2.08823e-07, 66.088, 1.03e-12},
+        { 45.0f, 1.39445e-08, 54.585, 9.70e-13},
+        { 90.0f, 3.37339e-09, 48.343, 9.89e-13},
+        {135.0f, 2.05392e-07, 66.468, 9.26e-13},
+        {180.0f, 9.16439e-07, 73.286, 8.60e-13},
+        {225.0f, 3.02236e-07, 67.847, 9.93e-13},
+        {270.0f, 3.45964e-09, 48.486, 9.81e-13},
+        {315.0f, 1.28253e-08, 54.314, 9.50e-13},
+    };
+    constexpr double kFrontPower = 9.16439e-07;
+    constexpr double kPatternToleranceDb = 1.5;
+
+    BearingCalculator calc;
+    for (const auto& h : flight) {
+        calc.addSlice(h.deg, h.power, 2, h.snr, 0, true, h.noise);
+        // Table (at the true offset) must sit within a few dB of what was measured.
+        const double measuredDb = 10.0 * std::log10(h.power / kFrontPower);
+        const double modelDb = 10.0 * std::log10(ra2aPattern(h.deg - kTrueBearing)
+                                                 / ra2aPattern(180.0f - kTrueBearing));
+        if (std::fabs(measuredDb - modelDb) > kPatternToleranceDb) {
+            std::fprintf(stderr, "FAIL: heading %.0f measured %.1f dB, table %.1f dB\n",
+                         h.deg, measuredDb, modelDb);
+            std::exit(1);
+        }
+    }
+    auto results = calc.solve();
+    CHECK(results.size() == 1);
+    assertNear(results[0].bearing_deg, kTrueBearing, 1.5f, "tuned antenna flight bearing");
+    CHECK(results[0].r_squared > 0.95f);
+    std::printf("PASS: testTunedAntennaFlight_2026_10_15 (bearing=%.1f, conf=%.3f)\n",
+                results[0].bearing_deg, results[0].r_squared);
 }
 
 int main() {
@@ -850,6 +890,7 @@ int main() {
     testNoisyHeadingCannotCentreScan();
     testResidualsPerDetectedHeading();
     testConfirmationRuleInputs();
+    testTunedAntennaFlight_2026_10_15();
     std::printf("\nAll BearingCalculator tests passed.\n");
     return 0;
 }

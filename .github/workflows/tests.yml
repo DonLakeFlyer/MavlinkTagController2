@@ -42,6 +42,28 @@ jobs:
       - name: Test
         run: ctest --preset debug --output-on-failure
 
+      # Same grant as setup/mavlink-tag-controller.service: an ambient capability for a non-root user.
+      - name: Clock sync with CAP_SYS_TIME
+        if: runner.os == 'Linux'
+        run: >-
+          sudo setpriv --reuid="$(id -u)" --regid="$(id -g)" --init-groups
+          --inh-caps=+sys_time --ambient-caps=+sys_time
+          env CLOCK_SYNC_TEST_EXPECT_CAP_SYS_TIME=1 build/controller/test_clock_sync
+
+  setup-scripts:
+    name: setup scripts (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shellcheck
+        run: shellcheck setup/*.sh setup_venv.sh
+
+      - name: Verify systemd unit
+        run: systemd-analyze verify setup/mavlink-tag-controller.service
+
   detector:
     strategy:
       fail-fast: false

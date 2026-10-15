@@ -65,6 +65,12 @@ std::optional<double> TelemetryCache::addEntry(const TelemetryCacheEntry_t& entr
     return stepBack;
 }
 
+void TelemetryCache::clear()
+{
+    std::lock_guard<std::mutex> lock(_telemetryCacheMutex);
+    _telemetryCache.clear();
+}
+
 std::optional<TelemetryCache::TelemetryCacheEntry_t> TelemetryCache::telemetryForTime(double timeInSeconds)
 {
     std::lock_guard<std::mutex> lock(_telemetryCacheMutex);

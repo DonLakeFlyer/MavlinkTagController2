@@ -98,6 +98,12 @@ resolve vehicle noise below that level.
 
 ### 11. RPi clock is not vehicle time; logs cannot be lined up with the ULog
 
+**Fix implemented 2026-10-15, not yet field-verified:** the controller steps
+the Pi clock to GPS time once per boot (`ClockSync`, see
+[design/SYSTEM_OVERVIEW.md](design/SYSTEM_OVERVIEW.md#time-base)). The
+growing offset below is the powered-off time of each battery swap. Remove this
+item after a flight whose logs show `CLOCK_SYNC stepped` and line up with the ULog.
+
 Log folder names use vehicle time (`LogFileManager`: `vehicleTimeNow()`).
 Everything inside uses the RPi system clock, which in the field has no network
 time source:

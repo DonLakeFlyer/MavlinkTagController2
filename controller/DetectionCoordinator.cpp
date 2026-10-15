@@ -129,14 +129,13 @@ uint16_t DetectionCoordinator::heartbeatStatusFor(State state)
     return HEARTBEAT_STATUS_IDLE;
 }
 
-void DetectionCoordinator::_transition(State next, std::unique_lock<std::mutex>& lock)
+void DetectionCoordinator::_transition(State next, std::unique_lock<std::mutex>& /*held*/)
 {
     const bool heartbeatChanged = heartbeatStatusFor(next) != heartbeatStatusFor(_state);
     _state = next;
     _changed.notify_all();
     if (heartbeatChanged && _onHeartbeatStatus) {
-        const uint16_t status = heartbeatStatusFor(next);
-        lock.unlock();
-        _onHeartbeatStatus(status);
+        // Under the lock so a later transition cannot publish before an earlier one.
+        _onHeartbeatStatus(heartbeatStatusFor(next));
     }
 }

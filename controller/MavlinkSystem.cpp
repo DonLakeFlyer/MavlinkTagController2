@@ -6,6 +6,7 @@
 #include "TunnelProtocolLog.h"
 #include "formatString.h"
 #include "StatusTextChunker.h"
+#include "ClockStepGate.h"
 
 #include <algorithm>
 #include <mutex>
@@ -58,6 +59,7 @@ bool MavlinkSystem::start()
 	}
 
     subscribeToMessage(MAVLINK_MSG_ID_SYSTEM_TIME, std::bind(&MavlinkSystem::_handleSystemTime, this, std::placeholders::_1));
+    subscribeToMessage(MAVLINK_MSG_ID_GPS_RAW_INT, std::bind(&MavlinkSystem::_handleGpsRawInt, this, std::placeholders::_1));
 
 	return _connection->start();
 }
@@ -342,8 +344,24 @@ std::time_t MavlinkSystem::vehicleTimeNow() const
 
 void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 {
+	// mavlink-router also forwards the GCS's SYSTEM_TIME, which carries the laptop clock.
+	if (!_fromAutopilot(message)) {
+		return;
+	}
+
 	mavlink_system_time_t system_time;
 	mavlink_msg_system_time_decode(&message, &system_time);
+
+	if (_clockSync) {
+		const double steadySeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		ClockSync::Outcome outcome;
+		{
+			std::scoped_lock<std::mutex> lock(_clockSyncMutex);
+			const bool sessionActive = clockStepBlocked(_vehicleTimeFrozen.load(), _heartbeatStatus.load());
+			outcome = _clockSync->systemTime(system_time.time_unix_usec, steadySeconds, sessionActive);
+		}
+		_reportClockSync(outcome);
+	}
 
 	if (system_time.time_unix_usec == 0) {
 		return;
@@ -400,4 +418,95 @@ void MavlinkSystem::_handleSystemTime(const mavlink_message_t& message)
 			logDebug() << "Vehicle time jumped by " << delta << "s (GPS lock or frozen time released) - now " << buf;
 		}
 	}
+}
+
+bool MavlinkSystem::_fromAutopilot(const mavlink_message_t& message) const
+{
+	return message.sysid == ourSystemId() && message.compid == MAV_COMP_ID_AUTOPILOT1;
+}
+
+void MavlinkSystem::_handleGpsRawInt(const mavlink_message_t& message)
+{
+	if (!_clockSync || !_fromAutopilot(message)) {
+		return;
+	}
+
+	mavlink_gps_raw_int_t gpsRawInt;
+	mavlink_msg_gps_raw_int_decode(&message, &gpsRawInt);
+
+	std::scoped_lock<std::mutex> lock(_clockSyncMutex);
+	_clockSync->gpsFixType(gpsRawInt.fix_type);
+}
+
+void MavlinkSystem::setClockSync(std::unique_ptr<ClockSync> clockSync, std::function<void(double)> onStepped)
+{
+	std::scoped_lock<std::mutex> lock(_clockSyncMutex);
+	_clockSync		= std::move(clockSync);
+	_onClockStepped	= std::move(onStepped);
+}
+
+void MavlinkSystem::setHeartbeatStatus(uint16_t heartbeatStatus)
+{
+	// DETECTING and CAPTURE block clock steps (ClockStepGate.h); see _clockSyncMutex.
+	std::scoped_lock<std::mutex> lock(_clockSyncMutex);
+	_heartbeatStatus.store(heartbeatStatus);
+}
+
+void MavlinkSystem::setVehicleTimeFrozen(bool frozen)
+{
+	// Freezing starts a detection or collection session; see _clockSyncMutex.
+	std::scoped_lock<std::mutex> lock(_clockSyncMutex);
+	_vehicleTimeFrozen.store(frozen);
+	if (!frozen) {
+		_vehicleTimeSuppressLogged.store(false);
+	}
+}
+
+void MavlinkSystem::_reportClockSync(const ClockSync::Outcome& outcome)
+{
+	using Kind = ClockSync::Outcome::Kind;
+
+	switch (outcome.kind) {
+	case Kind::None:
+		return;
+	case Kind::Waiting:
+	case Kind::Deferred:
+	case Kind::Skipped:
+		logDebug() << "CLOCK_SYNC" << outcome.message;
+		return;
+	case Kind::Stepped: {
+		logDebug() << "CLOCK_SYNC" << outcome.message;
+		std::string statusText = formatString("Pi clock set to GPS time (%+.1f s)", outcome.offsetSeconds);
+		sendStatusText(statusText, MAV_SEVERITY_INFO);
+		if (_onClockStepped) {
+			_onClockStepped(outcome.offsetSeconds);
+		}
+		return;
+	}
+	case Kind::Failed: {
+		logError() << "CLOCK_SYNC" << outcome.message;
+		std::string statusText = formatString("Pi clock sync %s", outcome.message.c_str());
+		sendStatusText(statusText, MAV_SEVERITY_WARNING);
+		return;
+	}
+	}
+}
+
+std::string MavlinkSystem::logClockSyncSessionStart()
+{
+	const double steadySeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	ClockSync::Summary summary;
+	{
+		std::scoped_lock<std::mutex> lock(_clockSyncMutex);
+		if (!_clockSync) {
+			return {};
+		}
+		summary = _clockSync->sessionStartSummary(steadySeconds);
+	}
+	if (summary.warn) {
+		logError() << "CLOCK_SYNC" << summary.message;
+	} else {
+		logDebug() << "CLOCK_SYNC" << summary.message;
+	}
+	return summary.message;
 }

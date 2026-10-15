@@ -1,4 +1,5 @@
 #include "log.h"
+#include "ClockSync.h"
 #include "CommandHandler.h"
 #include "UDPPulseReceiver.h"
 #include "TunnelProtocol.h"
@@ -33,6 +34,12 @@ int main(int argc, char** argv)
 	setbuf(stdout, NULL); // Disable stdout buffering
 
 	logDebug() << "**************** MavlinkTagController starting... ****************";
+
+	// The systemd service grants CAP_SYS_TIME as an ambient capability, which
+	// would otherwise pass to every SDR tool and detector this process spawns.
+	if (auto capError = ClockSync::clearAmbientCapabilities()) {
+		logError() << "CLOCK_SYNC" << *capError;
+	}
 
 	// Prune old log directories if disk space is low (< 25% free)
 	LogFileManager::instance()->pruneOnDiskPressure();
@@ -297,6 +304,17 @@ int main(int argc, char** argv)
     auto udpPulseReceiver   = UDPPulseReceiver { std::string("127.0.0.1"), CommandHandler::kPulseUdpPort, &commandHandler };
 
 	globalMavlinkSystem		= mavlink;
+
+	{
+		auto disabledReason = ClockSync::platformDisabledReason();
+		if (disabledReason) {
+			logDebug() << "CLOCK_SYNC disabled:" << *disabledReason;
+		} else {
+			logDebug() << "CLOCK_SYNC enabled: will step the system clock to GPS time once the autopilot has a 3D fix";
+		}
+		mavlink->setClockSync(std::make_unique<ClockSync>(ClockSync::systemOps(), ClockSync::minPlausibleEpochSeconds(), disabledReason),
+							  [telemetryCache](double) { telemetryCache->clear(); });
+	}
 
     udpPulseReceiver.start();
 

@@ -53,14 +53,14 @@ if command -v raspi-config >/dev/null 2>&1; then
     sudo systemctl daemon-reload
     sudo systemctl enable mavlink-router
 
-    echo "*** Install crontab entry to start controller at boot"
-    CRON_LINE="@reboot /bin/bash \"$REPO_DIR/setup/crontab-start-controller.sh\" >> \"$HOME/MavlinkTagController-boot.log\" 2>&1"
-    # Replace any existing entry for this script so a re-run never yields two @reboot controllers.
+    echo "*** Install mavlink-tag-controller systemd service to start the controller at boot"
+    # Older setups started it from an @reboot crontab entry; remove that so the controller never starts twice.
     # grep exits 1 when nothing survives the filter (empty crontab); without "|| true" set -e
-    # would kill the subshell before the echo and install an empty crontab.
-    (crontab -l 2>/dev/null | grep -Fv "crontab-start-controller.sh" || true; echo "$CRON_LINE") | crontab -
-    echo "*** Installed crontab:"
-    crontab -l
+    # would kill the subshell.
+    (crontab -l 2>/dev/null | grep -Fv "crontab-start-controller.sh" || true) | crontab -
+    sudo install -m 644 "$REPO_DIR/setup/mavlink-tag-controller.service" /etc/systemd/system/mavlink-tag-controller.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable mavlink-tag-controller
 
     echo "*** Enable VNC (wayvnc) for remote desktop; desktop autologin so the session exists headless"
     # Best-effort: no desktop (Lite image) or an older raspi-config must not fail the whole setup
@@ -68,5 +68,5 @@ if command -v raspi-config >/dev/null 2>&1; then
     sudo raspi-config nonint do_vnc 0 || echo "*** WARNING: VNC enable failed; skipping"
     sudo raspi-config nonint do_vnc_resolution 1920x1080 || echo "*** WARNING: VNC resolution not supported; skipping"
 
-    echo "*** Setup complete. Reboot to apply serial port and VNC changes and start mavlink-router and the controller."
+    echo "*** Setup complete. Reboot to apply serial port and VNC changes and start mavlink-router and the controller service."
 fi
