@@ -497,8 +497,8 @@ re-searched at the candidate's frequency once a lock exists.
   interferer (flat).
 - **`power-line`** (−8 dB tag, directional Gaussian source +15 dB at
   boresight, bearing 270°, seen through the antenna pattern): the source adds
-  to the base noise, so the combined floor is ≈ 15 dB up at 270°, ≈ 11–12 dB
-  at 225°/315° (45° off the source is −3.75 dB on the RA-2A table), ≈ 6 dB at
+  to the base noise, so the combined floor is ≈ 15 dB up at 270°, ≈ 10 dB up
+  at 225°/315° (45° off the source is −5.65 dB on the RA-2A table), ≈ 9 dB at
   90° (back lobe) and near the base floor where the pattern nulls it
   (`cycle_threshold.mu` and `threshold` stay ≈ 68–75 throughout; the noise
   PSD column in `analysis.md` shows the swing), with no false detections. The

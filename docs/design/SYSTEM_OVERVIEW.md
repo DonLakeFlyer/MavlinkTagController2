@@ -37,8 +37,8 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
 
 ## Control flow of a flight
 
-1. **Boot.** The `mavlink-router` systemd service opens `/dev/serial0`, and
-   `setup/crontab-start-controller.sh` starts the controller on
+1. **Boot.** The `mavlink-router` systemd service opens `/dev/serial0`, and the
+   `mavlink-tag-controller` service (`setup/start-controller.sh`) starts the controller on
    `udp://127.0.0.1:14540`, which the router forwards to (or directly on
    `serial:///dev/serial0:921600` if the service is not enabled). The controller
    learns the router's address from the first packet received. It heartbeats on the tunnel; TagTracker
@@ -159,7 +159,7 @@ Detector bins are ~33 Hz wide. The simulator has no spur, hence
 
 | Artifact | Location | Written by |
 | --- | --- | --- |
-| Controller text log | `~/MavlinkTagController.log` (boot script) and `<session>/MavlinkTagController.log` | controller |
+| Controller text log | `~/MavlinkTagController.log` (whole run; `.1` … `.20` are the previous runs, rotated by `setup/start-controller.sh`, with the systemd exit status appended by `setup/controller-exited.sh`) and `<session>/MavlinkTagController.log` | controller |
 | SDR / decimator stderr | `<session>/airspyhf_zeromq_rx.log`, `airspyhf_decimator.log` (1 Hz `perf` counters: `dropped`, `malformed`, `out_of_order`, `queue_drops`) | those processes |
 | Detector text log | `<session>/py_detector_<tag>.log` | detector stdout |
 | Detector structured log | `<session>/heading-NNN/detector_<tag>.jsonl` (or session root outside a rotation) | detector (`shared/log_schema.py`) |
@@ -183,6 +183,53 @@ Every other tunnel frame in either direction is logged at `D` as
 `<NAME> sent:`/`<NAME> received:` with its fields (`TunnelProtocolLog`); the
 1 Hz `HEARTBEAT` is summarized once a minute and on status change.
 
+## Time base
+
+Every timestamp on the Pi — controller log lines, telemetry cache samples,
+the decimator's packet timestamps (anchored to `CLOCK_REALTIME` once at
+start, then advanced by sample count), detector `timestamp_ns`, raw-capture
+`capture_utc` — comes from the Pi's system clock. The Pi has no RTC and no
+network in the field, so it boots at its last saved time and every battery
+swap leaves it behind by the time it was off.
+
+`ClockSync` (owned by `MavlinkSystem`) steps the system clock to the
+autopilot's GPS time **at most once per controller run**:
+
+- Only `SYSTEM_TIME` and `GPS_RAW_INT` from the autopilot (its sysid,
+  `MAV_COMP_ID_AUTOPILOT1`) count; mavlink-router also forwards the GCS's
+  `SYSTEM_TIME`, which carries the laptop clock.
+- `GPS_RAW_INT.fix_type` ≥ 3 continuously for 5 s (any lower fix, even
+  between two `SYSTEM_TIME` samples, restarts the wait), `time_unix_usec`
+  non-zero and not before the build date, and over those 5 s the time must
+  advance with the steady clock to within 1 s of where the window started, so
+  a jump, a stall or a slow clock restarts it. The autopilot may set its own
+  clock just after reporting the fix.
+- Offsets of 1 s or less are left alone; so is a clock NTP already disciplines
+  (kernel `adjtimex` state not `TIME_ERROR`).
+- Never inside a session: while vehicle time is frozen (detection or
+  collection) or the heartbeat status is `DETECTING` or `CAPTURE`
+  (`ClockStepGate.h`), the step is deferred to the first `SYSTEM_TIME` after
+  the session ends. `DETECTING` covers a detection teardown that has not
+  finished, including one stuck in `Stopping` because a child process did not
+  exit; then the clock is not stepped for the rest of the run. The check and the step hold the
+  same mutex as the setters that start a session, so a step either completes
+  before the session's processes start or waits for its end.
+- After a step the telemetry cache is cleared. Heartbeat send and receive
+  times in `Connection` use the steady clock, so a step in either direction
+  does not delay the controller's MAVLink `HEARTBEAT`.
+- Steps need `CAP_SYS_TIME`, which only the `mavlink-tag-controller` service
+  grants (`AmbientCapabilities`); the controller clears its ambient set at
+  startup so spawned processes do not inherit it. Without it (desktop, SITL,
+  manual runs) or off Linux, sync is disabled and offsets are still reported.
+
+Log key `CLOCK_SYNC`: `enabled`/`disabled: <reason>` at startup;
+`waiting: …`, `deferred: …`, `skipped: …`, `stepped …`, `failed: …` once each
+as they occur (a `waiting` reason is logged again only after a different one
+intervened); and at every session start `session start: GPS offset <s>; <state>`
+into the session's log (an `E` line if a synced clock has drifted past 1 s
+again). Raw captures record the same text as `clock_sync` in their metadata
+JSON. A step and a failure are also sent to the GCS as status text.
+
 ## Failure behaviour at each hop
 
 | Anomaly | Where detected | Action |
@@ -196,6 +243,12 @@ Every other tunnel frame in either direction is logged at `D` as
 | Detector process exits during a collection (crash or unrequested exit) | controller `MonitoredProcess` → `_handleDetectorProcessFailure` | `COLLECTION_STATUS_FAILED` with `ErrorCode::ProcessFailed` and expected/completed detector counts sent to the GCS; if still in `Starting`, the collection is cancelled. Outside a collection the exit is only logged and announced as a status text |
 | Detector silent | controller | heartbeats are logged on receipt only; there is no controller-side timeout on `CYCLE_COMPLETE`. During a collection the rotation `OPERATION_PROGRESS` step stops advancing (no `SLICE_PROGRESS` while capturing; an analysis without `COMPUTE_PROGRESS` for > 5 s, or running > 120 s, freezes it), which the GCS treats as a stalled rotation and cancels |
 | No candidate clears `confidenceFloor` | `BearingCalculator` | `BEARING_RESULT` with NaN bearing, `confirmed = 0` |
+| No 3D fix, implausible, jumping, stalled or slow autopilot time | controller `ClockSync` | no step; the 5 s settle restarts; `CLOCK_SYNC waiting: …` logged once per reason until a different reason intervenes |
+| No `GPS_RAW_INT` 30 s after the first valid `SYSTEM_TIME` | controller `ClockSync` | `CLOCK_SYNC waiting: no GPS_RAW_INT received from autopilot`; no step |
+| Clock step needed during a session | controller `ClockSync` | deferred until the session ends; logged once |
+| Detection teardown left a hung child (coordinator stays `Stopping`) | controller `ClockStepGate` | no clock step for the rest of the run |
+| `clock_settime` fails (no `CAP_SYS_TIME`) | controller `ClockSync` | `CLOCK_SYNC failed` (`E`) and a status text to the GCS; not retried this run |
+| Clock off by > 1 s again after the sync | controller `ClockSync` | session-start `CLOCK_SYNC` line logged as `E`; no second step |
 
 ## Related
 

@@ -30,6 +30,8 @@ public:
     // Returns how far the clock stepped back when the entry is older than the newest
     // sample; the earlier samples are then dropped so two dwells can't be averaged together.
     std::optional<double> addEntry(const TelemetryCacheEntry_t& entry);
+    // Drops every sample, e.g. after the system clock was stepped.
+    void clear();
 
     // Nearest sample within ~1 s of the time, else nullopt.
     std::optional<TelemetryCacheEntry_t> telemetryForTime(double timeInSeconds);

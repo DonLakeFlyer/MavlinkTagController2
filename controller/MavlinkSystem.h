@@ -13,6 +13,7 @@
 #include "MavlinkOutgoingMessageQueue.h"
 #include "Telemetry.h"
 #include "TunnelProtocol.h"
+#include "ClockSync.h"
 
 #include <mavlink.h>
 
@@ -49,12 +50,17 @@ public:
 	void 						sendMessage					(const mavlink_message_t& message);
 	Telemetry& 					telemetry					() { return _telemetry; }
 	uint16_t 					heartbeatStatus				() const { return _heartbeatStatus.load(); }
-	void						setHeartbeatStatus			(uint16_t heartbeatStatus) { _heartbeatStatus.store(heartbeatStatus); }
+	void						setHeartbeatStatus			(uint16_t heartbeatStatus);
 	uint32_t					detectionMode				() const { return _detectionMode.load(); }
 	void						setDetectionMode			(uint32_t mode) { _detectionMode.store(mode); }
 	std::time_t					vehicleTimeNow				() const;
 	bool						vehicleTimeAvailable		() const { return _vehicleTimeReceived.load(); }
-	void						setVehicleTimeFrozen		(bool frozen) { _vehicleTimeFrozen.store(frozen); if (!frozen) _vehicleTimeSuppressLogged.store(false); }
+	void						setVehicleTimeFrozen		(bool frozen);
+	/// Call before start(). onStepped runs after a step, outside any lock, with the offset in seconds.
+	void						setClockSync				(std::unique_ptr<ClockSync> clockSync, std::function<void(double)> onStepped);
+	/// Logs a CLOCK_SYNC line with the GPS offset and sync state, which reaches the active detection or
+	/// collection folder's log. Returns the text for sessions without a controller log (raw capture metadata).
+	std::string					logClockSyncSessionStart	();
 
 private:
 	MavlinkSystem();
@@ -62,6 +68,9 @@ private:
 	void 	_sendMessageOnConnection(const mavlink_message_t& message);
     float 	_cpuTemp				();
     void 	_handleSystemTime   	(const mavlink_message_t& message);
+    void 	_handleGpsRawInt    	(const mavlink_message_t& message);
+    bool 	_fromAutopilot      	(const mavlink_message_t& message) const;
+    void 	_reportClockSync    	(const ClockSync::Outcome& outcome);
 
 	std::unordered_map<uint16_t, MessageCallback> _message_subscriptions {}; // Mavlink message ID --> callback(mavlink_message_t)
 
@@ -80,6 +89,12 @@ private:
 	uint64_t					_vehicleEpochSeconds { 0 };
 	std::chrono::steady_clock::time_point _vehicleTimeReceivedAt {};
 	mutable std::mutex			_vehicleTimeMutex {};
+
+	// Held across the session check and the step, and by the setters that start a
+	// session, so a step either finishes before a session begins or waits for its end.
+	std::mutex					_clockSyncMutex {};
+	std::unique_ptr<ClockSync>	_clockSync {};
+	std::function<void(double)>	_onClockStepped {};
 
 	// Only touched by the outgoing queue thread
 	uint64_t					_sendFailuresTotal { 0 };

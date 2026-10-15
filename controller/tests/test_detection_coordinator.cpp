@@ -7,7 +7,10 @@
 #include "test_check.h"
 
 #include <chrono>
+#include <condition_variable>
+#include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -165,6 +168,55 @@ void testWaitWhileWakesOnTransition()
     CHECK(h.coord.waitWhile(State::Starting, std::chrono::milliseconds(0)));   // not in that state
 }
 
+// A slow sink must not let a later transition's status be overwritten by an earlier one.
+void testHeartbeatPublishedInTransitionOrder()
+{
+    std::mutex              m;
+    std::condition_variable cv;
+    bool                    holdNext = false;
+    bool                    inSink   = false;
+    bool                    release  = false;
+    std::vector<uint16_t>   published;
+
+    DetectionCoordinator coord([&](uint16_t status) {
+        std::unique_lock<std::mutex> lock(m);
+        if (holdNext && status == HEARTBEAT_STATUS_HAS_TAGS) {
+            holdNext = false;
+            inSink   = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return release; });
+        }
+        published.push_back(status);
+    });
+
+    coord.tagsUploaded(true);
+    CHECK(coord.requestCapture() == Result::Accepted);
+    {
+        std::lock_guard<std::mutex> lock(m);
+        holdNext = true;
+    }
+
+    std::thread finish([&coord] { coord.captureFinished(); });
+    {
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [&] { return inSink; });
+    }
+
+    // Starts while captureFinished()'s HAS_TAGS is still unpublished.
+    std::thread capture([&coord] { coord.requestCapture(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    {
+        std::lock_guard<std::mutex> lock(m);
+        release = true;
+    }
+    cv.notify_all();
+    finish.join();
+    capture.join();
+
+    CHECK(coord.state() == State::Capturing);
+    CHECK(published.back() == coord.heartbeatStatus());
+}
+
 } // namespace
 
 int main()
@@ -177,6 +229,7 @@ int main()
     testCapture();
     testFinishedCallsOutOfStateAreIgnored();
     testWaitWhileWakesOnTransition();
+    testHeartbeatPublishedInTransitionOrder();
     std::printf("test_detection_coordinator: all tests passed\n");
     return 0;
 }

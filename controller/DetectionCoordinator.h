@@ -11,8 +11,8 @@
 // threads, so every transition is serialised here. Raw capture is a state
 // here too because it holds the SDR, which is what START_DETECTION contends
 // for. No logging; the caller owns diagnostics, process management and
-// heartbeat publication (via the callback, invoked outside the lock after
-// every state change).
+// heartbeat publication (via the callback, invoked under the lock after every
+// heartbeat-visible state change, so it must be quick and not re-enter).
 class DetectionCoordinator {
 public:
     enum class State {

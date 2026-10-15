@@ -110,7 +110,7 @@ targets first:
 
 ```bash
 cmake --preset debug && cmake --build --preset debug
-ctest --test-dir build -R 'test_(collection_protocol|collection_coordinator|detector_protocol|bearing_calculator|python_pulse_mapper|telemetry_cache|tag_database|tag_upload_coordinator|request_cache|detection_coordinator|command_retry|status_text_chunker)'
+ctest --test-dir build -R 'test_(collection_protocol|collection_coordinator|detector_protocol|bearing_calculator|python_pulse_mapper|telemetry_cache|tag_database|tag_upload_coordinator|request_cache|detection_coordinator|command_retry|status_text_chunker|clock_sync|json_escape)'
 ```
 
 See [controller/tests/README.md](tests/README.md) and [TESTING.md](../TESTING.md).

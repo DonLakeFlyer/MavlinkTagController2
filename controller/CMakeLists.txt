@@ -22,6 +22,7 @@ add_executable(MavlinkTagController2
     log.cpp log.h
     logLevel.cpp logLevel.h
     formatString.h
+    jsonEscape.h
     StatusTextChunker.h
     platformHelpers.h
     TagDatabase.cpp TagDatabase.h
@@ -30,6 +31,8 @@ add_executable(MavlinkTagController2
     MavlinkOutgoingMessageQueue.cpp MavlinkOutgoingMessageQueue.h
     Connection.cpp Connection.h
     MavlinkSystem.cpp MavlinkSystem.h
+    ClockSync.cpp ClockSync.h
+    ClockStepGate.h
     MessageParser.h
     SerialConnection.cpp SerialConnection.h
     UdpConnection.cpp UdpConnection.h
@@ -198,4 +201,20 @@ if(BUILD_TESTING)
     target_include_directories(test_status_text_chunker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_status_text_chunker PRIVATE mavlink)
     add_test(NAME test_status_text_chunker COMMAND test_status_text_chunker)
+
+    add_executable(test_clock_sync
+        tests/test_clock_sync.cpp
+        ClockSync.cpp ClockSync.h
+        ClockStepGate.h
+        DetectionCoordinator.cpp DetectionCoordinator.h
+    )
+    target_include_directories(test_clock_sync PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_clock_sync PRIVATE tunnel_protocol)
+    add_test(NAME test_clock_sync COMMAND test_clock_sync)
+
+    add_executable(test_json_escape
+        tests/test_json_escape.cpp
+    )
+    target_include_directories(test_json_escape PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME test_json_escape COMMAND test_json_escape)
 endif()
