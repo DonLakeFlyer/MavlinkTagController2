@@ -28,6 +28,12 @@ public:
     virtual std::string detectionLogDir() = 0;
 
     virtual std::string rawCapture(const mavlink_tunnel_t& tunnel) = 0;
+    /// Launch the IQ recording pipeline. Returns "" on success or an error
+    /// message. On success the pipeline must later call
+    /// detection().recordStartFinished(true) from its worker.
+    virtual std::string startIqRecordingPipeline(const TunnelProtocol::StartIqRecording_t& info) = 0;
+    /// Tear the recording down; must later call detection().recordStopFinished().
+    virtual void        stopIqRecordingPipeline(uint32_t requestId) = 0;
     /// "" on success or an error message for the NACK.
     virtual std::string saveLogs(uint32_t requestId) = 0;
     virtual std::string cleanLogs(uint32_t requestId) = 0;
@@ -52,7 +58,7 @@ public:
 // tag-upload and detection state machines, and returns the ACK to send.
 // Collection commands are validated here and delegated whole; their state
 // lives in CollectionCoordinator inside CommandHandler. Long-running commands
-// (START/STOP_DETECTION, RAW_CAPTURE, SAVE/CLEAN_LOGS) are NACKed "Busy"
+// (START/STOP_DETECTION, START/STOP_IQ_RECORDING, RAW_CAPTURE, SAVE/CLEAN_LOGS) are NACKed "Busy"
 // while the OperationProgressReporter has one running.
 class TunnelCommandDispatcher {
 public:
@@ -96,6 +102,8 @@ private:
     Outcome _endTags(const mavlink_tunnel_t& tunnel);
     Outcome _startDetection(const mavlink_tunnel_t& tunnel);
     Outcome _stopDetection(uint32_t requestId);
+    Outcome _startIqRecording(const mavlink_tunnel_t& tunnel);
+    Outcome _stopIqRecording(uint32_t requestId);
     bool    _controllerIdle();
 
     CommandActions&            _actions;
@@ -104,4 +112,6 @@ private:
     RequestCache               _requestCache;
     TagUploadCoordinator       _tagUpload;
     DetectionCoordinator       _detection;
+    uint32_t                   _recordingFrequencyHz = 0;
+    uint32_t                   _recordingGain        = 0;
 };

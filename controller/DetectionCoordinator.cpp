@@ -28,6 +28,9 @@ DetectionCoordinator::Result DetectionCoordinator::requestStart()
     case State::Detecting:  return Result::AlreadyDetecting;
     case State::Stopping:   return Result::AlreadyDetecting;
     case State::Capturing:  return Result::Capturing;
+    case State::RecordStarting:
+    case State::Recording:
+    case State::RecordStopping: return Result::Recording;
     case State::HasTags:    break;
     }
     _transition(State::Starting, lock);
@@ -49,7 +52,10 @@ DetectionCoordinator::Result DetectionCoordinator::requestStop()
     switch (_state) {
     case State::Idle:
     case State::HasTags:
-    case State::Capturing:  return Result::NotDetecting;
+    case State::Capturing:
+    case State::RecordStarting:
+    case State::Recording:
+    case State::RecordStopping: return Result::NotDetecting;
     case State::Starting:   return Result::StartInProgress;
     case State::Stopping:   return Result::AlreadyStopping;
     case State::Detecting:  break;
@@ -76,6 +82,9 @@ DetectionCoordinator::Result DetectionCoordinator::requestCapture()
     case State::Starting:
     case State::Detecting:
     case State::Stopping:   return Result::Busy;
+    case State::RecordStarting:
+    case State::Recording:
+    case State::RecordStopping: return Result::Recording;
     case State::HasTags:    break;
     }
     _transition(State::Capturing, lock);
@@ -86,6 +95,55 @@ void DetectionCoordinator::captureFinished()
 {
     std::unique_lock<std::mutex> lock(_mutex);
     if (_state != State::Capturing) {
+        return;
+    }
+    _transition(State::HasTags, lock);
+}
+
+DetectionCoordinator::Result DetectionCoordinator::requestRecordStart()
+{
+    std::unique_lock<std::mutex> lock(_mutex);
+    switch (_state) {
+    case State::Idle:           return Result::NoTags;
+    case State::RecordStarting:
+    case State::Recording:      return Result::AlreadyRecording;
+    case State::RecordStopping: return Result::Recording;
+    case State::Starting:
+    case State::Detecting:
+    case State::Stopping:       return Result::Busy;
+    case State::Capturing:      return Result::Capturing;
+    case State::HasTags:        break;
+    }
+    _transition(State::RecordStarting, lock);
+    return Result::Accepted;
+}
+
+void DetectionCoordinator::recordStartFinished(bool ok)
+{
+    std::unique_lock<std::mutex> lock(_mutex);
+    if (_state != State::RecordStarting) {
+        return;
+    }
+    _transition(ok ? State::Recording : State::HasTags, lock);
+}
+
+DetectionCoordinator::Result DetectionCoordinator::requestRecordStop()
+{
+    std::unique_lock<std::mutex> lock(_mutex);
+    switch (_state) {
+    case State::RecordStarting: return Result::StartInProgress;
+    case State::RecordStopping: return Result::AlreadyStopping;
+    case State::Recording:      break;
+    default:                    return Result::NotRecording;
+    }
+    _transition(State::RecordStopping, lock);
+    return Result::Accepted;
+}
+
+void DetectionCoordinator::recordStopFinished()
+{
+    std::unique_lock<std::mutex> lock(_mutex);
+    if (_state != State::RecordStopping) {
         return;
     }
     _transition(State::HasTags, lock);
@@ -125,6 +183,9 @@ uint16_t DetectionCoordinator::heartbeatStatusFor(State state)
     case State::Detecting:  return HEARTBEAT_STATUS_DETECTING;
     case State::Stopping:   return HEARTBEAT_STATUS_DETECTING;
     case State::Capturing:  return HEARTBEAT_STATUS_CAPTURE;
+    case State::RecordStarting: return HEARTBEAT_STATUS_HAS_TAGS;
+    case State::Recording:
+    case State::RecordStopping: return HEARTBEAT_STATUS_RECORDING;
     }
     return HEARTBEAT_STATUS_IDLE;
 }

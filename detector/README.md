@@ -83,6 +83,7 @@ Without hardware use the simulator: `simulator/run_sim_pipeline.sh` or
 | `udp_receiver.py` | Receive thread and bounded ring |
 | `collection_control.py` | `ARM` handling and slice bookkeeping |
 | `detector_protocol.py` | TTDP encode/decode (mirror of `shared/detector_protocol.h`) |
+| `iq_recorder.py` | Records one tag's decimated IQ stream to disk for START_IQ_RECORDING (no detection) |
 | `run_detector.sh` | Standalone hardware pipeline |
 
 ## Tests

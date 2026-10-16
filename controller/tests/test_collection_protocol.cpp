@@ -8,7 +8,7 @@ using namespace TunnelProtocol;
 
 int main()
 {
-    static_assert(TUNNEL_PROTOCOL_VERSION == 7);
+    static_assert(TUNNEL_PROTOCOL_VERSION == 8);
     static_assert(COMMAND_ID_OPERATION_PROGRESS == 21);
     static_assert(COMMAND_ID_SET_LOG_LEVEL == 22);
     static_assert(COMMAND_ID_DETECTOR_HEARTBEAT == 23);
@@ -49,7 +49,7 @@ int main()
 
     Heartbeat_t heartbeat {};
     heartbeat.protocol_version = TUNNEL_PROTOCOL_VERSION;
-    CHECK(heartbeat.protocol_version == 7);
+    CHECK(heartbeat.protocol_version == 8);
 
     StartCollection_t collection {};
     collection.antenna_id = ANTENNA_ID_RA23K;

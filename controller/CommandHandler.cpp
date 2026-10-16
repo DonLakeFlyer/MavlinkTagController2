@@ -325,30 +325,190 @@ bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetectio
     return true;
 }
 
-std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& requestedStart)
+// SDR receiver + decimator/channelizer, shared by detection and IQ recording.
+void CommandHandler::_startSdrFrontEnd(LogFileManager* logFileManager, AirSpyDeviceType deviceType, uint32_t radioCenterFrequencyHz, uint32_t gain)
 {
-    // DetectionCoordinator (via the dispatcher) has already claimed Starting,
-    // so nothing else can launch a second process set while this runs.
+    std::string commandStr;
+    std::string logPath;
+    std::string airspyChannelizeDir;
+    std::string airspyChannelizeProcessName;
+    std::string airspyChannelizeExecutable;
+    std::string airspyReceiverProcessName;
+    const double centerFrequencyMhz = (double)radioCenterFrequencyHz / 1000000.0;
+
+    std::string sdrPathStatus;
+    if (deviceType == AirSpyDeviceType::SIMULATOR) {
+        // Simulator Pipeline: iq_simulator.py --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
+        // The simulator generates IQ at 768 kHz on ZMQ PUB, identical to airspyhf_zeromq_rx.
+        // Tags are generated at DC (freq_offset_hz=0), so the decimator uses --shift-khz 0.
+        sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
+
+        commandStr = _simulatorCommand(radioCenterFrequencyHz);
+        logDebug() << "SDR front end - using IQ Simulator stream source";
+        logDebug() << "  command:" << commandStr;
+
+        _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
+
+        logPath = logFileManager->filename(LogFileManager::DETECTORS, "iq_simulator", "log");
+        auto simProc = std::make_shared<MonitoredProcess>(
+                                                _mavlink,
+                                                "iq_simulator",
+                                                commandStr.c_str(),
+                                                logPath.c_str(),
+                                                MonitoredProcess::NoPipe,
+                                                nullptr);
+        simProc->start();
+        _trackProcess(simProc);
+
+        // Start airspyhf_decimator (subscribes to ZMQ, decimates by 200 to get 3840 Hz)
+        // --shift-khz 0 because the simulator generates tags at DC (no hardware DC spur to avoid)
+        commandStr = formatString("%s/repos/MavlinkTagController2/build/decimator/airspyhf_decimator --input-rate 768000 --shift-khz 0 --ports 10000,10001",
+                            _homePath);
+        logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
+        auto decimatorProc = std::make_shared<MonitoredProcess>(
+                                                _mavlink,
+                                                "airspyhf_decimator",
+                                                commandStr.c_str(),
+                                                logPath.c_str(),
+                                                MonitoredProcess::NoPipe,
+                                                nullptr);
+        decimatorProc->start();
+        _trackProcess(decimatorProc);
+    } else if (deviceType == AirSpyDeviceType::HF) {
+        // HF Pipeline: airspyhf_zeromq_rx --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
+        airspyReceiverProcessName = "airspyhf_zeromq_rx";
+        sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
+
+        // Tune 10 kHz above the requested center to keep the signal away from the AirSpy HF DC bin.
+        // Then apply +10 kHz digital shift so the target is re-centered while the hardware DC spike moves to +10 kHz.
+        // The -Z flag enables ZeroMQ PUB output on tcp://127.0.0.1:5555 (default).
+        commandStr = formatString("%s/repos/MavlinkTagController2/build/airspyhf_zeromq/tools/src/airspyhf_zeromq_rx -Z -f %f -a 768000 -g off -m on",
+                            _homePath,
+                            centerFrequencyMhz + (static_cast<double>(kAirSpyHfFrequencyOffsetHz) / 1000000.0));
+        logDebug() << "SDR front end - using AirSpy HF ZeroMQ stream source";
+
+        _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
+
+        logPath     = logFileManager->filename(LogFileManager::DETECTORS, airspyReceiverProcessName.c_str(), "log");
+        auto airspyProc = std::make_shared<MonitoredProcess>(
+                                                _mavlink,
+                                                airspyReceiverProcessName.c_str(),
+                                                commandStr.c_str(),
+                                                logPath.c_str(),
+                                                MonitoredProcess::NoPipe,
+                                                nullptr);
+        airspyProc->start();
+        _trackProcess(airspyProc);
+
+        // Start airspyhf_decimator (subscribes to ZMQ, decimates by 200 to get 3840 Hz)
+        // --shift-khz 10 compensates for the +10 kHz receiver tune offset with this shifter convention.
+        const int hfFrequencyShiftKhz = (kAirSpyHfFrequencyOffsetHz / 1000);
+        commandStr = formatString("%s/repos/MavlinkTagController2/build/decimator/airspyhf_decimator --input-rate 768000 --shift-khz %d --ports 10000,10001",
+                            _homePath,
+                            hfFrequencyShiftKhz);
+        logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
+        auto decimatorProc = std::make_shared<MonitoredProcess>(
+                                                _mavlink,
+                                                "airspyhf_decimator",
+                                                commandStr.c_str(),
+                                                logPath.c_str(),
+                                                MonitoredProcess::NoPipe,
+                                                nullptr);
+        decimatorProc->start();
+        _trackProcess(decimatorProc);
+    } else {
+        _airspyPipe = new bp::pipe();
+        // Mini Pipeline: airspy_rx -> csdr-uavrt -> channelizer -> UDP 20000+ -> detectors
+        airspyChannelizeDir = "airspy_channelize";
+        airspyChannelizeProcessName = "airspy_channelize";
+        airspyChannelizeExecutable = "airspy_channelize";
+        airspyReceiverProcessName = "airspy_rx";
+        sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
+
+        commandStr  = formatString("%sairspy_rx -f %f -a 3000000 -r /dev/stdout -h %d -t 0",
+                            _airspyPath.c_str(),
+                            centerFrequencyMhz,
+                            gain);
+        logDebug() << "SDR front end - using AirSpy Mini stream source";
+
+        _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
+
+        logPath     = logFileManager->filename(LogFileManager::DETECTORS, airspyReceiverProcessName.c_str(), "log");
+        auto airspyProc = std::make_shared<MonitoredProcess>(
+                                                _mavlink,
+                                                airspyReceiverProcessName.c_str(),
+                                                commandStr.c_str(),
+                                                logPath.c_str(),
+                                                MonitoredProcess::OutputPipe,
+                                                _airspyPipe);
+        airspyProc->start();
+        _trackProcess(airspyProc);
+
+        logPath = logFileManager->filename(LogFileManager::DETECTORS, "csdr-uavrt", "log");
+        auto csdrProc = std::make_shared<MonitoredProcess>(
+                                                _mavlink,
+                                                "csdr-uavrt",
+                                                "csdr-uavrt fir_decimate_cc 8 0.05 HAMMING",
+                                                logPath.c_str(),
+                                                MonitoredProcess::InputPipe,
+                                                _airspyPipe);
+        csdrProc->start();
+        _trackProcess(csdrProc);
+
+        commandStr  = formatString("%s/repos/%s/%s %s",
+                            _homePath,
+                            airspyChannelizeDir.c_str(),
+                            airspyChannelizeExecutable.c_str(),
+                            _tagDatabase.channelizerCommandLine().c_str());
+        logPath = logFileManager->filename(LogFileManager::DETECTORS, airspyChannelizeProcessName.c_str(), "log");
+        auto channelizeProc = std::make_shared<MonitoredProcess>(
+                                                    _mavlink,
+                                                    airspyChannelizeProcessName.c_str(),
+                                                    commandStr.c_str(),
+                                                    logPath.c_str(),
+                                                    MonitoredProcess::NoPipe,
+                                                    nullptr);
+        channelizeProc->start();
+        _trackProcess(channelizeProc);
+    }
+}
+
+// Shared by detection and IQ recording. Returns "" or the NACK message.
+std::string CommandHandler::_checkSdrPipeline(const char* commandName, AirSpyDeviceType* deviceType)
+{
     std::string airspyError;
-    auto deviceType = _simulatorMode ? AirSpyDeviceType::SIMULATOR : _connectedAirSpyType(&airspyError);
-    if (deviceType == AirSpyDeviceType::NONE) {
-        logError() << "START_DETECTION - ERROR: AirSpy detection failed: " << airspyError;
+    *deviceType = _simulatorMode ? AirSpyDeviceType::SIMULATOR : _connectedAirSpyType(&airspyError);
+    if (*deviceType == AirSpyDeviceType::NONE) {
+        logError() << commandName << "- ERROR: AirSpy detection failed: " << airspyError;
         return std::string("AirSpy detection failed: ") + airspyError;
     }
 
-    bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
+    const bool isHFMode = (*deviceType == AirSpyDeviceType::HF || *deviceType == AirSpyDeviceType::SIMULATOR);
 
-    // Reject here rather than let the second detector die on bind() 5 s later.
+    // Reject here rather than let the second per-tag process die on bind() 5 s later.
     if (const auto collision = _tagDatabase.findPortCollision(isHFMode)) {
-        const char* pipeline = deviceType == AirSpyDeviceType::SIMULATOR ? "IQ Simulator" : "AirSpy HF";
+        const char* pipeline = *deviceType == AirSpyDeviceType::SIMULATOR ? "IQ Simulator" : "AirSpy HF";
         const std::string error = isHFMode
             ? formatString("%s supports a single tag (one decimator channel); %zu configured", pipeline, _tagDatabase.size())
             : formatString("Tags %u and %u share channelizer channel %d", collision->tagIdA, collision->tagIdB,
                            (collision->port - 20000) / 2 + 1);
-        logError() << "START_DETECTION - ERROR:" << error << "- tags" << collision->tagIdA << "and" << collision->tagIdB
+        logError() << commandName << "- ERROR:" << error << "- tags" << collision->tagIdA << "and" << collision->tagIdB
                    << "would both bind UDP port" << collision->port;
         return error;
     }
+    return "";
+}
+
+std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& requestedStart)
+{
+    // DetectionCoordinator (via the dispatcher) has already claimed Starting,
+    // so nothing else can launch a second process set while this runs.
+    AirSpyDeviceType deviceType = AirSpyDeviceType::NONE;
+    if (const std::string error = _checkSdrPipeline("START_DETECTION", &deviceType); !error.empty()) {
+        return error;
+    }
+
+    bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
 
     auto logFileManager = LogFileManager::instance();
 
@@ -386,154 +546,11 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
     }
 
     std::thread([this, startDetection = requestedStart, logFileManager, deviceType, rotationOwnsProgress]() {
-        std::string             commandStr;
-        std::string             logPath;
-        std::string             airspyChannelizeDir;
-        std::string             airspyChannelizeProcessName;
-        std::string             airspyChannelizeExecutable;
-        std::string             airspyReceiverProcessName;
-
         logDebug() << "START_DETECTION:";
         logDebug() << "\tradio_center_frequency_hz:" << startDetection.radio_center_frequency_hz;
         logDebug() << "\tdetection_margin:" << startDetection.detection_margin << " confidence_ratio:" << startDetection.confidence_ratio;
         logDebug() << "\tdebug_detector:" << startDetection.debug_detector;
-        const double centerFrequencyMhz = (double)startDetection.radio_center_frequency_hz / 1000000.0;
-
-        std::string sdrPathStatus;
-        if (deviceType == AirSpyDeviceType::SIMULATOR) {
-                // Simulator Pipeline: iq_simulator.py --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
-                // The simulator generates IQ at 768 kHz on ZMQ PUB, identical to airspyhf_zeromq_rx.
-                // Tags are generated at DC (freq_offset_hz=0), so the decimator uses --shift-khz 0.
-                sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
-
-                commandStr = _simulatorCommand(startDetection.radio_center_frequency_hz);
-                logDebug() << "START_DETECTION - using IQ Simulator stream source";
-                logDebug() << "  command:" << commandStr;
-
-                _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
-
-                logPath = logFileManager->filename(LogFileManager::DETECTORS, "iq_simulator", "log");
-                auto simProc = std::make_shared<MonitoredProcess>(
-                                                        _mavlink,
-                                                        "iq_simulator",
-                                                        commandStr.c_str(),
-                                                        logPath.c_str(),
-                                                        MonitoredProcess::NoPipe,
-                                                        nullptr);
-                simProc->start();
-                _trackProcess(simProc);
-
-                // Start airspyhf_decimator (subscribes to ZMQ, decimates by 200 to get 3840 Hz)
-                // --shift-khz 0 because the simulator generates tags at DC (no hardware DC spur to avoid)
-                commandStr = formatString("%s/repos/MavlinkTagController2/build/decimator/airspyhf_decimator --input-rate 768000 --shift-khz 0 --ports 10000,10001",
-                                    _homePath);
-                logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
-                auto decimatorProc = std::make_shared<MonitoredProcess>(
-                                                        _mavlink,
-                                                        "airspyhf_decimator",
-                                                        commandStr.c_str(),
-                                                        logPath.c_str(),
-                                                        MonitoredProcess::NoPipe,
-                                                        nullptr);
-                decimatorProc->start();
-                _trackProcess(decimatorProc);
-            } else if (deviceType == AirSpyDeviceType::HF) {
-                // HF Pipeline: airspyhf_zeromq_rx --(ZMQ)--> airspyhf_decimator -> UDP 10000/10001 -> detectors
-                airspyReceiverProcessName = "airspyhf_zeromq_rx";
-                sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
-
-                // Tune 10 kHz above the requested center to keep the signal away from the AirSpy HF DC bin.
-                // Then apply +10 kHz digital shift so the target is re-centered while the hardware DC spike moves to +10 kHz.
-                // The -Z flag enables ZeroMQ PUB output on tcp://127.0.0.1:5555 (default).
-                commandStr = formatString("%s/repos/MavlinkTagController2/build/airspyhf_zeromq/tools/src/airspyhf_zeromq_rx -Z -f %f -a 768000 -g off -m on",
-                                    _homePath,
-                                    centerFrequencyMhz + (static_cast<double>(kAirSpyHfFrequencyOffsetHz) / 1000000.0));
-                logDebug() << "START_DETECTION - using AirSpy HF ZeroMQ stream source";
-
-                _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
-
-                logPath     = logFileManager->filename(LogFileManager::DETECTORS, airspyReceiverProcessName.c_str(), "log");
-                auto airspyProc = std::make_shared<MonitoredProcess>(
-                                                        _mavlink,
-                                                        airspyReceiverProcessName.c_str(),
-                                                        commandStr.c_str(),
-                                                        logPath.c_str(),
-                                                        MonitoredProcess::NoPipe,
-                                                        nullptr);
-                airspyProc->start();
-                _trackProcess(airspyProc);
-
-                // Start airspyhf_decimator (subscribes to ZMQ, decimates by 200 to get 3840 Hz)
-                // --shift-khz 10 compensates for the +10 kHz receiver tune offset with this shifter convention.
-                const int hfFrequencyShiftKhz = (kAirSpyHfFrequencyOffsetHz / 1000);
-                commandStr = formatString("%s/repos/MavlinkTagController2/build/decimator/airspyhf_decimator --input-rate 768000 --shift-khz %d --ports 10000,10001",
-                                    _homePath,
-                                    hfFrequencyShiftKhz);
-                logPath = logFileManager->filename(LogFileManager::DETECTORS, "airspyhf_decimator", "log");
-                auto decimatorProc = std::make_shared<MonitoredProcess>(
-                                                        _mavlink,
-                                                        "airspyhf_decimator",
-                                                        commandStr.c_str(),
-                                                        logPath.c_str(),
-                                                        MonitoredProcess::NoPipe,
-                                                        nullptr);
-                decimatorProc->start();
-                _trackProcess(decimatorProc);
-            } else {
-                _airspyPipe = new bp::pipe();
-                // Mini Pipeline: airspy_rx -> csdr-uavrt -> channelizer -> UDP 20000+ -> detectors
-                airspyChannelizeDir = "airspy_channelize";
-                airspyChannelizeProcessName = "airspy_channelize";
-                airspyChannelizeExecutable = "airspy_channelize";
-                airspyReceiverProcessName = "airspy_rx";
-                sdrPathStatus = _sdrPathStatusText(deviceType, centerFrequencyMhz);
-
-                commandStr  = formatString("%sairspy_rx -f %f -a 3000000 -r /dev/stdout -h %d -t 0",
-                                    _airspyPath.c_str(),
-                                    centerFrequencyMhz,
-                                    startDetection.gain);
-                logDebug() << "START_DETECTION - using AirSpy Mini stream source";
-
-                _mavlink->sendStatusText(sdrPathStatus.c_str(), MAV_SEVERITY_INFO);
-
-                logPath     = logFileManager->filename(LogFileManager::DETECTORS, airspyReceiverProcessName.c_str(), "log");
-                auto airspyProc = std::make_shared<MonitoredProcess>(
-                                                        _mavlink,
-                                                        airspyReceiverProcessName.c_str(),
-                                                        commandStr.c_str(),
-                                                        logPath.c_str(),
-                                                        MonitoredProcess::OutputPipe,
-                                                        _airspyPipe);
-                airspyProc->start();
-                _trackProcess(airspyProc);
-
-                logPath = logFileManager->filename(LogFileManager::DETECTORS, "csdr-uavrt", "log");
-                auto csdrProc = std::make_shared<MonitoredProcess>(
-                                                        _mavlink,
-                                                        "csdr-uavrt",
-                                                        "csdr-uavrt fir_decimate_cc 8 0.05 HAMMING",
-                                                        logPath.c_str(),
-                                                        MonitoredProcess::InputPipe,
-                                                        _airspyPipe);
-                csdrProc->start();
-                _trackProcess(csdrProc);
-
-                commandStr  = formatString("%s/repos/%s/%s %s",
-                                    _homePath,
-                                    airspyChannelizeDir.c_str(),
-                                    airspyChannelizeExecutable.c_str(),
-                                    _tagDatabase.channelizerCommandLine().c_str());
-                logPath = logFileManager->filename(LogFileManager::DETECTORS, airspyChannelizeProcessName.c_str(), "log");
-                auto channelizeProc = std::make_shared<MonitoredProcess>(
-                                                            _mavlink,
-                                                            airspyChannelizeProcessName.c_str(),
-                                                            commandStr.c_str(),
-                                                            logPath.c_str(),
-                                                            MonitoredProcess::NoPipe,
-                                                            nullptr);
-                channelizeProc->start();
-                _trackProcess(channelizeProc);
-            }
+        _startSdrFrontEnd(logFileManager, deviceType, startDetection.radio_center_frequency_hz, startDetection.gain);
 
         bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
 
@@ -587,6 +604,14 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
     return ""; // Return empty string to indicate success
 }
 
+void CommandHandler::_closeSessionLogIfDone()
+{
+    // A running operation (teardown, analysis) is still part of the session that just ended.
+    if (!_progress.busy()) {
+        LogFileManager::instance()->sessionLogDone();
+    }
+}
+
 void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
 {
     std::string repoDir    = formatString("%s/repos/MavlinkTagController2", _homePath);
@@ -621,6 +646,7 @@ void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
         if (spawnErr != 0) {
             logDebug() << "Post-flight analysis: failed to launch" << pythonCmd << ":" << strerror(spawnErr);
             _progress.finish(false, "Analysis failed to launch");
+            _closeSessionLogIfDone();
             return;
         }
 
@@ -644,6 +670,7 @@ void CommandHandler::_runPostFlightAnalysis(const std::string& logDir)
             logDebug() << "Post-flight analysis exited abnormally (wait status" << rc << ")";
             _progress.finish(false, "Analysis failed");
         }
+        _closeSessionLogIfDone();
     }).detach();
 }
 
@@ -676,27 +703,7 @@ void CommandHandler::stopDetectionPipeline(uint32_t requestId)
     }
 
     std::thread([this, inRotation, rotationOwnsProgress]() {
-        // Signal all first so the exits overlap, then share one deadline so
-        // several hung children cost one timeout total, not one each.
-        for (const auto& process : _processes) {
-            process->terminate();
-        }
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        bool allExited = true;
-        uint32_t exited = 0;
-        for (const auto& process : _processes) {
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now());
-            const bool ok = process->waitForExit(std::max(remaining, std::chrono::milliseconds(0)));
-            allExited = ok && allExited;
-            if (ok && !rotationOwnsProgress) {
-                _progress.update(++exited, process->name());
-            }
-        }
-        _processes.clear();
-
-        delete _airspyPipe;
-        _airspyPipe = NULL;
+        const bool allExited = _terminateProcesses(!rotationOwnsProgress);
 
         _simPhase = 0;
 
@@ -733,7 +740,134 @@ void CommandHandler::stopDetectionPipeline(uint32_t requestId)
             logError() << "STOP_DETECTION - ERROR: a detector process did not exit; SDR stays reserved until controller restart";
             _mavlink->sendStatusText("#Detector process hung; restart controller", MAV_SEVERITY_ALERT);
         }
+        _closeSessionLogIfDone();
     }).detach();
+}
+
+// Shared by detection and IQ recording teardown. Returns false if a child outlived SIGTERM.
+bool CommandHandler::_terminateProcesses(bool reportProgress)
+{
+    // Signal all first so the exits overlap, then share one deadline so
+    // several hung children cost one timeout total, not one each.
+    for (const auto& process : _processes) {
+        process->terminate();
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool allExited = true;
+    uint32_t exited = 0;
+    for (const auto& process : _processes) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        const bool ok = process->waitForExit(std::max(remaining, std::chrono::milliseconds(0)));
+        allExited = ok && allExited;
+        if (ok && reportProgress) {
+            _progress.update(++exited, process->name());
+        }
+    }
+    _processes.clear();
+
+    delete _airspyPipe;
+    _airspyPipe = NULL;
+
+    return allExited;
+}
+
+std::string CommandHandler::startIqRecordingPipeline(const StartIqRecording_t& info)
+{
+    // DetectionCoordinator has already claimed RecordStarting.
+    {
+        // A collection left open by an operator STOP still owns the frozen clock and the rotation log dir.
+        std::lock_guard<std::mutex> lock(_rotationMutex);
+        if (_inRotation) {
+            logError() << "START_IQ_RECORDING refused: collection" << _collectionCoordinator.collectionId() << "still open";
+            return "Collection still open; finish or cancel it first";
+        }
+    }
+    AirSpyDeviceType deviceType = AirSpyDeviceType::NONE;
+    if (const std::string error = _checkSdrPipeline("START_IQ_RECORDING", &deviceType); !error.empty()) {
+        return error;
+    }
+    const bool isHFMode = (deviceType == AirSpyDeviceType::HF || deviceType == AirSpyDeviceType::SIMULATOR);
+
+    const uint32_t stepCount = (deviceType == AirSpyDeviceType::MINI ? 3 : 2) + static_cast<uint32_t>(_tagDatabase.size());
+    if (!_progress.begin(COMMAND_ID_START_IQ_RECORDING, info.header.request_id, "Starting IQ recording", stepCount)) {
+        const std::string busy = _progress.busyMessage();
+        logError() << "START_IQ_RECORDING refused:" << busy;
+        return busy;
+    }
+
+    // Frozen like detection: a clock step mid-recording would break the IQ timestamps.
+    _mavlink->setVehicleTimeFrozen(true);
+    auto logFileManager = LogFileManager::instance();
+    logFileManager->detectorsStarted("CalibrationSweep");
+    _mavlink->logClockSyncSessionStart();
+
+    std::thread([this, info, logFileManager, deviceType, isHFMode]() {
+        logDebug() << "START_IQ_RECORDING radio_center_frequency_hz:" << info.radio_center_frequency_hz;
+        _startSdrFrontEnd(logFileManager, deviceType, info.radio_center_frequency_hz, info.gain);
+        for (const TunnelProtocol::TagInfo_t& tagInfo : _tagDatabase) {
+            _startIqRecorder(logFileManager, tagInfo, isHFMode);
+        }
+        _mavlink->sendStatusText("IQ recording started", MAV_SEVERITY_INFO);
+        _progress.finish(true, "Recording IQ");
+        _dispatcher.detection().recordStartFinished(true);
+    }).detach();
+
+    return "";
+}
+
+void CommandHandler::stopIqRecordingPipeline(uint32_t requestId)
+{
+    logDebug() << "STOP_IQ_RECORDING tearing down";
+    if (!_progress.begin(COMMAND_ID_STOP_IQ_RECORDING, requestId, "Stopping IQ recording", static_cast<uint32_t>(_processes.size()))) {
+        logError() << "STOP_IQ_RECORDING progress unreported:" << _progress.busyMessage();
+    }
+
+    std::thread([this]() {
+        const bool allExited = _terminateProcesses(true /* reportProgress */);
+        _mavlink->setVehicleTimeFrozen(false);
+        LogFileManager::instance()->detectorsStopped();
+        _progress.finish(allExited, allExited ? "IQ recording stopped" : "Recorder process hung");
+
+        // A child that survived SIGTERM may still own the SDR, so stay RecordStopping.
+        if (allExited) {
+            _dispatcher.detection().recordStopFinished();
+        } else {
+            logError() << "STOP_IQ_RECORDING - ERROR: a process did not exit; SDR stays reserved until controller restart";
+            _mavlink->sendStatusText("#Recorder process hung; restart controller", MAV_SEVERITY_ALERT);
+        }
+        _closeSessionLogIfDone();
+    }).detach();
+}
+
+void CommandHandler::_startIqRecorder(LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool isHFMode)
+{
+    std::string repoDir     = formatString("%s/repos/MavlinkTagController2", _homePath);
+    std::string venvPython  = formatString("%s/.venv/bin/python3", repoDir.c_str());
+    std::string pythonCmd   = (access(venvPython.c_str(), X_OK) == 0) ? venvPython : std::string("python3");
+
+    std::string commandStr  = formatString("\"%s\" -u \"%s/detector/iq_recorder.py\" --port %d --tag-id %u --fs %d --out-dir \"%s\"",
+                                pythonCmd.c_str(),
+                                repoDir.c_str(),
+                                TagDatabase::detectorDataPort(tagInfo, isHFMode, false /* secondaryChannel */),
+                                tagInfo.id,
+                                isHFMode ? 3840 : 3750,
+                                logFileManager->logDir(LogFileManager::DETECTORS).c_str());
+
+    std::string logStem = formatString("iq_recorder_%u", tagInfo.id);
+    std::string logPath = logFileManager->filename(LogFileManager::DETECTORS, logStem.c_str(), "log");
+
+    logDebug() << "Starting IQ recorder:" << commandStr;
+
+    auto recorderProc = std::make_shared<MonitoredProcess>(
+                                                _mavlink,
+                                                logStem.c_str(),
+                                                commandStr.c_str(),
+                                                logPath.c_str(),
+                                                MonitoredProcess::NoPipe,
+                                                nullptr);
+    recorderProc->start();
+    _trackProcess(recorderProc);
 }
 
 void CommandHandler::handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo)
@@ -2382,6 +2516,7 @@ void CommandHandler::_commandThreadMain()
             _commandRunning = true;
         }
         _sendCommandAck(_dispatcher.handle(tunnel));
+        _closeSessionLogIfDone();
     }
 }
 

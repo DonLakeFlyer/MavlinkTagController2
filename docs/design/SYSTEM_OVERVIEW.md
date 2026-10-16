@@ -74,7 +74,14 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
    ACKed success because the intent is already being carried out. Raw capture
    is a state of the same machine (`HasTags` → `Capturing` → `HasTags`,
    claimed synchronously before the RAW_CAPTURE ACK), so START and RAW_CAPTURE
-   cannot both hold the SDR. The
+   cannot both hold the SDR. IQ recording for antenna-pattern calibration is
+   another (`HasTags` → `RecordStarting` → `Recording` → `RecordStopping` →
+   `HasTags`, heartbeat `RECORDING` once up): `START_IQ_RECORDING` starts the
+   same SDR front end plus one `detector/iq_recorder.py` per tag writing raw
+   decimated IQ to `~/Logs/Logs-CalibrationSweep-<UTC>/`, with the clock frozen
+   as for detection; it is refused while a collection is still open. A repeat
+   START while recording is ACKed only if its frequency and gain match.
+   `STOP_IQ_RECORDING` tears it down; no post-flight analysis runs. The
    controller probes the SDR, then rejects the
    command (NACK with message) if two tags would bind the same detector UDP
    port — AirSpy HF is a single decimator channel, so it supports one tag;
@@ -106,8 +113,8 @@ cycle: [DETECTOR_PIPELINE.md](DETECTOR_PIPELINE.md).
 
 ### Long-running commands and progress
 
-The ACK for `START_DETECTION`, `STOP_DETECTION`, `RAW_CAPTURE`, `SAVE_LOGS`
-and `CLEAN_LOGS` means *accepted*; the work runs on a worker thread. Its
+The ACK for `START_DETECTION`, `STOP_DETECTION`, `START_IQ_RECORDING`,
+`STOP_IQ_RECORDING`, `RAW_CAPTURE`, `SAVE_LOGS` and `CLEAN_LOGS` means *accepted*; the work runs on a worker thread. Its
 state reaches the GCS as `OPERATION_PROGRESS` frames
 (`OperationProgressReporter`, `controller/OperationProgress.cpp`) carrying the
 originating command and `request_id`, `RUNNING` / `COMPLETE` / `FAILED`,

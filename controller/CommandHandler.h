@@ -89,6 +89,8 @@ public:
     void        stopDetectionPipeline(uint32_t requestId) override;
     std::string detectionLogDir() override;
     std::string rawCapture(const mavlink_tunnel_t& tunnel) override;
+    std::string startIqRecordingPipeline(const TunnelProtocol::StartIqRecording_t& info) override;
+    void        stopIqRecordingPipeline(uint32_t requestId) override;
     std::string saveLogs(uint32_t requestId) override;
     std::string cleanLogs(uint32_t requestId) override;
     std::string airspyStatus() override;
@@ -142,6 +144,12 @@ private:
     // Adds a started pipeline process and reports it as one start-detection step.
     void _trackProcess          (std::shared_ptr<MonitoredProcess> process);
     void _startPythonDetector   (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel, bool isHFMode, double detectionMargin, double confidenceRatio, bool debugDetector, bool dumpSpectrogram, int controlPort = 0);
+    void _startIqRecorder       (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool isHFMode);
+    std::string _checkSdrPipeline(const char* commandName, AirSpyDeviceType* deviceType);
+    void _startSdrFrontEnd      (LogFileManager* logFileManager, AirSpyDeviceType deviceType, uint32_t radioCenterFrequencyHz, uint32_t gain);
+    bool _terminateProcesses    (bool reportProgress);
+    // Ends log mirroring into a closed session dir once no operation is still running for it.
+    void _closeSessionLogIfDone ();
     bool _writeSessionInfo      (const TunnelProtocol::StartDetectionInfo_t& startDetection, AirSpyDeviceType deviceType, bool isHFMode);
     // SLICE_CAPTURED, or COMPUTE_PROGRESS standing in for a lost one.
     // captureInferred: SLICE_CAPTURED was lost, so the capture end (and the dwell pose) is unknown.

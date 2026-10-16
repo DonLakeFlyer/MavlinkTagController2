@@ -156,6 +156,15 @@ void testClockStepGate()
     detection.stopFinished();
     CHECK(!clockStepBlocked(false, heartbeat));
     CHECK(clockStepBlocked(true, heartbeat));
+
+    // IQ recording teardown with a hung child: unfrozen, stays RecordStopping.
+    CHECK(detection.requestRecordStart() == DetectionCoordinator::Result::Accepted);
+    detection.recordStartFinished(true);
+    CHECK(clockStepBlocked(false, heartbeat));
+    CHECK(detection.requestRecordStop() == DetectionCoordinator::Result::Accepted);
+    CHECK(clockStepBlocked(false, heartbeat));
+    detection.recordStopFinished();
+    CHECK(!clockStepBlocked(false, heartbeat));
 }
 
 void testWaitsForThreeDFix()

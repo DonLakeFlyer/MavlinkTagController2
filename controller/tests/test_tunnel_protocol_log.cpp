@@ -27,6 +27,9 @@ void testNames()
 {
     CHECK(TunnelProtocolLog::commandName(COMMAND_ID_SET_LOG_LEVEL) == "SET_LOG_LEVEL");
     CHECK(TunnelProtocolLog::commandName(COMMAND_ID_DETECTOR_HEARTBEAT) == "DETECTOR_HEARTBEAT");
+    CHECK(TunnelProtocolLog::commandName(COMMAND_ID_START_IQ_RECORDING) == "START_IQ_RECORDING");
+    CHECK(TunnelProtocolLog::commandName(COMMAND_ID_STOP_IQ_RECORDING) == "STOP_IQ_RECORDING");
+    CHECK(TunnelProtocolLog::heartbeatStatusName(HEARTBEAT_STATUS_RECORDING) == "RECORDING");
     CHECK(TunnelProtocolLog::commandName(0xFFFF) == "UNKNOWN(65535)");
     CHECK(TunnelProtocolLog::logLevelName(LOG_LEVEL_DEBUG) == "DEBUG");
     CHECK(TunnelProtocolLog::logLevelName(LOG_LEVEL_VERBOSE) == "VERBOSE");
@@ -158,7 +161,7 @@ void testOperationProgressAndHeartbeats()
     h.status = HEARTBEAT_STATUS_HAS_TAGS;
     h.cpu_temp_c = 51.25f;
     text = describeStruct(h, "sent");
-    CHECK(contains(text, "protocol_version:7"));
+    CHECK(contains(text, "protocol_version:8"));
     CHECK(contains(text, "status:HAS_TAGS cpu_temp_c:51.2"));
 
     DetectorHeartbeat_t d {};
