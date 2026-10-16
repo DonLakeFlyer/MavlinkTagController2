@@ -139,6 +139,42 @@ void testCapture()
     CHECK(h.coord.state() == State::Stopping);
 }
 
+// IQ recording holds the SDR: published as RECORDING once up, exclusive with
+// detection, capture and tag upload, and stoppable only once up.
+void testRecording()
+{
+    Harness h;
+    CHECK(h.coord.requestRecordStart() == Result::NoTags);
+    h.coord.tagsUploaded(true);
+    CHECK(h.coord.requestRecordStart() == Result::Accepted);
+    CHECK(h.coord.state() == State::RecordStarting);
+    CHECK(h.coord.heartbeatStatus() == HEARTBEAT_STATUS_HAS_TAGS);
+    CHECK(h.coord.requestRecordStart() == Result::AlreadyRecording);
+    CHECK(h.coord.requestRecordStop() == Result::StartInProgress);
+    CHECK(h.coord.requestStart() == Result::Recording);
+    CHECK(h.coord.requestCapture() == Result::Recording);
+    CHECK(h.coord.tagsUploaded(false) == Result::Busy);
+
+    h.coord.recordStartFinished(true);
+    CHECK(h.coord.state() == State::Recording);
+    CHECK(h.coord.heartbeatStatus() == HEARTBEAT_STATUS_RECORDING);
+    CHECK(h.coord.requestStop() == Result::NotDetecting);
+    CHECK(h.coord.requestRecordStop() == Result::Accepted);
+    CHECK(h.coord.requestRecordStop() == Result::AlreadyStopping);
+    CHECK(h.coord.heartbeatStatus() == HEARTBEAT_STATUS_RECORDING);
+    h.coord.recordStopFinished();
+    CHECK(h.coord.state() == State::HasTags);
+    CHECK(h.coord.requestRecordStop() == Result::NotRecording);
+    CHECK((h.heartbeats == std::vector<uint16_t>{HEARTBEAT_STATUS_HAS_TAGS, HEARTBEAT_STATUS_RECORDING, HEARTBEAT_STATUS_HAS_TAGS}));
+
+    h.coord.requestRecordStart();
+    h.coord.recordStartFinished(false);
+    CHECK(h.coord.state() == State::HasTags);
+
+    h.coord.requestStart();
+    CHECK(h.coord.requestRecordStart() == Result::Busy);
+}
+
 void testFinishedCallsOutOfStateAreIgnored()
 {
     Harness h;
@@ -227,6 +263,7 @@ int main()
     testFailedStartReturnsToHasTags();
     testTagsUploadedRefusedWhileBusy();
     testCapture();
+    testRecording();
     testFinishedCallsOutOfStateAreIgnored();
     testWaitWhileWakesOnTransition();
     testHeartbeatPublishedInTransitionOrder();

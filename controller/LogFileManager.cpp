@@ -76,7 +76,7 @@ LogFileManager::LogFileManager()
     }
 }
 
-void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
+void LogFileManager::_createLogDir(LogFileManager::LogType_t logType, const char* detectorsDirName)
 {
     std::string logDirPrefix;
 
@@ -90,7 +90,7 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
         if (wasStarted) {
             logError() << "Detectors already started";
         }
-        logDirPrefix = formatString("%s%s", _logsDirPrefix.c_str(), "Detectors");
+        logDirPrefix = formatString("%s%s", _logsDirPrefix.c_str(), detectorsDirName);
         break;
     }
     case RAW_CAPTURE: {
@@ -159,7 +159,7 @@ void LogFileManager::_createLogDir(LogFileManager::LogType_t logType)
 
 }
 
-void LogFileManager::detectorsStarted()
+void LogFileManager::detectorsStarted(const char* dirName)
 {
     {
         std::lock_guard<std::mutex> lock(_dirMutex);
@@ -170,7 +170,7 @@ void LogFileManager::detectorsStarted()
             return;
         }
     }
-    _createLogDir(DETECTORS);
+    _createLogDir(DETECTORS, dirName);
 }
 
 void LogFileManager::detectorsStopped()

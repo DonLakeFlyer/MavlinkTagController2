@@ -85,6 +85,7 @@ TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_dispatch(const Header
 {
     switch (header.command) {
     case COMMAND_ID_STOP_DETECTION:
+    case COMMAND_ID_STOP_IQ_RECORDING:
     case COMMAND_ID_SAVE_LOGS:
     case COMMAND_ID_CLEAN_LOGS:
     case COMMAND_ID_AIRSPY_STATUS:
@@ -119,6 +120,8 @@ TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_dispatch(const Header
     case COMMAND_ID_END_TAGS:        return _endTags(tunnel);
     case COMMAND_ID_START_DETECTION: return _startDetection(tunnel);
     case COMMAND_ID_STOP_DETECTION:  return _stopDetection(header.request_id);
+    case COMMAND_ID_START_IQ_RECORDING: return _startIqRecording(tunnel);
+    case COMMAND_ID_STOP_IQ_RECORDING:  return _stopIqRecording(header.request_id);
     case COMMAND_ID_RAW_CAPTURE: {
         const std::string error = _actions.rawCapture(tunnel);
         return {error.empty(), error};
@@ -346,6 +349,9 @@ std::string TunnelCommandDispatcher::startDetection(const StartDetectionInfo_t& 
     case R::Capturing:
         _log.error("START_DETECTION rejected: raw capture in progress");
         return "Controller in incorrect state";
+    case R::Recording:
+        _log.error("START_DETECTION rejected: IQ recording in progress");
+        return "Controller in incorrect state";
     default:
         break;
     }
@@ -394,4 +400,76 @@ TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_stopDetection(uint32_
     std::string error;
     const bool ok = stopDetection(&error, requestId);
     return {ok, error};
+}
+
+TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_startIqRecording(const mavlink_tunnel_t& tunnel)
+{
+    if (tunnel.payload_length != sizeof(StartIqRecording_t)) {
+        _log.error(formatString("START_IQ_RECORDING payload length incorrect expected:%zu actual:%u", sizeof(StartIqRecording_t), tunnel.payload_length));
+        return {false, "Payload length incorrect"};
+    }
+    StartIqRecording_t info {};
+    memcpy(&info, tunnel.payload, sizeof(info));
+
+    using R = DetectionCoordinator::Result;
+    switch (_detection.requestRecordStart()) {
+    case R::Accepted: {
+        const std::string busy = _progress.busyMessage();
+        if (!busy.empty()) {
+            _detection.recordStartFinished(false);
+            _log.error("START_IQ_RECORDING rejected: " + busy);
+            return {false, busy};
+        }
+        const std::string error = _actions.startIqRecordingPipeline(info);
+        if (!error.empty()) {
+            _detection.recordStartFinished(false);
+            _log.error("START_IQ_RECORDING failed: " + error);
+            return {false, error};
+        }
+        _recordingFrequencyHz = info.radio_center_frequency_hz;
+        _recordingGain        = info.gain;
+        return {true, _actions.detectionLogDir()};
+    }
+    case R::AlreadyRecording:
+        if (info.radio_center_frequency_hz != _recordingFrequencyHz || info.gain != _recordingGain) {
+            _log.error(formatString("START_IQ_RECORDING rejected: recording at %u Hz gain %u, requested %u Hz gain %u",
+                                    _recordingFrequencyHz, _recordingGain, info.radio_center_frequency_hz, info.gain));
+            return {false, formatString("IQ recording already at %u Hz gain %u; stop first", _recordingFrequencyHz, _recordingGain)};
+        }
+        _log.info("START_IQ_RECORDING while recording; treating as satisfied");
+        return {true, _actions.detectionLogDir()};
+    case R::NoTags:
+        _log.error("START_IQ_RECORDING rejected: no tags uploaded");
+        return {false, "Controller in incorrect state"};
+    case R::Busy:
+    case R::Capturing:
+    case R::Recording:
+        _log.error("START_IQ_RECORDING rejected: SDR in use");
+        return {false, "Controller in incorrect state"};
+    default:
+        break;
+    }
+    return {false, "internal error"};
+}
+
+TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_stopIqRecording(uint32_t requestId)
+{
+    using R = DetectionCoordinator::Result;
+    switch (_detection.requestRecordStop()) {
+    case R::Accepted:
+        _actions.stopIqRecordingPipeline(requestId);
+        return {true, ""};
+    case R::AlreadyStopping:
+        _log.info("STOP_IQ_RECORDING while stop in progress; treating as satisfied");
+        return {true, ""};
+    case R::StartInProgress:
+        _log.error("STOP_IQ_RECORDING rejected: start still in progress");
+        return {false, "Recording start in progress; retry"};
+    case R::NotRecording:
+        _log.error("STOP_IQ_RECORDING rejected: not recording");
+        return {false, "Not recording"};
+    default:
+        break;
+    }
+    return {false, "internal error"};
 }

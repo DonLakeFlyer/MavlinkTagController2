@@ -8,9 +8,9 @@
 
 // Tag-list / detection lifecycle state machine. Commands arrive on the
 // command thread; the start, stop and capture pipelines finish on worker
-// threads, so every transition is serialised here. Raw capture is a state
-// here too because it holds the SDR, which is what START_DETECTION contends
-// for. No logging; the caller owns diagnostics, process management and
+// threads, so every transition is serialised here. Raw capture and IQ
+// recording are states here too because they hold the SDR, which is what
+// START_DETECTION contends for. No logging; the caller owns diagnostics, process management and
 // heartbeat publication (via the callback, invoked under the lock after every
 // heartbeat-visible state change, so it must be quick and not re-enter).
 class DetectionCoordinator {
@@ -22,6 +22,9 @@ public:
         Detecting,  // pipeline up
         Stopping,   // stop pipeline tearing down
         Capturing,  // raw capture process holds the SDR
+        RecordStarting, // IQ recording pipeline launching processes
+        Recording,      // IQ recording pipeline up
+        RecordStopping, // IQ recording pipeline tearing down
     };
 
     enum class Result {
@@ -35,6 +38,9 @@ public:
         Busy,               // tagsUploaded / requestCapture while Starting/Detecting/Stopping
         Capturing,          // requestStart / tagsUploaded while Capturing
         AlreadyCapturing,   // requestCapture while Capturing
+        Recording,          // requestStart / requestCapture while an IQ recording holds the SDR
+        AlreadyRecording,   // requestRecordStart while RecordStarting/Recording: intent satisfied, ACK success
+        NotRecording,       // requestRecordStop with no recording running
     };
 
     using HeartbeatSink = std::function<void(uint16_t)>;
@@ -48,6 +54,10 @@ public:
     void   stopFinished();
     Result requestCapture();
     void   captureFinished();
+    Result requestRecordStart();
+    void   recordStartFinished(bool ok);
+    Result requestRecordStop();
+    void   recordStopFinished();
 
     /// Blocks while the state equals `state`, up to `timeout`. Returns true if it left.
     bool waitWhile(State state, std::chrono::milliseconds timeout);

@@ -24,6 +24,8 @@ struct FakeActions : CommandActions {
     int          startCalls = 0;
     int          stopCalls = 0;
     int          rawCaptureCalls = 0;
+    int          recordStartCalls = 0;
+    int          recordStopCalls = 0;
     int          saveLogsCalls = 0;
     int          cleanLogsCalls = 0;
     int          airspyStatusCalls = 0;
@@ -42,6 +44,8 @@ struct FakeActions : CommandActions {
     void        stopDetectionPipeline(uint32_t requestId) override { ++stopCalls; lastStopRequestId = requestId; }
     std::string detectionLogDir() override { return "/logs/det"; }
     std::string rawCapture(const mavlink_tunnel_t&) override { ++rawCaptureCalls; return ""; }
+    std::string startIqRecordingPipeline(const StartIqRecording_t&) override { ++recordStartCalls; return ""; }
+    void        stopIqRecordingPipeline(uint32_t) override { ++recordStopCalls; }
     std::string saveLogs(uint32_t requestId) override { ++saveLogsCalls; lastSaveRequestId = requestId; return ""; }
     std::string cleanLogs(uint32_t) override { ++cleanLogsCalls; return ""; }
     std::string airspyStatus() override { ++airspyStatusCalls; return ""; }
@@ -467,6 +471,46 @@ void testStartDetectionRefusedWhileCapturing()
     CHECK(g.dispatcher.detection().requestCapture() == DetectionCoordinator::Result::Busy);
 }
 
+// IQ recording holds the SDR like detection: exclusive with START_DETECTION,
+// retry-safe, and stoppable only once the pipeline is up.
+void testIqRecordingLifecycle()
+{
+    Gcs g;
+    uploadTags(g, 63, {2});
+    StartIqRecording_t start {}; start.radio_center_frequency_hz = 147970000;
+    StopIqRecording_t stop {};
+
+    auto t = g.prepare(start, COMMAND_ID_START_IQ_RECORDING);
+    auto a = g.resend(t);
+    CHECK(ok(a) && std::string(a.message) == "/logs/det");
+    CHECK(ok(g.resend(t)));
+    CHECK(g.actions.recordStartCalls == 1);
+    CHECK(g.dispatcher.detection().state() == DState::RecordStarting);
+
+    CHECK(nack(g.send(stop, COMMAND_ID_STOP_IQ_RECORDING)));   // still starting
+    StartDetectionInfo_t sd {};
+    CHECK(nack(g.send(sd, COMMAND_ID_START_DETECTION)));
+    CHECK(g.log.contains("IQ recording in progress"));
+
+    g.dispatcher.detection().recordStartFinished(true);
+    CHECK(g.heartbeat() == HEARTBEAT_STATUS_RECORDING);
+    CHECK(nack(g.send(StopDetectionInfo_t {}, COMMAND_ID_STOP_DETECTION)));
+
+    // New request ids (GCS restart): same settings are satisfied, different ones need STOP first.
+    CHECK(ok(g.send(start, COMMAND_ID_START_IQ_RECORDING)));
+    StartIqRecording_t retune = start; retune.radio_center_frequency_hz = 150000000;
+    a = g.send(retune, COMMAND_ID_START_IQ_RECORDING);
+    CHECK(nack(a) && std::string(a.message).find("stop first") != std::string::npos);
+    CHECK(g.actions.recordStartCalls == 1);
+
+    t = g.prepare(stop, COMMAND_ID_STOP_IQ_RECORDING);
+    CHECK(ok(g.resend(t)) && ok(g.resend(t)));
+    CHECK(g.actions.recordStopCalls == 1);
+    g.dispatcher.detection().recordStopFinished();
+    CHECK(g.heartbeat() == HEARTBEAT_STATUS_HAS_TAGS);
+    CHECK(nack(g.send(stop, COMMAND_ID_STOP_IQ_RECORDING)));
+}
+
 void testPassThroughCommandsAreDeduped()
 {
     Gcs g;
@@ -713,6 +757,7 @@ int main()
     testRequestIdReuseWithDifferentCommandIsRejected();
     testRequestIdReuseWithDifferentPayloadIsRejected();
     testStartDetectionRefusedWhileCapturing();
+    testIqRecordingLifecycle();
     testPassThroughCommandsAreDeduped();
     testMalformedFrames();
     testControllerRestartFallsBackToStateMachines();

@@ -34,6 +34,8 @@ std::string commandName(uint32_t command)
     case COMMAND_ID_OPERATION_PROGRESS:     return "OPERATION_PROGRESS";
     case COMMAND_ID_SET_LOG_LEVEL:          return "SET_LOG_LEVEL";
     case COMMAND_ID_DETECTOR_HEARTBEAT:     return "DETECTOR_HEARTBEAT";
+    case COMMAND_ID_START_IQ_RECORDING:     return "START_IQ_RECORDING";
+    case COMMAND_ID_STOP_IQ_RECORDING:      return "STOP_IQ_RECORDING";
     }
     return formatString("UNKNOWN(%u)", command);
 }
@@ -86,6 +88,7 @@ std::string heartbeatStatusName(uint32_t status)
     case HEARTBEAT_STATUS_HAS_TAGS:       return "HAS_TAGS";
     case HEARTBEAT_STATUS_DETECTING:      return "DETECTING";
     case HEARTBEAT_STATUS_CAPTURE:        return "CAPTURE";
+    case HEARTBEAT_STATUS_RECORDING:      return "RECORDING";
     }
     return formatString("UNKNOWN(%u)", status);
 }
@@ -174,6 +177,11 @@ std::string fields(const void* payload, size_t length, uint32_t command)
         if (!copyPayload(payload, length, &m)) break;
         return formatString(" gain:%u frequency_hz:%u", m.gain, m.frequency_hz);
     }
+    case COMMAND_ID_START_IQ_RECORDING: {
+        StartIqRecording_t m;
+        if (!copyPayload(payload, length, &m)) break;
+        return formatString(" radio_center_frequency_hz:%u gain:%u", m.radio_center_frequency_hz, m.gain);
+    }
     case COMMAND_ID_HEARTBEAT: {
         Heartbeat_t m;
         if (!copyPayload(payload, length, &m)) break;
@@ -245,6 +253,7 @@ std::string fields(const void* payload, size_t length, uint32_t command)
         return formatString(" tag_id:%u detection_mode:%s", m.tag_id, detectionModeName(m.detection_mode).c_str());
     }
     case COMMAND_ID_STOP_DETECTION:
+    case COMMAND_ID_STOP_IQ_RECORDING:
     case COMMAND_ID_SAVE_LOGS:
     case COMMAND_ID_CLEAN_LOGS:
     case COMMAND_ID_AIRSPY_STATUS:

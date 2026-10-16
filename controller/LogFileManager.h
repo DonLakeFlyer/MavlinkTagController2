@@ -20,7 +20,7 @@ public:
 		ROTATION
 	} LogType_t;
 
- void detectorsStarted();
+ void detectorsStarted(const char* dirName = "Detectors");  // dir is Logs-<dirName>-<time> outside a rotation
 	void detectorsStopped();
     bool detectorsLogging() const { std::lock_guard<std::mutex> lock(_dirMutex); return !_logDirDetectors.empty(); }
 
@@ -52,10 +52,9 @@ public:
 	std::string filename	(LogType_t logType, const char* root, const char* extension);
 	std::string logDir		(LogType_t logType) const;
 	/// Directory the controller log is mirrored into: detectors dir while detecting,
-	/// else the rotation dir, else the most recently closed session dir so the
-	/// tail of a session (FINISH ack, STOPPED, outcome replays, the next tag
-	/// upload) is captured too. Empty only before the first session or after the
-	/// logs are deleted.
+	/// else the rotation dir, else the just-closed session dir until
+	/// sessionLogDone(), so the tail of the ending command (its ACK, teardown,
+	/// analysis) lands with the session. Empty when no session is open.
 	std::string controllerLogDir() const
 	{
 		std::lock_guard<std::mutex> lock(_dirMutex);
@@ -63,11 +62,17 @@ public:
 		if (!_logDirRotation.empty())  return _logDirRotation;
 		return _logDirClosed;
 	}
+	/// The command that closed the last session has completed; stop mirroring into its dir.
+	void sessionLogDone()
+	{
+		std::lock_guard<std::mutex> lock(_dirMutex);
+		_logDirClosed.clear();
+	}
 
 private:
 	LogFileManager();
 
-	void _createLogDir(LogType_t logType);
+	void _createLogDir(LogType_t logType, const char* detectorsDirName = "Detectors");
 	std::string _getSDCardPath();
 	/// complete (optional) is cleared if the listing could not be read in full.
 	std::list<std::string> _listLogFileDirs(bool* complete = nullptr);
