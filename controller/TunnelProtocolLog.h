@@ -13,6 +13,7 @@ std::string collectionStatusName(uint32_t status);      // COLLECTION_STATUS_*
 std::string collectionFinishName(uint32_t disposition); // COLLECTION_FINISH_*
 std::string operationStateName(uint32_t state);         // OPERATION_STATE_*
 std::string heartbeatStatusName(uint32_t status);       // HEARTBEAT_STATUS_*
+std::string cpuThrottleFlagsName(uint32_t flags);       // CPU_THROTTLE_FLAG_* bitmask: NONE, THERMAL, UNDERVOLTAGE or THERMAL|UNDERVOLTAGE
 std::string detectionModeName(uint32_t mode);           // DETECTION_MODE_*
 std::string logLevelName(uint32_t level);               // LOG_LEVEL_*
 

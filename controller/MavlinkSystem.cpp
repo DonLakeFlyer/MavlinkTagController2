@@ -7,8 +7,10 @@
 #include "formatString.h"
 #include "StatusTextChunker.h"
 #include "ClockStepGate.h"
+#include "CpuThrottle.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <mutex>
 #include <fstream>
 #include <functional>
@@ -222,7 +224,12 @@ float MavlinkSystem::_cpuTemp()
         buffer << stream.rdbuf();
         stream.close();
 
-        temp = std::stof(buffer.str());     // convert string to float
+        const std::string text = buffer.str();
+        char*             end  = nullptr;
+        temp = std::strtof(text.c_str(), &end);
+        if (end == text.c_str()) {
+            return std::nanf("");
+        }
         temp = temp / 1000;                 // convert float value to degree
         temp = roundf(temp * 100) / 100;    // round decimal to nearest
     } else {
@@ -237,8 +244,71 @@ float MavlinkSystem::_cpuTemp()
 	return temp;
 }
 
+// Polled off the heartbeat thread so a stalled vcgencmd cannot delay heartbeats.
+void MavlinkSystem::_cpuThrottlePollLoop()
+{
+    const auto pollInterval = _simulatedCpuThrottle ? std::chrono::seconds(1) : std::chrono::seconds(5);
+    const auto startTime    = std::chrono::steady_clock::now();
+    CpuThrottleHold hold;
+    std::optional<uint8_t> lastFlags;
+    bool unavailableLogged = false;
+
+    while (true) {
+        std::optional<uint8_t> polled;
+        std::string            source;
+        if (_simulatedCpuThrottle) {
+            const double elapsedSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime).count();
+            polled = simulatedCpuThrottleFlags(*_simulatedCpuThrottle, elapsedSeconds);
+            source = "simulated";
+        } else {
+            std::optional<uint32_t> firmwareBits;
+            // timeout (SIGKILL after 1 s more) keeps a hung vcgencmd from freezing this thread.
+            if (FILE* pipe = popen("timeout -k 1 2 vcgencmd get_throttled 2>/dev/null", "r")) {
+                char line[64] = {};
+                const bool gotLine = fgets(line, sizeof(line), pipe) != nullptr;
+                if (pclose(pipe) == 0 && gotLine) {
+                    firmwareBits = parseFirmwareThrottled(line);
+                }
+            }
+            if (firmwareBits) {
+                polled = cpuThrottleFlags(*firmwareBits);
+                source = formatString("firmware_bits:0x%x", *firmwareBits);
+            } else {
+                source = "poll_failed";
+            }
+        }
+
+        const uint8_t flags = hold.update(polled);
+        _cpuThrottleFlags.store(flags);
+
+        if (polled) {
+            unavailableLogged = false;
+        } else if (!unavailableLogged) {
+            unavailableLogged = true;
+            if (flags != 0) {
+                logError() << "CPU throttle status unavailable (vcgencmd get_throttled failed); holding"
+                           << TunnelProtocolLog::cpuThrottleFlagsName(flags) << "for up to" << CpuThrottleHold::kMaxFailedPolls - 1 << "more polls";
+            } else {
+                logDebug() << "CPU throttle status unavailable (vcgencmd get_throttled failed); reporting not throttled";
+            }
+        }
+
+        if (lastFlags ? *lastFlags != flags : flags != 0) {
+            logError() << formatString("CPU throttle flags changed: %s -> %s %s cpu_temp_c:%.1f",
+                                       TunnelProtocolLog::cpuThrottleFlagsName(lastFlags.value_or(0)).c_str(),
+                                       TunnelProtocolLog::cpuThrottleFlagsName(flags).c_str(),
+                                       source.c_str(), _cpuTemp());
+        }
+        lastFlags = flags;
+
+        std::this_thread::sleep_for(pollInterval);
+    }
+}
+
 void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
 {
+    std::thread(&MavlinkSystem::_cpuThrottlePollLoop, this).detach();
+
     std::thread heartbeatSenderThread([this, tick = std::move(tick)]() {
         using clock = std::chrono::steady_clock;
         constexpr int   kSummaryEvery   = 60;
@@ -261,12 +331,12 @@ void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
             heartbeat.protocol_version  = TUNNEL_PROTOCOL_VERSION;
             heartbeat.system_id         = HEARTBEAT_SYSTEM_ID_MAVLINKCONTROLLER;
             heartbeat.status            = _heartbeatStatus;
-            heartbeat.cpu_temp_c         = _cpuTemp();
+            heartbeat.cpu_throttle_flags = _cpuThrottleFlags.load();
 
             if (!lastStatus || *lastStatus != heartbeat.status) {
                 logDebug() << "HEARTBEAT sent: status:" << TunnelProtocolLog::heartbeatStatusName(heartbeat.status)
                           << (lastStatus ? "(was " + TunnelProtocolLog::heartbeatStatusName(*lastStatus) + ")" : std::string("(first)"))
-                          << "cpu_temp_c:" << heartbeat.cpu_temp_c;
+                          << "cpu_throttle_flags:" << TunnelProtocolLog::cpuThrottleFlagsName(heartbeat.cpu_throttle_flags);
                 lastStatus = heartbeat.status;
             }
 
@@ -293,10 +363,10 @@ void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
 
             if (++heartbeatCount >= kSummaryEvery) {
                 const float windowS = std::chrono::duration<float>(clock::now() - windowStart).count();
-                logDebug() << formatString("HEARTBEAT sent: x%d in %.1f s (worst gap %.2f s, %d late) status: %s cpu_temp_c: %.1f",
+                logDebug() << formatString("HEARTBEAT sent: x%d in %.1f s (worst gap %.2f s, %d late) status: %s cpu_throttle_flags: %s",
                                            heartbeatCount, windowS, worstGapS, lateBeats,
                                            TunnelProtocolLog::heartbeatStatusName(heartbeat.status).c_str(),
-                                           heartbeat.cpu_temp_c);
+                                           TunnelProtocolLog::cpuThrottleFlagsName(heartbeat.cpu_throttle_flags).c_str());
                 heartbeatCount = 0;
                 worstGapS = 0.0f;
                 lateBeats = 0;

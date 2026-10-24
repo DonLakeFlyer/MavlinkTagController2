@@ -159,10 +159,14 @@ void testOperationProgressAndHeartbeats()
     h.protocol_version = TUNNEL_PROTOCOL_VERSION;
     h.system_id = HEARTBEAT_SYSTEM_ID_MAVLINKCONTROLLER;
     h.status = HEARTBEAT_STATUS_HAS_TAGS;
-    h.cpu_temp_c = 51.25f;
+    h.cpu_throttle_flags = CPU_THROTTLE_FLAG_THERMAL | CPU_THROTTLE_FLAG_UNDERVOLTAGE;
     text = describeStruct(h, "sent");
-    CHECK(contains(text, "protocol_version:8"));
-    CHECK(contains(text, "status:HAS_TAGS cpu_temp_c:51.2"));
+    CHECK(contains(text, "protocol_version:9"));
+    CHECK(contains(text, "status:HAS_TAGS cpu_throttle_flags:THERMAL|UNDERVOLTAGE"));
+    h.cpu_throttle_flags = 0;
+    CHECK(contains(describeStruct(h, "sent"), "cpu_throttle_flags:NONE"));
+    h.cpu_throttle_flags = CPU_THROTTLE_FLAG_UNDERVOLTAGE;
+    CHECK(contains(describeStruct(h, "sent"), "cpu_throttle_flags:UNDERVOLTAGE"));
 
     DetectorHeartbeat_t d {};
     d.header.command = COMMAND_ID_DETECTOR_HEARTBEAT;

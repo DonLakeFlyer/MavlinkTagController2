@@ -93,6 +93,18 @@ std::string heartbeatStatusName(uint32_t status)
     return formatString("UNKNOWN(%u)", status);
 }
 
+std::string cpuThrottleFlagsName(uint32_t flags)
+{
+    std::string name;
+    if (flags & CPU_THROTTLE_FLAG_THERMAL) {
+        name = "THERMAL";
+    }
+    if (flags & CPU_THROTTLE_FLAG_UNDERVOLTAGE) {
+        name += name.empty() ? "UNDERVOLTAGE" : "|UNDERVOLTAGE";
+    }
+    return name.empty() ? "NONE" : name;
+}
+
 std::string detectionModeName(uint32_t mode)
 {
     switch (mode) {
@@ -185,8 +197,9 @@ std::string fields(const void* payload, size_t length, uint32_t command)
     case COMMAND_ID_HEARTBEAT: {
         Heartbeat_t m;
         if (!copyPayload(payload, length, &m)) break;
-        return formatString(" protocol_version:%u system_id:%u status:%s cpu_temp_c:%.1f",
-                            m.protocol_version, m.system_id, heartbeatStatusName(m.status).c_str(), m.cpu_temp_c);
+        return formatString(" protocol_version:%u system_id:%u status:%s cpu_throttle_flags:%s",
+                            m.protocol_version, m.system_id, heartbeatStatusName(m.status).c_str(),
+                            cpuThrottleFlagsName(m.cpu_throttle_flags).c_str());
     }
     case COMMAND_ID_START_COLLECTION: {
         StartCollection_t m;
