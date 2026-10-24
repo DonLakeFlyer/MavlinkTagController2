@@ -33,6 +33,7 @@ add_executable(MavlinkTagController2
     MavlinkSystem.cpp MavlinkSystem.h
     ClockSync.cpp ClockSync.h
     ClockStepGate.h
+    CpuThrottle.h
     MessageParser.h
     SerialConnection.cpp SerialConnection.h
     UdpConnection.cpp UdpConnection.h
@@ -75,6 +76,13 @@ if(BUILD_TESTING)
     )
     target_link_libraries(test_collection_protocol PRIVATE tunnel_protocol)
     add_test(NAME test_collection_protocol COMMAND test_collection_protocol)
+
+    add_executable(test_cpu_throttle
+        tests/test_cpu_throttle.cpp
+    )
+    target_include_directories(test_cpu_throttle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_cpu_throttle PRIVATE tunnel_protocol)
+    add_test(NAME test_cpu_throttle COMMAND test_cpu_throttle)
 
     add_executable(test_tunnel_protocol_log
         tests/test_tunnel_protocol_log.cpp

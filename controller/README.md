@@ -42,6 +42,9 @@ make controller           # or: cmake --preset controller && cmake --build --pre
 | `--sim-noise-source-db <dB>` | `0` (`15` for `power-line`) | Directional noise source: its power relative to the base floor at boresight, added to the base noise and seen through the antenna pattern |
 | `--sim-noise-source-bearing-deg <deg>` | `270` | True bearing of the noise source |
 | `--sim-noise-source-impulsive` | off | Make the noise source heavy-tailed (Student-t) |
+| `--sim-cpu-throttle [thermal\|undervoltage\|both]` | off (`both` if no kind) | Replace the `vcgencmd` throttle poll with a scripted heartbeat transition: 0 → the chosen flags → 0 |
+| `--sim-cpu-throttle-at <s>` | `10` | With `--sim-cpu-throttle`: seconds after the heartbeat sender starts before the flags are raised |
+| `--sim-cpu-throttle-for <s>` | `20` | With `--sim-cpu-throttle`: how long the flags stay raised |
 | `--sim-telemetry-endpoint <uri>` | internal default | TCP endpoint the simulator reads vehicle pose from |
 | `--debug-detector` | off | Pass the verbose flag to `pulse_detector.py` |
 | `--verbose` | off | Also write `|V]` log lines: per-pulse reports, pulse tunnel frames, detector heartbeats. The GCS can toggle this at runtime with `SET_LOG_LEVEL` |

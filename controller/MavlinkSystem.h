@@ -14,6 +14,7 @@
 #include "Telemetry.h"
 #include "TunnelProtocol.h"
 #include "ClockSync.h"
+#include "CpuThrottle.h"
 
 #include <mavlink.h>
 
@@ -40,6 +41,8 @@ public:
 	const std::string& 			connectionUrl				() const { return _connectionUrl; }
 	void 						subscribeToMessage			(uint16_t message_id, const MessageCallback& callback);
 	void 						handleMessage				(const mavlink_message_t& message);
+	/// Call before startTunnelHeartbeatSender(). Replaces the firmware throttle poll with a scripted transition.
+	void						setSimulatedCpuThrottle		(const SimulatedCpuThrottle& simulated) { _simulatedCpuThrottle = simulated; }
 	/// tick runs on the heartbeat thread after each 1 Hz tunnel heartbeat; it must not throw.
 	void 						startTunnelHeartbeatSender	(std::function<void()> tick = {});
 	bool 						connected					();
@@ -67,6 +70,7 @@ private:
 
 	void 	_sendMessageOnConnection(const mavlink_message_t& message);
     float 	_cpuTemp				();
+    void 	_cpuThrottlePollLoop	();
     void 	_handleSystemTime   	(const mavlink_message_t& message);
     void 	_handleGpsRawInt    	(const mavlink_message_t& message);
     bool 	_fromAutopilot      	(const mavlink_message_t& message) const;
@@ -82,6 +86,8 @@ private:
 	std::mutex 					_subscriptions_mutex {};
 	Telemetry 					_telemetry;
 	std::atomic<uint16_t>		_heartbeatStatus { HEARTBEAT_STATUS_IDLE };
+	std::atomic<uint8_t>		_cpuThrottleFlags { 0 };	// CPU_THROTTLE_FLAG_*; written by the poll thread
+	std::optional<SimulatedCpuThrottle> _simulatedCpuThrottle {};
 	std::atomic<uint32_t>		_detectionMode { DETECTION_MODE_UAVRT };
 	std::atomic<bool>			_vehicleTimeReceived { false };
 	std::atomic<bool>			_vehicleTimeFrozen { false };

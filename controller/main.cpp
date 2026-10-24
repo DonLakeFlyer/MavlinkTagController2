@@ -5,6 +5,7 @@
 #include "TunnelProtocol.h"
 #include "TelemetryCache.h"
 #include "MavlinkSystem.h"
+#include "TunnelProtocolLog.h"
 #include "MavlinkFtpServer.h"
 #include "SimulatorTelemetryPublisher.h"
 #include "formatString.h"
@@ -62,6 +63,8 @@ int main(int argc, char** argv)
     std::string simulatorAntenna = "ra2a";
     double      simulatorPriPpm = 43.0;      // bench RA-2A collar; 0 = ideal crystal
     CommandHandler::SimulatorRateSwitch simulatorRateSwitch;
+    SimulatedCpuThrottle simulatedCpuThrottle;
+    bool        simulatedCpuThrottleTimingGiven = false;
 	std::string simulatorTelemetryEndpoint = "tcp://127.0.0.1:6001";
     bool        debugDetector = false;
     double      detectorImpulseBlankFactor = 0.0;   // 0 = detector default (off)
@@ -187,6 +190,32 @@ int main(int argc, char** argv)
             }
             ++i;
             (isBurst ? simulatorRateSwitch.burstSeconds : simulatorRateSwitch.atSeconds) = value;
+        } else if (strcmp(argv[i], "--sim-cpu-throttle") == 0) {
+            // Kind is optional (default both); a following option or connection URL is left alone.
+            simulatedCpuThrottle.flags = CPU_THROTTLE_FLAG_THERMAL | CPU_THROTTLE_FLAG_UNDERVOLTAGE;
+            const char* kind = i + 1 < argc ? argv[i + 1] : "";
+            if (strcmp(kind, "thermal") == 0) {
+                simulatedCpuThrottle.flags = CPU_THROTTLE_FLAG_THERMAL;
+                ++i;
+            } else if (strcmp(kind, "undervoltage") == 0) {
+                simulatedCpuThrottle.flags = CPU_THROTTLE_FLAG_UNDERVOLTAGE;
+                ++i;
+            } else if (strcmp(kind, "both") == 0) {
+                ++i;
+            } else if (*kind != '\0' && strncmp(kind, "-", 1) != 0 && strstr(kind, "://") == nullptr) {
+                logError() << "--sim-cpu-throttle kind must be thermal, undervoltage or both, got" << kind;
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--sim-cpu-throttle-at") == 0 || strcmp(argv[i], "--sim-cpu-throttle-for") == 0) {
+            const bool isFor = strcmp(argv[i], "--sim-cpu-throttle-for") == 0;
+            double value = 0.0;
+            if (i + 1 >= argc || !parseDouble(argv[i + 1], value) || (isFor ? value <= 0.0 : value < 0.0)) {
+                logError() << argv[i] << "requires a number of seconds" << (isFor ? "> 0" : ">= 0") << ", got" << (i + 1 < argc ? argv[i + 1] : "<none>");
+                return 2;
+            }
+            ++i;
+            (isFor ? simulatedCpuThrottle.forSeconds : simulatedCpuThrottle.atSeconds) = value;
+            simulatedCpuThrottleTimingGiven = true;
 		} else if (strcmp(argv[i], "--sim-telemetry-endpoint") == 0) {
 			if (i + 1 < argc) {
 				simulatorTelemetryEndpoint = argv[++i];
@@ -208,6 +237,15 @@ int main(int argc, char** argv)
             // Treat any other argument as the connection URL
             connectionUrl = argv[i];
         }
+    }
+
+    if (simulatedCpuThrottle.flags == 0 && simulatedCpuThrottleTimingGiven) {
+        logError() << "--sim-cpu-throttle-at/-for require --sim-cpu-throttle";
+        return 2;
+    }
+    if (simulatedCpuThrottle.flags != 0 && !simulatorMode) {
+        logError() << "--sim-cpu-throttle requires --simulator";
+        return 2;
     }
 
     if (simulatorMode) {
@@ -263,6 +301,11 @@ int main(int argc, char** argv)
 
 	MavlinkSystem* mavlink = MavlinkSystem::instance();
 	mavlink->init(connectionUrl);
+	if (simulatedCpuThrottle.flags != 0) {
+		mavlink->setSimulatedCpuThrottle(simulatedCpuThrottle);
+		logDebug() << "Simulating CPU throttle:" << TunnelProtocolLog::cpuThrottleFlagsName(simulatedCpuThrottle.flags)
+		           << "at" << simulatedCpuThrottle.atSeconds << "s for" << simulatedCpuThrottle.forSeconds << "s";
+	}
 
 	std::unique_ptr<SimulatorTelemetryPublisher> simulatorTelemetryPublisher;
 	if (simulatorMode) {

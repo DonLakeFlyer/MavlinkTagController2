@@ -190,6 +190,19 @@ Every other tunnel frame in either direction is logged at `D` as
 `<NAME> sent:`/`<NAME> received:` with its fields (`TunnelProtocolLog`); the
 1 Hz `HEARTBEAT` is summarized once a minute and on status change.
 
+The `HEARTBEAT` carries `cpu_throttle_flags` (`CPU_THROTTLE_FLAG_THERMAL`,
+`CPU_THROTTLE_FLAG_UNDERVOLTAGE`), the current state from a background poll of
+`vcgencmd get_throttled` every 5 s (`CpuThrottle.h`), each call limited to 2 s
+(killed after 3 s). Heat is the soft
+temperature limit, or frequency-capped / throttled with no under-voltage
+(which sets those bits too). Where `vcgencmd` is missing the flags are 0. A
+failed or timed-out poll keeps nonzero flags for two more polls (logged at `E`)
+so a transient error does not read as recovery, then reports 0 on the third
+consecutive failure. Each change is logged at `E` with the raw firmware bits and the CPU
+temperature, and TagTracker shows it on the controller indicator. With
+`--simulator`, `--sim-cpu-throttle` replaces the poll with a scripted 0 → flags
+→ 0 transition for exercising that UI.
+
 ## Time base
 
 Every timestamp on the Pi — controller log lines, telemetry cache samples,
