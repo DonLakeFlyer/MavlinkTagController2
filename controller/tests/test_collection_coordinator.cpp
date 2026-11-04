@@ -1,7 +1,9 @@
 #include "CollectionCoordinator.h"
 #include "test_check.h"
 
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 int main()
@@ -171,6 +173,46 @@ int main()
         CHECK(CC::shownOnGcs(none));
         CHECK(!CC::shownOnGcs(sub));
         CHECK(!CC::shownOnGcs(sup));
+    }
+
+    // Rotation position per tag: mean hover pose over every slice, heard or not.
+    {
+        using CC = CollectionCoordinator;
+        using Poses = std::vector<CC::SlicePose>;
+        constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+        auto near = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
+
+        // Nothing heard (2026-11-04 wild-dog rotations logged 0,0): the dwell poses still count.
+        auto positions = CC::meanSlicePosition(Poses {
+            {4, 1, -18.7336, 27.2026}, {4, 2, -18.7338, 27.2028},
+        });
+        CHECK(positions.size() == 1);
+        CHECK(near(positions.at(4).first, -18.7337));
+        CHECK(near(positions.at(4).second, 27.2027));
+
+        // One vote per slice: lock candidates of a slice share its pose.
+        positions = CC::meanSlicePosition(Poses {
+            {4, 1, 10.0, 20.0}, {4, 1, 10.0, 20.0}, {4, 1, 10.0, 20.0}, {4, 2, 12.0, 22.0},
+        });
+        CHECK(near(positions.at(4).first, 11.0));
+        CHECK(near(positions.at(4).second, 21.0));
+
+        // (0,0) is the no-fix sentinel and non-finite poses are unusable; a tag without a fix is absent.
+        positions = CC::meanSlicePosition(Poses {
+            {4, 1, 0.0, 0.0}, {4, 2, nan, 22.0}, {4, 3, 12.0, 22.0}, {5, 1, 0.0, 0.0},
+        });
+        CHECK(positions.size() == 1);
+        CHECK(near(positions.at(4).first, 12.0));
+        CHECK(near(positions.at(4).second, 22.0));
+
+        // Tags are averaged separately.
+        positions = CC::meanSlicePosition(Poses {
+            {4, 1, 10.0, 20.0}, {5, 1, 30.0, 40.0},
+        });
+        CHECK(near(positions.at(4).first, 10.0));
+        CHECK(near(positions.at(5).first, 30.0));
+
+        CHECK(CC::meanSlicePosition(Poses {}).empty());
     }
 
     return 0;
