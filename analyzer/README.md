@@ -9,6 +9,7 @@ Tools in this folder:
 | `flight_checks.py` | recorded logs | Run the [2026-04_FLIGHT_DATA_ANALYSIS.md](../docs/analysis/2026-04_FLIGHT_DATA_ANALYSIS.md) checks against flight logs (reads **both** the current and the legacy Apr-2026 log layouts) |
 | `post_flight_analysis.py` | one session directory | Markdown report per session: decimator/USB continuity, per-detector and per-heading detections, lock candidates, bearing fit, spectrograms. Run automatically by the controller at session stop |
 | `iq_replay.py` | raw IQ capture | Offline detector replay + fixed-offset amplitude (Check 6) |
+| `lock_ratio_replay.py` | rotation directories with spectrogram dumps | Replay a rotation's lock, per-heading measurements and bearing at several lock score ratios |
 | `capture_noise.sh` | live SDR | Capture baseline noise with `airspyhf_rx` (+10 kHz DC-spike offset, writes `.json` sidecar) and run `psd_spectrum.py` |
 | `psd_spectrum.py` | raw IQ capture or detector `_iq.npy` dump | Noise-floor PSD: Welch spectrum, flatness, spikiness, DC-spike height |
 
@@ -198,8 +199,8 @@ introduced in 2026-09. Sessions recorded before that (`heading_NNN`,
 ```
 
 One test module per script (`test_flight_checks.py`,
-`test_post_flight_analysis.py`, `test_iq_replay.py`, `test_psd_spectrum.py`,
-`test_signal_analyzer.py`, `test_ipi_analyzer.py`). The DSP ports in
+`test_post_flight_analysis.py`, `test_iq_replay.py`, `test_lock_ratio_replay.py`,
+`test_psd_spectrum.py`, `test_signal_analyzer.py`, `test_ipi_analyzer.py`). The DSP ports in
 `iq_replay.py` / `signal_analyzer.py` are equivalence-tested against literal
 ports of the C++ decimator loops. See [TESTING.md](../TESTING.md).
 
@@ -232,6 +233,54 @@ at the locked (bin, phase).
 | `--top` | 5 | Number of top candidates to print |
 | `--lock-offset` | *(self-lock)* | Fold-offset index from an independent lock; without it the phase is re-maximized on the data being measured, which positively biases the amplitude |
 | `--lock-bin` | *(entered freq)* | Frequency bin from an independent lock (use with `--lock-offset`) |
+
+## lock_ratio_replay.py
+
+Replays a rotation recorded with spectrogram dumping on
+(`heading-NNN/tag<T>_cycle_NNNN_{power.npy,meta.json}`) at several lock
+score ratios (the detector's `--lock-score-ratio`, 3.0 in flight). The
+full-band fold search is re-run once per heading on the dumped spectrogram,
+then for each ratio the detector's candidate bank and per-heading
+measurements and the controller's bearing fit are replayed. Use it on
+rotations flown at increasing range, and on rotations with no collar on
+frequency, to see what each ratio gains in range and what it would lock on
+in noise or interference.
+
+```bash
+.venv/bin/python analyzer/lock_ratio_replay.py ~/Logs/Logs-Rotation-2026-11-04_14-51-10
+
+# Several rotations, a custom sweep, results also as JSON:
+.venv/bin/python analyzer/lock_ratio_replay.py Logs-Rotation-* \
+    --lock-ratios 1.5,2,2.5,3 --json sweep.json
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `rotation_dirs` | *(required)* | One or more rotation log directories |
+| `--lock-ratios` | 1.5,2,2.5,3 | Comma-separated lock score ratios to replay |
+| `--null-permutations` | *(as flown)* | Permutations for every null (at least 10, the detector's minimum); by default each heading's flown count for the full search and the startup record's for re-searches |
+| `--json` | — | Also write the results to this JSON file |
+
+Output per tag: the full-search detections on each heading (and, where
+nothing cleared, the strongest bin below threshold — on a rotation with no
+collar on frequency this is the noise or interference maximum), one row per
+ratio with the first lock and the controller's verdict (bearing,
+confidence, valid / sighted headings as the controller reports them,
+confirmed, heard, revisit eligibility), and the per-heading results of the
+selected candidate. Revisit eligibility is per tag: the controller requests
+one revisit per collection, for the lowest eligible tag id. The row
+matching the ratio flown is marked; it is read from the
+detector's startup record, or taken as 3.0 for logs that predate it.
+`--json` writes the same results, including each ratio's selected candidate
+and its per-heading results.
+Thresholds come from a random permutation null with a fixed seed per
+search, so results are reproducible but can differ from the flight near a
+threshold.
+
+A directory that cannot be replayed (missing, no or incomplete spectrogram
+dumps, an older log layout, a detector geometry that no longer matches, a
+detector restarted or reconfigured mid-rotation) is reported and skipped;
+the remaining directories still run, and the exit status is 1.
 
 ## psd_spectrum.py
 
