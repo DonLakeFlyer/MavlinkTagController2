@@ -2103,6 +2103,7 @@ def main():
               impulse_blank_factor=args.impulse_blank_factor,
               detection_margin=args.detection_margin,
               confidence_ratio=args.confidence_ratio,
+              lock_score_ratio=args.lock_score_ratio,
               port=args.port, warmup_seconds=args.warmup_seconds,
               center_freq=args.center_freq,
               tag_id=args.tag_id, freq=args.freq,
