@@ -424,7 +424,8 @@ not tear the collection down on its own — the GCS decides whether to cancel.
    If the selected candidate is not the one the GCS was following live, its
    CONFIRMED and no-detection slice reports are replayed first.
 5. **Log** `bearing_result.log`
-   (`tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed,heard`)
+   (`tag_id,bearing_deg,r_squared,n_valid_slices,best_snr,latitude,longitude,n_sighted_slices,confirmed,heard`;
+   `latitude,longitude` is the mean dwell pose over every slice, heard or not, `0,0` only without a GPS fix)
    and `bearing_candidates.log`
    (`tag_id,candidate_id,bearing_deg,confidence,n_valid_slices,best_snr,selected,rejected,n_sighted_slices,residuals`;
    `residuals` is `;`-separated `heading:residual:weight` per detected heading,

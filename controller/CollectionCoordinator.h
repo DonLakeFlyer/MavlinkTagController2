@@ -4,6 +4,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "TunnelProtocol.h"
@@ -89,6 +90,18 @@ public:
         return storedStatus == TunnelProtocol::kConfirmedDetectionStatus
             || storedStatus == TunnelProtocol::kNoPulseDetectionStatus;
     }
+
+    struct SlicePose {
+        uint32_t tagId;
+        uint32_t sliceId;
+        double   latitude;
+        double   longitude;
+    };
+
+    /// Mean hover position per tag over its rotation slices, heard or not, as (lat, lon).
+    /// One vote per (tag, slice): lock candidates share the slice's pose. (0,0) is the
+    /// no-fix sentinel; it and non-finite poses are skipped. Tags without a fix are absent.
+    static std::map<uint32_t, std::pair<double, double>> meanSlicePosition(const std::vector<SlicePose>& slices);
 
     /// How the last collection ended; distinguishes a FINALIZE retry from a
     /// FINALIZE that follows a CANCEL of the same id (which must not be Duplicate).

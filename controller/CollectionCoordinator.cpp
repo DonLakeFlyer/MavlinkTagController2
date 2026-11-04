@@ -1,6 +1,38 @@
 #include "CollectionCoordinator.h"
 
 #include <algorithm>
+#include <cmath>
+
+std::map<uint32_t, std::pair<double, double>> CollectionCoordinator::meanSlicePosition(const std::vector<SlicePose>& slices)
+{
+    struct Accum {
+        double latitude  = 0.0;
+        double longitude = 0.0;
+        int    count     = 0;
+    };
+    std::map<uint32_t, Accum> accums;
+    std::set<std::pair<uint32_t, uint32_t>> seen;
+    for (const auto& slice : slices) {
+        if (!std::isfinite(slice.latitude) || !std::isfinite(slice.longitude)) {
+            continue;
+        }
+        if (slice.latitude == 0.0 && slice.longitude == 0.0) {
+            continue;
+        }
+        if (!seen.insert({slice.tagId, slice.sliceId}).second) {
+            continue;
+        }
+        auto& accum = accums[slice.tagId];
+        accum.latitude  += slice.latitude;
+        accum.longitude += slice.longitude;
+        accum.count++;
+    }
+    std::map<uint32_t, std::pair<double, double>> means;
+    for (const auto& [tagId, accum] : accums) {
+        means[tagId] = {accum.latitude / accum.count, accum.longitude / accum.count};
+    }
+    return means;
+}
 
 CollectionCoordinator::Result CollectionCoordinator::start(
     uint32_t collectionId, std::vector<uint32_t> detectorTagIds, uint32_t sliceCount)

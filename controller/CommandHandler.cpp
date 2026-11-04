@@ -980,8 +980,10 @@ void CommandHandler::_storeDwellPose(uint32_t sliceId, uint32_t tagId)
         return;
     }
     _rotationSlicePose.insert_or_assign({sliceId, tagId}, *pose);
-    logDebug() << formatString("Dwell pose: slice %u tag_id %u yaw %.1f over %.1f s",
-                               sliceId, tagId, pose->attitudeEuler.yawDegrees, capturedSeconds - armedIt->second);
+    logDebug() << formatString("Dwell pose: slice %u tag_id %u lat/lon %.7f %.7f alt %.1f yaw %.1f over %.1f s",
+                               sliceId, tagId, pose->position.latitude, pose->position.longitude,
+                               pose->position.relativeAltitude, pose->attitudeEuler.yawDegrees,
+                               capturedSeconds - armedIt->second);
 }
 
 TelemetryCache::TelemetryCacheEntry_t CommandHandler::_pulsePose(const TagTrackerDetectorProtocol::Header& header,
@@ -2045,26 +2047,12 @@ std::string CommandHandler::finishCollection(const mavlink_tunnel_t& tunnel)
     }
     candidateLog.close();
 
-    // Compute mean lat/lon per tag from the rotation slices. TelemetryCache
-    // returns (0,0) when it has no fix yet; exclude that sentinel. One vote
-    // per physical slice: candidate rows share the slice's pose.
-    std::map<uint32_t, std::pair<double, double>> tagLatLonSum;
-    std::map<uint32_t, int> tagLatLonCount;
-    std::set<std::pair<uint32_t, uint32_t>> latLonSeen;   // (tag_id, slice_id)
+    std::vector<CollectionCoordinator::SlicePose> slicePoses;
+    slicePoses.reserve(slicesCopy.size());
     for (const auto& slice : slicesCopy) {
-        if (!slice.detected || !std::isfinite(slice.latitude) || !std::isfinite(slice.longitude)) {
-            continue;
-        }
-        if (slice.latitude == 0.0 && slice.longitude == 0.0) {
-            continue;
-        }
-        if (!latLonSeen.insert({slice.tag_id, slice.slice_id}).second) {
-            continue;
-        }
-        tagLatLonSum[slice.tag_id].first  += slice.latitude;
-        tagLatLonSum[slice.tag_id].second += slice.longitude;
-        tagLatLonCount[slice.tag_id]++;
+        slicePoses.push_back({slice.tag_id, slice.slice_id, slice.latitude, slice.longitude});
     }
+    const auto tagPositions = CollectionCoordinator::meanSlicePosition(slicePoses);
 
     for (const auto& result : results) {
         // The GCS has been following one candidate live; if the final pick
@@ -2136,10 +2124,10 @@ std::string CommandHandler::finishCollection(const mavlink_tunnel_t& tunnel)
 
         if (bearingLog.is_open()) {
             double lat = 0.0, lon = 0.0;
-            auto it = tagLatLonCount.find(result.tag_id);
-            if (it != tagLatLonCount.end() && it->second > 0) {
-                lat = tagLatLonSum[result.tag_id].first  / it->second;
-                lon = tagLatLonSum[result.tag_id].second / it->second;
+            const auto it = tagPositions.find(result.tag_id);
+            if (it != tagPositions.end()) {
+                lat = it->second.first;
+                lon = it->second.second;
             }
             bearingLog << result.tag_id << ","
                        << reportedBearing << ","
