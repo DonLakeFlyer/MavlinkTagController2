@@ -16,8 +16,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from post_flight_analysis import (  # noqa: E402
     RATE_WARNING_TRANSIENT_MAX, correlate_holes_with_gaps, generate_report,
-    parse_bearing_candidates_log, parse_bearing_log, parse_decimator_log,
-    parse_detector_jsonl, parse_rx_log,
+    parse_bearing_candidates_log, parse_bearing_log, parse_controller_log,
+    parse_decimator_log, parse_detector_jsonl, parse_rx_log,
 )
 
 
@@ -213,6 +213,53 @@ class TestRxLogParsing:
         assert d == {'usb_dropped_samples': 0, 'usb_drop_events': 0}
 
 
+class TestControllerLogParsing:
+    def test_throttle_reports_and_transitions(self, tmp_path):
+        log = tmp_path / 'MavlinkTagController.log'
+        log.write_text(
+            '[10:04:52|D]  HEARTBEAT sent: status: DETECTING (was HAS_TAGS) '
+            'cpu_throttle_flags: UNDERVOLTAGE  (MavlinkSystem.cpp:337)\n'
+            '[10:05:37|D]  HEARTBEAT sent: x60 in 64.6 s (worst gap 1.28 s, 0 late) '
+            'status: DETECTING cpu_throttle_flags: UNDERVOLTAGE  (MavlinkSystem.cpp:366)\n'
+            '[10:11:05|E]  CPU throttle flags changed: UNDERVOLTAGE -> NONE '
+            'firmware_bits:0x50000 cpu_temp_c:49.2  (MavlinkSystem.cpp:297)\n'
+            '[10:11:08|D]  HEARTBEAT sent: x60 in 65.7 s (worst gap 1.46 s, 0 late) '
+            'status: HAS_TAGS cpu_throttle_flags: NONE  (MavlinkSystem.cpp:366)\n'
+            '[10:11:10|E]  CPU throttle flags changed: NONE -> THERMAL|UNDERVOLTAGE '
+            'firmware_bits:0x50005 cpu_temp_c:51.0  (MavlinkSystem.cpp:297)\n')
+        d = parse_controller_log(str(log))
+        assert d['heartbeat_reports'] == 3
+        # Only heartbeats sent while detecting count; the HAS_TAGS one is after the dwell.
+        assert d['active_reports'] == 2
+        assert d['active_throttled_reports'] == 2
+        # The 10:11:10 transition follows a HAS_TAGS heartbeat, so THERMAL is idle-only.
+        assert d['throttle_flags'] == ['UNDERVOLTAGE']
+        assert d['idle_throttle_flags'] == ['THERMAL']
+        # Bits and temperature come from transitions into a throttled state only.
+        assert d['firmware_bits'] == ['0x50005']
+        assert d['max_cpu_temp_c'] == pytest.approx(51.0)
+        assert d['simulated'] is False
+
+    @pytest.mark.parametrize('line', [
+        '[10:00:10|E]  CPU throttle flags changed: NONE -> UNDERVOLTAGE '
+        'simulated cpu_temp_c:45.0  (MavlinkSystem.cpp:297)\n',
+        # Throttle already on before the session log opened: only heartbeats carry the marker.
+        '[10:05:37|D]  HEARTBEAT sent: x60 in 64.6 s (worst gap 1.28 s, 0 late) '
+        'status: DETECTING cpu_throttle_flags: UNDERVOLTAGE (simulated)  (MavlinkSystem.cpp:366)\n',
+    ])
+    def test_simulated_throttle_is_marked(self, tmp_path, line):
+        log = tmp_path / 'MavlinkTagController.log'
+        log.write_text(line)
+        d = parse_controller_log(str(log))
+        assert d['throttle_flags'] == ['UNDERVOLTAGE']
+        assert d['simulated'] is True
+
+    def test_missing_log_is_unthrottled(self, tmp_path):
+        d = parse_controller_log(str(tmp_path / 'nope.log'))
+        assert d['heartbeat_reports'] == 0
+        assert d['throttle_flags'] == []
+
+
 class TestHoleGapCorrelation:
     FS = 3840.0
 
@@ -309,6 +356,95 @@ class TestPlainSession:
         md = generate_report(str(tmp_path))
         assert 'Tag 3: rate switch within the dwell in 1 cycle(s) (A_to_B_c13)' in md
 
+    @pytest.mark.parametrize('n_perm, flagged', [
+        (40, False),
+        (16, True),   # Whizzy 2026-11-04: undervoltage left 13-16 of 40 in the 10 s limit
+    ])
+    def test_null_cut_short_by_time_limit_is_reported(self, tmp_path, n_perm, flagged):
+        entries = _detector_entries(3, 2, 24.0)
+        entries[0].update(null_permutations=40, null_time_budget=10.0)
+        entries.append({'type': 'cycle_threshold', 'cycle': 1, 'n_perm': n_perm,
+                        'threshold': 75.0})
+        entries.append({'type': 'cycle_threshold', 'cycle': 2, 'n_perm': 40,
+                        'threshold': 75.0})
+        _jsonl(tmp_path / 'detector_3.jsonl', entries)
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        md = generate_report(str(tmp_path))
+        anomaly = ('Tag 3: permutation null hit its 10 s time limit in 1/2 '
+                   f'cycle(s), using as few as {n_perm} of 40 permutations')
+        assert (anomaly in md) == flagged
+        assert ('No anomalies detected' in md) != flagged
+
+    @pytest.mark.parametrize('flags, flagged', [
+        ('NONE', False),
+        ('UNDERVOLTAGE', True),
+        ('THERMAL', True),
+        ('FUTURE_FLAG', True),   # underscored names must not be truncated
+    ])
+    def test_cpu_throttling_is_reported(self, tmp_path, flags, flagged):
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 2, 24.0))
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        (tmp_path / 'MavlinkTagController.log').write_text(
+            '[10:04:52|D]  HEARTBEAT sent: status: DETECTING (was HAS_TAGS) '
+            f'cpu_throttle_flags: {flags}  (MavlinkSystem.cpp:337)\n'
+            '[10:05:37|D]  HEARTBEAT sent: x60 in 64.6 s (worst gap 1.28 s, 0 late) '
+            f'status: DETECTING cpu_throttle_flags: {flags}  (MavlinkSystem.cpp:366)\n')
+        md = generate_report(str(tmp_path))
+        assert (f'Raspberry Pi CPU throttled ({flags})' in md) == flagged
+        assert 'slower; .' not in md
+        assert ('No anomalies detected' in md) != flagged
+        if flagged:
+            assert 'throttled at 2/2 heartbeat check(s) during detection' in md
+
+    def test_idle_only_throttling_is_an_observation(self, tmp_path):
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 2, 24.0))
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        (tmp_path / 'MavlinkTagController.log').write_text(
+            '[10:05:37|D]  HEARTBEAT sent: x60 in 64.6 s (worst gap 1.28 s, 0 late) '
+            'status: DETECTING cpu_throttle_flags: NONE  (MavlinkSystem.cpp:366)\n'
+            '[10:11:06|D]  HEARTBEAT sent: status: HAS_TAGS (was DETECTING) '
+            'cpu_throttle_flags: NONE  (MavlinkSystem.cpp:337)\n'
+            '[10:11:10|E]  CPU throttle flags changed: NONE -> UNDERVOLTAGE '
+            'firmware_bits:0x50005 cpu_temp_c:49.2  (MavlinkSystem.cpp:297)\n')
+        md = generate_report(str(tmp_path))
+        assert 'No anomalies detected' in md
+        assert 'Raspberry Pi CPU throttled' not in md
+        assert 'Pi reported UNDERVOLTAGE while idle, not during detection' in md
+
+    @pytest.mark.parametrize('line', [
+        '[10:00:10|E]  CPU throttle flags changed: NONE -> UNDERVOLTAGE '
+        'simulated cpu_temp_c:45.0  (MavlinkSystem.cpp:297)\n',
+        '[10:05:37|D]  HEARTBEAT sent: x60 in 64.6 s (worst gap 1.28 s, 0 late) '
+        'status: DETECTING cpu_throttle_flags: UNDERVOLTAGE (simulated)  (MavlinkSystem.cpp:366)\n',
+    ])
+    def test_simulated_throttle_is_not_blamed_on_the_pi(self, tmp_path, line):
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 2, 24.0))
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        (tmp_path / 'MavlinkTagController.log').write_text(line)
+        md = generate_report(str(tmp_path))
+        assert 'Simulated CPU throttling (UNDERVOLTAGE)' in md
+        assert 'Raspberry Pi CPU throttled' not in md
+        assert 'power supply' not in md
+
+    @pytest.mark.parametrize('total_ms, anomaly, warning', [
+        (7000.0, False, False),    # 18% of a 40 s recording
+        (10000.0, True, False),    # 25%: above the 20% anomaly line
+        (24000.0, True, True),     # 60%: above the 50% per-detector warning
+    ])
+    def test_analysis_time_vs_recording(self, tmp_path, total_ms, anomaly, warning):
+        entries = _detector_entries(3, 1, 12.0)
+        entries[0]['seg_sec'] = 40.0
+        for e in entries:
+            if e['type'] == 'timing':
+                e['total_ms'] = total_ms
+        _jsonl(tmp_path / 'detector_3.jsonl', entries)
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        md = generate_report(str(tmp_path))
+        pct = round(100 * total_ms / 40000.0)
+        assert (f'Tag 3: analysis took {total_ms / 1000:.1f} s for a 40.0 s '
+                f'recording ({pct}% of the time available' in md) == anomaly
+        assert (f'**WARNING:** Analysis used {pct}% of the time available' in md) == warning
+
     def test_lost_iq_summary_by_stage(self, tmp_path):
         entries = _detector_entries(3, 1, 12.0)
         entries[-1]['rx_ring_dropped'] = 2
@@ -368,6 +504,21 @@ class TestRotationSession:
     def test_duration_sums_headings(self, rotation_dir):
         md = generate_report(str(rotation_dir))
         assert '| Session duration | 26 s |' in md
+
+    def test_null_cut_short_summed_across_headings(self, tmp_path):
+        for h, n_perm in ((0, 16), (90, 40)):
+            hd = tmp_path / f'heading-{h:03d}'
+            hd.mkdir()
+            entries = _detector_entries(3, 1, 12.0)
+            entries[0].update(null_permutations=40, null_time_budget=10.0)
+            entries.append({'type': 'cycle_threshold', 'cycle': 1,
+                            'n_perm': n_perm, 'threshold': 75.0})
+            _jsonl(hd / 'detector_3.jsonl', entries)
+            _decimator_log(hd / 'airspyhf_decimator.log')
+        md = generate_report(str(tmp_path))
+        assert md.count('Tag 3: permutation null hit') == 1
+        assert ('Tag 3: permutation null hit its 10 s time limit in 1/2 cycle(s), '
+                'using as few as 16 of 40 permutations') in md
 
     def test_per_heading_transients_are_not_sustained(self, tmp_path):
         # Each heading restarts its decimator: 6 + 6 warnings is two startup

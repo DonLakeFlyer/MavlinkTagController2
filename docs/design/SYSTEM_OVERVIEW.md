@@ -201,7 +201,8 @@ so a transient error does not read as recovery, then reports 0 on the third
 consecutive failure. Each change is logged at `E` with the raw firmware bits and the CPU
 temperature, and TagTracker shows it on the controller indicator. With
 `--simulator`, `--sim-cpu-throttle` replaces the poll with a scripted 0 → flags
-→ 0 transition for exercising that UI.
+→ 0 transition for exercising that UI; heartbeat log lines then end the flags
+with `(simulated)` so a post-flight report does not blame the Pi.
 
 ## Time base
 

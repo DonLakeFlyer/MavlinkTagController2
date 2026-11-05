@@ -332,11 +332,14 @@ void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
             heartbeat.system_id         = HEARTBEAT_SYSTEM_ID_MAVLINKCONTROLLER;
             heartbeat.status            = _heartbeatStatus;
             heartbeat.cpu_throttle_flags = _cpuThrottleFlags.load();
+            // Marked on every line so a session log that opens mid-throttle still shows the source.
+            const std::string throttleName = TunnelProtocolLog::cpuThrottleFlagsName(heartbeat.cpu_throttle_flags)
+                                           + (_simulatedCpuThrottle ? " (simulated)" : "");
 
             if (!lastStatus || *lastStatus != heartbeat.status) {
                 logDebug() << "HEARTBEAT sent: status:" << TunnelProtocolLog::heartbeatStatusName(heartbeat.status)
                           << (lastStatus ? "(was " + TunnelProtocolLog::heartbeatStatusName(*lastStatus) + ")" : std::string("(first)"))
-                          << "cpu_throttle_flags:" << TunnelProtocolLog::cpuThrottleFlagsName(heartbeat.cpu_throttle_flags);
+                          << "cpu_throttle_flags:" << throttleName;
                 lastStatus = heartbeat.status;
             }
 
@@ -366,7 +369,7 @@ void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
                 logDebug() << formatString("HEARTBEAT sent: x%d in %.1f s (worst gap %.2f s, %d late) status: %s cpu_throttle_flags: %s",
                                            heartbeatCount, windowS, worstGapS, lateBeats,
                                            TunnelProtocolLog::heartbeatStatusName(heartbeat.status).c_str(),
-                                           TunnelProtocolLog::cpuThrottleFlagsName(heartbeat.cpu_throttle_flags).c_str());
+                                           throttleName.c_str());
                 heartbeatCount = 0;
                 worstGapS = 0.0f;
                 lateBeats = 0;
