@@ -76,13 +76,26 @@ ClockSync::Outcome ClockSync::systemTime(uint64_t timeUnixUsec, double steadyNow
         }
     }
 
-    if (_state != State::Waiting) {
+    // Each session logs its own deferral.
+    if (!sessionActive) {
+        _deferredLogged = false;
+    }
+
+    // Synced is not final: PX4 can report a 3D fix while SYSTEM_TIME is still
+    // its own stale clock and set that clock from GPS later, so a synced clock
+    // that is off again gets stepped again. Once synced only a drift is
+    // logged: it is how an autopilot clock jump shows up before the re-step.
+    const bool synced = _state == State::Stepped || _state == State::InSync;
+    if (_state != State::Waiting && !synced) {
         return {};
     }
+    const auto wait = [this, synced](WaitReason reason, std::string message) {
+        return synced && reason != WaitReason::Drift ? Outcome {} : _waiting(reason, std::move(message));
+    };
 
     if (!valid) {
         _settle.reset();
-        return _waiting(WaitReason::TimeInvalid, "waiting: autopilot time not valid yet");
+        return wait(WaitReason::TimeInvalid, "waiting: autopilot time not valid yet");
     }
 
     if (!fix3d) {
@@ -92,9 +105,18 @@ ClockSync::Outcome ClockSync::systemTime(uint64_t timeUnixUsec, double steadyNow
                 _waitMessage = "waiting: no GPS_RAW_INT yet";
                 return {};
             }
-            return _waiting(WaitReason::NoGpsMessage, "waiting: no GPS_RAW_INT received from autopilot");
+            return wait(WaitReason::NoGpsMessage, "waiting: no GPS_RAW_INT received from autopilot");
         }
-        return _waiting(WaitReason::NoFix, formatString("waiting: no 3D GPS fix (fix_type %u)", static_cast<unsigned>(_fixType)));
+        return wait(WaitReason::NoFix, formatString("waiting: no 3D GPS fix (fix_type %u)", static_cast<unsigned>(_fixType)));
+    }
+
+    // While a synced clock stays in sync the settle restarts at every sample,
+    // so a later jump is measured from here and a re-step needs a fresh
+    // kSettleSecs; the next jump is logged again.
+    if (synced && std::fabs(gpsSeconds - _ops.realtimeNow()) <= kStepThresholdSecs) {
+        _settle           = Settle { steadyNowSeconds, gpsSeconds };
+        _loggedWaitReason = WaitReason::None;
+        return {};
     }
 
     // The autopilot may set its own clock from GPS a moment after reporting the
@@ -106,7 +128,7 @@ ClockSync::Outcome ClockSync::systemTime(uint64_t timeUnixUsec, double steadyNow
         if (std::fabs(drift) > kConsistencySecs) {
             _settle = Settle { steadyNowSeconds, gpsSeconds };
             // Logged once per episode: a stalled or slow clock restarts the settle every few samples.
-            return _waiting(WaitReason::Drift,
+            return wait(WaitReason::Drift,
                             formatString("waiting: autopilot time drifted %+.1f s from the steady clock; restarting %.0f s settle",
                                          drift, kSettleSecs));
         }
@@ -126,7 +148,12 @@ ClockSync::Outcome ClockSync::systemTime(uint64_t timeUnixUsec, double steadyNow
     const double systemSeconds = _ops.realtimeNow();
     const double offset        = gpsSeconds - systemSeconds;
     if (std::fabs(offset) <= kStepThresholdSecs) {
-        _state = State::InSync;
+        if (synced) {
+            return {};
+        }
+        _state            = State::InSync;
+        _settle           = Settle { steadyNowSeconds, gpsSeconds };
+        _loggedWaitReason = WaitReason::None;
         return { Outcome::Kind::Skipped, offset,
                  formatString("skipped: offset %+.3f s is within %.1f s", offset, kStepThresholdSecs) };
     }
@@ -149,8 +176,11 @@ ClockSync::Outcome ClockSync::systemTime(uint64_t timeUnixUsec, double steadyNow
         return { Outcome::Kind::Failed, offset, "failed: " + _failure };
     }
 
-    _state          = State::Stepped;
-    _steppedSeconds = offset;
+    _state            = State::Stepped;
+    _steppedSeconds   = offset;
+    _stepCount       += 1;
+    _settle           = Settle { steadyNowSeconds, gpsSeconds };
+    _loggedWaitReason = WaitReason::None;
     return { Outcome::Kind::Stepped, offset,
              formatString("stepped system clock %+.3f s to GPS time (%s -> %s UTC)",
                           offset, utcString(systemSeconds).c_str(), utcString(gpsSeconds).c_str()) };
@@ -167,7 +197,9 @@ ClockSync::Summary ClockSync::sessionStartSummary(double steadyNowSeconds) const
         status = "not synced yet (" + (_waitMessage.empty() ? std::string("no autopilot time") : _waitMessage) + ")";
         break;
     case State::Stepped:
-        status = formatString("stepped %+.3f s earlier this run", _steppedSeconds);
+        status = _stepCount == 1
+            ? formatString("stepped %+.3f s earlier this run", _steppedSeconds)
+            : formatString("stepped %d times this run, last %+.3f s", _stepCount, _steppedSeconds);
         break;
     case State::InSync:
         status = "no step needed";

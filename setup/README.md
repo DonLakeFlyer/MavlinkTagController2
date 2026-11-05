@@ -89,8 +89,9 @@ logs `CLOCK_SYNC disabled`.
 
 The Pi has no RTC, so it boots at its last saved time and falls behind by
 however long it was powered off. Once the autopilot has a 3D GPS fix, the
-controller sets the Pi clock to GPS time (once per boot, never during a
-session) and announces it to the GCS as `Pi clock set to GPS time (+N s)`.
+controller sets the Pi clock to GPS time, and again whenever it is off by more
+than 1 s (never during a session). Each step is announced to the GCS as
+`Pi clock set to GPS time (+N s)`.
 `CLOCK_SYNC` lines in the log say what it did or why it is waiting. Details:
 [SYSTEM_OVERVIEW.md](../docs/design/SYSTEM_OVERVIEW.md#time-base).
 
