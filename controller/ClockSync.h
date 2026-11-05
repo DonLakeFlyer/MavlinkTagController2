@@ -5,13 +5,16 @@
 #include <optional>
 #include <string>
 
-// Steps the system clock to the autopilot's GPS time, at most once per run.
+// Steps the system clock to the autopilot's GPS time, and again whenever it is
+// off by more than kStepThresholdSecs later in the run.
 //
 // The rPi has no RTC and boots at its last saved time, so every battery swap
-// leaves it behind by the time it was off. The decimator anchors its packet
-// timestamps to CLOCK_REALTIME once at start and the telemetry cache stamps
-// with it too, so a step must never land inside a session: the caller passes
-// sessionActive and the step waits until it is false.
+// leaves it behind by the time it was off. PX4 can report a 3D fix while its
+// SYSTEM_TIME is still its own stale clock and set that clock from GPS later,
+// so the first step can be wrong and must be corrected. The decimator anchors
+// its packet timestamps to CLOCK_REALTIME once at start and the telemetry
+// cache stamps with it too, so a step must never land inside a session: the
+// caller passes sessionActive and the step waits until it is false.
 //
 // Decision logic only; the clock, NTP state and steady time are injected so
 // tests never touch the real clock. Not thread-safe: the caller serialises.
@@ -102,6 +105,7 @@ private:
     WaitReason                  _loggedWaitReason   = WaitReason::None;
     std::string                 _waitMessage;
     bool                        _deferredLogged     = false;
-    double                      _steppedSeconds     = 0.0;
+    double                      _steppedSeconds     = 0.0;      // the last step
+    int                         _stepCount          = 0;
     std::string                 _failure;
 };

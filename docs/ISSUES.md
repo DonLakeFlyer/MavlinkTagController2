@@ -98,11 +98,21 @@ resolve vehicle noise below that level.
 
 ### 11. RPi clock is not vehicle time; logs cannot be lined up with the ULog
 
-**Fix implemented 2026-10-15, not yet field-verified:** the controller steps
-the Pi clock to GPS time once per boot (`ClockSync`, see
+**Fix implemented 2026-10-15, revised 2026-11-05, not yet field-verified:** the
+controller steps the Pi clock to GPS time (`ClockSync`, see
 [design/SYSTEM_OVERVIEW.md](design/SYSTEM_OVERVIEW.md#time-base)). The
-growing offset below is the powered-off time of each battery swap. Remove this
-item after a flight whose logs show `CLOCK_SYNC stepped` and line up with the ULog.
+growing offset below is the powered-off time of each battery swap.
+
+2026-11-04 (Whizzy rotation): the one-step-per-run version stepped −4188 s,
+and the session log then showed the Pi 4 h 46 m behind (`CLOCK_SYNC session
+start: GPS offset +17180.845 s; stepped -4187.685 s earlier this run`). The
+likely cause, inferred from the PX4 1.17 GPS driver and not yet confirmed, is
+that PX4 reported a 3D fix while `SYSTEM_TIME` was still a stale Pixhawk clock
+and set that clock from GPS only later. The Pi's main controller log (the
+`CLOCK_SYNC stepped … (A -> B UTC)` line) or the flight's ULog would confirm
+it; neither was in the session folder. `ClockSync` now steps again whenever
+the clock is off by > 1 s outside a session. Remove this item after a flight
+whose session logs show `GPS offset` within ±1 s and line up with the ULog.
 
 Log folder names use vehicle time (`LogFileManager`: `vehicleTimeNow()`).
 Everything inside uses the RPi system clock, which in the field has no network

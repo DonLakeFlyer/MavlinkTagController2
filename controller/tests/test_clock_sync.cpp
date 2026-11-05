@@ -97,18 +97,68 @@ void testStepsAfterFixAndSettle()
     CHECK(std::fabs(clock.realtime - feed.gps) < 1e-6);
     CHECK(sync.state() == ClockSync::State::Stepped);
 
-    // At most once per run: later samples never step again.
-    clock.realtime -= 100.0;
+    // In sync: no further steps or log lines.
     for (int i = 0; i < 10; ++i) {
         CHECK(feed.tick().kind == Kind::None);
     }
     CHECK(clock.setCalls == 1);
+    CHECK(sync.sessionStartSummary(feed.steady).message
+          == "session start: GPS offset +0.000 s; stepped +1340.000 s earlier this run");
 
-    // ... but the session-start line flags the new offset.
+    // A lost fix after the sync is not logged.
+    sync.gpsFixType(1);
+    CHECK(feed.tick().kind == Kind::None);
+    sync.gpsFixType(3);
+    for (int i = 0; i < static_cast<int>(ClockSync::kSettleSecs) + 1; ++i) {
+        CHECK(feed.tick().kind == Kind::None);
+    }
+    CHECK(clock.setCalls == 1);
+
+    // 2026-11-04 Whizzy rotation: PX4 reported a 3D fix while SYSTEM_TIME was
+    // still its own stale clock, then set that clock from GPS later. The Pi
+    // must follow it to the corrected time, after a fresh settle.
+    // The jump is logged when it happens, other wait reasons stay quiet once synced.
+    feed.gps += 21368.0;
+    const auto jumped = feed.tick();
+    CHECK(jumped.kind == Kind::Waiting);
+    CHECK(jumped.message == "waiting: autopilot time drifted +21368.0 s from the steady clock; restarting 5 s settle");
+    CHECK(sync.sessionStartSummary(feed.steady).warn);
+    for (int i = 0; i < static_cast<int>(ClockSync::kSettleSecs) - 1; ++i) {
+        CHECK(feed.tick().kind == Kind::None);
+    }
+    const auto restepped = feed.tick();
+    CHECK(restepped.kind == Kind::Stepped);
+    CHECK(restepped.message.find("stepped system clock +21368.000 s") == 0);
+    CHECK(clock.setCalls == 2);
+    CHECK(std::fabs(clock.realtime - feed.gps) < 1e-6);
+
     const auto summary = sync.sessionStartSummary(feed.steady);
-    CHECK(summary.warn);
-    CHECK(summary.message.find("GPS offset +100.000 s") != std::string::npos);
-    CHECK(summary.message.find("stepped +1340.000 s earlier this run") != std::string::npos);
+    CHECK(!summary.warn);
+    CHECK(summary.message == "session start: GPS offset +0.000 s; stepped 2 times this run, last +21368.000 s");
+
+    // An offset that creeps past the threshold in sub-second moves still needs
+    // a fresh kSettleSecs before a re-step (PR #191 review).
+    feed.gps += 0.5;
+    CHECK(feed.tick().kind == Kind::None);
+    feed.gps += 0.7;
+    for (int i = 0; i < static_cast<int>(ClockSync::kSettleSecs) - 1; ++i) {
+        CHECK(feed.tick().kind == Kind::None);
+    }
+    CHECK(clock.setCalls == 2);
+    CHECK(feed.tick().kind == Kind::Stepped);
+    CHECK(clock.setCalls == 3);
+
+    // A jump that reverses before the re-step, then a later independent jump:
+    // both jumps are logged (PR #191 review).
+    feed.gps += 5.0;
+    CHECK(feed.tick().message.find("drifted +5.0 s") != std::string::npos);
+    feed.gps -= 5.0;
+    for (int i = 0; i < static_cast<int>(ClockSync::kSettleSecs) + 2; ++i) {
+        CHECK(feed.tick().kind == Kind::None);
+    }
+    feed.gps += 3.0;
+    CHECK(feed.tick().message.find("drifted +3.0 s") != std::string::npos);
+    CHECK(clock.setCalls == 3);
 }
 
 // Pi ahead of GPS: the step is backward.
@@ -329,11 +379,22 @@ void testSmallOffsetIsLeftAlone()
     CHECK(outcome.message == "skipped: offset +0.400 s is within 1.0 s");
     CHECK(clock.setCalls == 0);
     CHECK(sync.state() == ClockSync::State::InSync);
-    // A later large offset is reported, not stepped.
+    // A later large offset is flagged, deferred through a session after a
+    // fresh settle, then stepped.
     clock.realtime -= 50.0;
-    CHECK(feed.tickUntilEvent().kind == Kind::None);
-    CHECK(clock.setCalls == 0);
     CHECK(sync.sessionStartSummary(feed.steady).warn);
+    for (int i = 0; i < static_cast<int>(ClockSync::kSettleSecs) - 1; ++i) {
+        CHECK(feed.tick(true).kind == Kind::None);
+    }
+    const auto deferred = feed.tick(true /* sessionActive */);
+    CHECK(deferred.kind == Kind::Deferred);
+    CHECK(deferred.message == "deferred: session active (offset +50.400 s); will step when it ends");
+    CHECK(feed.tickUntilEvent(10, true).kind == Kind::None);
+    CHECK(clock.setCalls == 0);
+    const auto stepped = feed.tick(false);
+    CHECK(stepped.kind == Kind::Stepped);
+    CHECK(clock.setCalls == 1);
+    CHECK(sync.state() == ClockSync::State::Stepped);
 }
 
 void testNtpOwnsTheClock()
@@ -372,6 +433,19 @@ void testDeferredUntilSessionEnds()
     // First sample after the session ends steps.
     const auto stepped = feed.tick(false);
     CHECK(stepped.kind == Kind::Stepped);
+    CHECK(clock.setCalls == 1);
+
+    // Each session logs its own deferral, even when the previous one ended
+    // back in sync without a step (PR #191 review).
+    clock.realtime -= 10.0;
+    CHECK(feed.tickUntilEvent(20, true).kind == Kind::Deferred);
+    clock.realtime += 10.0;
+    CHECK(feed.tick(true).kind == Kind::None);
+    CHECK(feed.tick(false).kind == Kind::None);
+    clock.realtime -= 20.0;
+    const auto deferredAgain = feed.tickUntilEvent(20, true);
+    CHECK(deferredAgain.kind == Kind::Deferred);
+    CHECK(deferredAgain.message == "deferred: session active (offset +20.000 s); will step when it ends");
     CHECK(clock.setCalls == 1);
 }
 

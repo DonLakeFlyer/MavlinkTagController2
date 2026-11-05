@@ -214,7 +214,11 @@ network in the field, so it boots at its last saved time and every battery
 swap leaves it behind by the time it was off.
 
 `ClockSync` (owned by `MavlinkSystem`) steps the system clock to the
-autopilot's GPS time **at most once per controller run**:
+autopilot's GPS time, and steps it again whenever a later trustworthy sample
+is more than 1 s off. PX4 sends its own clock as `SYSTEM_TIME` and sets that
+clock from GPS only once the receiver reports fully resolved UTC, which can
+come after it reports a 3D fix, so a stale FC clock that advances steadily
+can pass every check below and the first step can be wrong.
 
 - Only `SYSTEM_TIME` and `GPS_RAW_INT` from the autopilot (its sysid,
   `MAV_COMP_ID_AUTOPILOT1`) count; mavlink-router also forwards the GCS's
@@ -223,8 +227,9 @@ autopilot's GPS time **at most once per controller run**:
   between two `SYSTEM_TIME` samples, restarts the wait), `time_unix_usec`
   non-zero and not before the build date, and over those 5 s the time must
   advance with the steady clock to within 1 s of where the window started, so
-  a jump, a stall or a slow clock restarts it. The autopilot may set its own
-  clock just after reporting the fix.
+  a jump, a stall or a slow clock restarts it. The same checks apply before
+  every later step, so when the autopilot corrects its own clock the Pi
+  follows 5 s later.
 - Offsets of 1 s or less are left alone; so is a clock NTP already disciplines
   (kernel `adjtimex` state not `TIME_ERROR`).
 - Never inside a session: while vehicle time is frozen (detection or
@@ -246,10 +251,15 @@ autopilot's GPS time **at most once per controller run**:
 Log key `CLOCK_SYNC`: `enabled`/`disabled: <reason>` at startup;
 `waiting: …`, `deferred: …`, `skipped: …`, `stepped …`, `failed: …` once each
 as they occur (a `waiting` reason is logged again only after a different one
-intervened); and at every session start `session start: GPS offset <s>; <state>`
-into the session's log (an `E` line if a synced clock has drifted past 1 s
-again). Raw captures record the same text as `clock_sync` in their metadata
-JSON. A step and a failure are also sent to the GCS as status text.
+intervened; once synced only a drift is logged, once after each step or
+in-sync result; every step and each session's deferral is logged); and at
+every session start
+`session start: GPS offset <s>; <state>` into the session's log (an `E` line
+if a synced clock is more than 1 s off, which means the next step is still
+waiting for the settle or the session to end).
+
+Raw captures record the same text as `clock_sync` in their metadata JSON. A
+step and a failure are also sent to the GCS as status text.
 
 ## Failure behaviour at each hop
 
@@ -264,12 +274,12 @@ JSON. A step and a failure are also sent to the GCS as status text.
 | Detector process exits during a collection (crash or unrequested exit) | controller `MonitoredProcess` → `_handleDetectorProcessFailure` | `COLLECTION_STATUS_FAILED` with `ErrorCode::ProcessFailed` and expected/completed detector counts sent to the GCS; if still in `Starting`, the collection is cancelled. Outside a collection the exit is only logged and announced as a status text |
 | Detector silent | controller | heartbeats are logged on receipt only; there is no controller-side timeout on `CYCLE_COMPLETE`. During a collection the rotation `OPERATION_PROGRESS` step stops advancing (no `SLICE_PROGRESS` while capturing; an analysis without `COMPUTE_PROGRESS` for > 5 s, or running > 120 s, freezes it), which the GCS treats as a stalled rotation and cancels |
 | No candidate clears `confidenceFloor` | `BearingCalculator` | `BEARING_RESULT` with NaN bearing, `confirmed = 0` |
-| No 3D fix, implausible, jumping, stalled or slow autopilot time | controller `ClockSync` | no step; the 5 s settle restarts; `CLOCK_SYNC waiting: …` logged once per reason until a different reason intervenes |
+| No 3D fix, implausible, jumping, stalled or slow autopilot time | controller `ClockSync` | no step; the 5 s settle restarts; `CLOCK_SYNC waiting: …` logged once per reason until a different reason intervenes. Once synced, only a jump/drift is logged (once per step or in-sync result); the others are silent |
 | No `GPS_RAW_INT` 30 s after the first valid `SYSTEM_TIME` | controller `ClockSync` | `CLOCK_SYNC waiting: no GPS_RAW_INT received from autopilot`; no step |
 | Clock step needed during a session | controller `ClockSync` | deferred until the session ends; logged once |
 | Detection teardown left a hung child (coordinator stays `Stopping`) | controller `ClockStepGate` | no clock step for the rest of the run |
 | `clock_settime` fails (no `CAP_SYS_TIME`) | controller `ClockSync` | `CLOCK_SYNC failed` (`E`) and a status text to the GCS; not retried this run |
-| Clock off by > 1 s again after the sync | controller `ClockSync` | session-start `CLOCK_SYNC` line logged as `E`; no second step |
+| Clock off by > 1 s again after the sync (e.g. the autopilot set its own clock from GPS after the first step) | controller `ClockSync` | stepped again after a fresh 5 s settle, deferred past any session; a session started in the meantime logs its `CLOCK_SYNC` line as `E` |
 
 ## Related
 
