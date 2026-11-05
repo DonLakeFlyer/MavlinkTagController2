@@ -32,6 +32,8 @@ from log_schema import (read_jsonl, entries_by_type,
 # Decimator rate warnings beyond this count are treated as a sustained mismatch
 # rather than a startup transient (measured-rate check runs ~1/s).
 RATE_WARNING_TRANSIENT_MAX = 10
+# Heartbeat statuses during which the SDR pipeline is running.
+ACTIVE_HEARTBEAT_STATUSES = ('DETECTING', 'CAPTURE', 'RECORDING')
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +207,8 @@ class DetectorSummary:
     confidence_ratio: float = 0.0
     warmup_seconds: float = 0.0
     pf: float = 0.0
+    null_permutations: int = 0
+    null_time_budget_s: float = 0.0
     dump_spectrogram: bool = False
     # Session stats (from SESSION_END)
     total_cycles: int = 0
@@ -400,6 +404,80 @@ def parse_rx_log(path: str) -> dict:
     return {'usb_dropped_samples': total, 'usb_drop_events': events}
 
 
+def parse_controller_log(path: str) -> dict:
+    """Parse MavlinkTagController.log for Raspberry Pi CPU throttling.
+
+    Heartbeat lines carry the flags at the moment they were logged;
+    transition lines add the firmware ``get_throttled`` bits and CPU
+    temperature, and catch throttling that came and went between heartbeat
+    lines. A rotation's copy of the log can start after the first transition,
+    so the heartbeats are the reliable signal. Flags seen while detecting,
+    capturing or recording (a transition takes the status of the heartbeat
+    before it) go in ``throttle_flags``; flags seen only while idle go in
+    ``idle_throttle_flags``. ``simulated`` is set by a ``simulated`` marker on
+    either kind of line (``--sim-cpu-throttle``).
+    """
+    hb_pat = re.compile(r'HEARTBEAT sent:.*?status:\s*([A-Z_]+).*'
+                        r'cpu_throttle_flags:\s*([A-Z_|]+)( \(simulated\))?')
+    change_pat = re.compile(
+        r'CPU throttle flags changed: \S+ -> ([A-Z_|]+)'
+        r'(?: firmware_bits:(0x[0-9a-fA-F]+)| (simulated))?'
+        r'(?:.*cpu_temp_c:([-\d.]+))?')
+    reports = 0
+    active = 0
+    active_throttled = 0
+    simulated = False
+    status: Optional[str] = None
+    flags: set = set()
+    idle_flags: set = set()
+    firmware_bits: List[str] = []
+    max_temp: Optional[float] = None
+
+    def add_flags(name: str) -> bool:
+        names = [n for n in name.split('|') if n and n != 'NONE']
+        # Before the first heartbeat the status is unknown; count it against the session.
+        if status is None or status in ACTIVE_HEARTBEAT_STATUSES:
+            flags.update(names)
+        else:
+            idle_flags.update(names)
+        return bool(names)
+
+    try:
+        with open(path, errors='replace') as f:
+            for line in f:
+                m = hb_pat.search(line)
+                if m:
+                    reports += 1
+                    status = m.group(1)
+                    throttled = add_flags(m.group(2))
+                    if m.group(3):
+                        simulated = True
+                    if status in ACTIVE_HEARTBEAT_STATUSES:
+                        active += 1
+                        if throttled:
+                            active_throttled += 1
+                    continue
+                m = change_pat.search(line)
+                if m:
+                    if not add_flags(m.group(1)):
+                        continue
+                    if m.group(2):
+                        firmware_bits.append(m.group(2))
+                    if m.group(3):
+                        simulated = True
+                    if m.group(4):
+                        t = float(m.group(4))
+                        max_temp = t if max_temp is None else max(max_temp, t)
+    except FileNotFoundError:
+        pass
+    return {'heartbeat_reports': reports, 'active_reports': active,
+            'active_throttled_reports': active_throttled,
+            'throttle_flags': sorted(flags),
+            'idle_throttle_flags': sorted(idle_flags - flags),
+            'firmware_bits': firmware_bits,
+            'max_cpu_temp_c': max_temp, 'simulated': simulated}
+
+
 def correlate_holes_with_gaps(holes: List[dict], gap_events: List[dict],
                               fs: float, tol_ms: float = 1.5) -> List[dict]:
     """Return decimator holes with no detector GAP_EVENT of matching duration.
@@ -473,6 +551,8 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
         det.confidence_ratio = e.get('confidence_ratio', 0.0)
         det.warmup_seconds = e.get('warmup_seconds', 0.0)
         det.pf = e.get('pf', 0.0)
+        det.null_permutations = int(e.get('null_permutations') or 0)
+        det.null_time_budget_s = float(e.get('null_time_budget') or 0.0)
         det.dump_spectrogram = e.get('dump_spectrogram', False)
 
     # --- DETECTION cycles ---
@@ -751,6 +831,55 @@ def parse_bearing_candidates_log(path: str) -> List[BearingCandidate]:
 # Report generation
 # ---------------------------------------------------------------------------
 
+def _null_cut_short_text(n_perm: List[int], requested: int,
+                         budget_s: float) -> Optional[str]:
+    """Describe cycles whose permutation null stopped before the requested count."""
+    if not requested or not n_perm:
+        return None
+    short = [n for n in n_perm if n < requested]
+    if not short:
+        return None
+    limit = f'{budget_s:g} s time limit' if budget_s > 0 else 'time limit'
+    return (f'permutation null hit its {limit} in {len(short)}/{len(n_perm)} '
+            f'cycle(s), using as few as {min(short)} of {requested} '
+            f'permutations \u2014 detection threshold is noisier than designed '
+            f'(slow or throttled CPU)')
+
+
+def _det_n_perm(det: 'DetectorSummary') -> List[int]:
+    return [int(e['n_perm']) for e in det.cycle_thresholds
+            if isinstance(e.get('n_perm'), (int, float))]
+
+
+def _throttle_text(host: dict) -> str:
+    parts = []
+    if host['active_reports']:
+        parts.append(f'throttled at {host["active_throttled_reports"]}/'
+                     f'{host["active_reports"]} heartbeat check(s) during detection')
+    if host['firmware_bits']:
+        parts.append(f'firmware bits {", ".join(sorted(set(host["firmware_bits"])))}')
+    if host['max_cpu_temp_c'] is not None:
+        parts.append(f'CPU {host["max_cpu_temp_c"]:.1f} \u00b0C')
+    lead = f'{"; ".join(parts)}. ' if parts else ''
+    if host['simulated']:
+        return (f'{lead}Raised by the controller\'s simulator option, '
+                f'not by the Pi hardware.')
+    fixes = []
+    if 'UNDERVOLTAGE' in host['throttle_flags']:
+        fixes.append('check the Pi power supply')
+    if 'THERMAL' in host['throttle_flags']:
+        fixes.append('check Pi cooling')
+    advice = f'; {" and ".join(fixes)}' if fixes else ''
+    return (f'{lead}The Pi lowers its CPU clock, so the '
+            f'decimator and detector run slower{advice}.')
+
+
+def _idle_throttle_text(host: dict) -> str:
+    who = 'Simulated throttling' if host['simulated'] else 'Pi reported'
+    return (f'{who} {"|".join(host["idle_throttle_flags"])} while idle, not '
+            f'during detection \u2014 it did not slow this session\'s analysis.')
+
+
 def _stat_line(values: List[float], unit: str = '', fmt: str = '.1f') -> str:
     if not values:
         return 'N/A'
@@ -870,6 +999,8 @@ def generate_report(log_dir: str) -> str:
         rx['usb_dropped_samples'] += r['usb_dropped_samples']
         rx['usb_drop_events'] += r['usb_drop_events']
 
+    host = parse_controller_log(os.path.join(log_dir, 'MavlinkTagController.log'))
+
     # Continuity cross-check: every upstream hole must show up downstream.
     all_gap_events = [ev for det in detectors for ev in det.gap_events]
     det_fs = next((det.fs for det in detectors if det.fs > 0), 3840.0)
@@ -974,6 +1105,20 @@ def generate_report(log_dir: str) -> str:
     if any(rotation_gaps):
         w(f'| Gaps (rotation) | {rotation_gaps[0]} zero-filled, {rotation_gaps[1]} resets |')
     w()
+
+    # ========== Host CPU ==========
+    if host['heartbeat_reports'] or host['throttle_flags'] or host['idle_throttle_flags']:
+        w('## Host CPU — Raspberry Pi')
+        w()
+        if host['throttle_flags']:
+            status = 'SIMULATED THROTTLING' if host['simulated'] else 'THROTTLED'
+            w(f'- **Status:** {status} \u2014 {_throttle_text(host)}')
+        else:
+            w(f'- **Status:** Not throttled during detection '
+              f'({host["active_reports"]} heartbeat check(s))')
+            if host['idle_throttle_flags']:
+                w(f'- {_idle_throttle_text(host)}')
+        w()
 
     # ========== Pipeline Health (Decimator) ==========
     if dec['perfs']:
@@ -1256,7 +1401,14 @@ def generate_report(log_dir: str) -> str:
             n_perm = [e.get('n_perm') for e in det.cycle_thresholds
                       if isinstance(e.get('n_perm'), (int, float))]
             if n_perm:
-                w(f'- **Permutations:** min {min(n_perm)}, max {max(n_perm)}')
+                requested = (f' of {det.null_permutations} requested'
+                             if det.null_permutations else '')
+                w(f'- **Permutations:** min {min(n_perm)}, max {max(n_perm)}'
+                  f'{requested}')
+                cut_short = _null_cut_short_text(
+                    _det_n_perm(det), det.null_permutations, det.null_time_budget_s)
+                if cut_short:
+                    w(f'- **WARNING:** {cut_short[0].upper()}{cut_short[1:]}')
             null_ms = [e.get('null_ms') for e in det.cycle_thresholds
                        if isinstance(e.get('null_ms'), (int, float))]
             if null_ms:
@@ -1282,14 +1434,14 @@ def generate_report(log_dir: str) -> str:
             w(f'- **Total:** '
               f'{_stat_line(det.timing_total_ms, "ms", ".0f")}')
             if det.segment_seconds > 0:
-                max_time_s = max(det.timing_total_ms) / 1000.0
-                margin = det.segment_seconds / max(max_time_s, 0.001)
-                w(f'- **Real-time margin:** {margin:.0f}\u00d7 '
-                  f'(segment={det.segment_seconds:.1f} s, '
-                  f'worst cycle={max(det.timing_total_ms):.0f} ms)')
-                if margin < 2:
-                    w(f'- **WARNING:** Real-time margin is dangerously '
-                      f'low ({margin:.1f}\u00d7)')
+                worst_s = max(det.timing_total_ms) / 1000.0
+                pct = 100.0 * worst_s / det.segment_seconds
+                w(f'- **Analysis time vs recording:** worst {worst_s:.1f} s '
+                  f'to analyse a {det.segment_seconds:.1f} s recording '
+                  f'({pct:.0f}% of the time available; over 100% falls behind)')
+                if pct > 50:
+                    w(f'- **WARNING:** Analysis used {pct:.0f}% of the time '
+                      f'available \u2014 little spare CPU')
             w()
 
         # Cycle-by-cycle table
@@ -1453,6 +1605,28 @@ def generate_report(log_dir: str) -> str:
     # ========== Anomalies ==========
     anomalies: List[str] = []
 
+    # Root cause of slow processing below, so listed first.
+    if host['throttle_flags']:
+        label = ('Simulated CPU throttling' if host['simulated']
+                 else 'Raspberry Pi CPU throttled')
+        anomalies.append(
+            f'{label} ({"|".join(host["throttle_flags"])}): '
+            f'{_throttle_text(host)}')
+
+    # Summed per tag across headings.
+    null_by_tag: Dict[Optional[int], dict] = {}
+    for det in detectors:
+        agg = null_by_tag.setdefault(
+            det.tag_id, {'n_perm': [], 'requested': 0, 'budget_s': 0.0})
+        agg['n_perm'].extend(_det_n_perm(det))
+        agg['requested'] = max(agg['requested'], det.null_permutations)
+        agg['budget_s'] = max(agg['budget_s'], det.null_time_budget_s)
+    for tag_id, agg in null_by_tag.items():
+        cut_short = _null_cut_short_text(agg['n_perm'], agg['requested'],
+                                         agg['budget_s'])
+        if cut_short:
+            anomalies.append(f'Tag {tag_id}: {cut_short}')
+
     for det in detectors:
         for c in det.cycles:
             # Locked measurements carry the sighting's fold score (0 when
@@ -1467,13 +1641,15 @@ def generate_report(log_dir: str) -> str:
 
     for det in detectors:
         if det.timing_total_ms and det.segment_seconds > 0:
-            worst = max(det.timing_total_ms)
-            margin = det.segment_seconds / (worst / 1000.0)
-            if margin < 5:
+            worst_s = max(det.timing_total_ms) / 1000.0
+            pct = 100.0 * worst_s / det.segment_seconds
+            if pct > 20:
+                where = f' @ {_heading_label(det)}' if det.heading else ''
                 anomalies.append(
-                    f'Tag {det.tag_id}: real-time margin only '
-                    f'{margin:.1f}\u00d7 (worst {worst:.0f} ms vs '
-                    f'{det.segment_seconds:.1f} s segment)')
+                    f'Tag {det.tag_id}{where}: analysis took {worst_s:.1f} s '
+                    f'for a {det.segment_seconds:.1f} s recording '
+                    f'({pct:.0f}% of the time available; over 100% falls '
+                    f'behind)')
 
     for det in detectors:
         if det.noise_elevated_events > 5:
@@ -1556,6 +1732,9 @@ def generate_report(log_dir: str) -> str:
 
     # ========== Observations ==========
     observations: List[str] = []
+
+    if host['idle_throttle_flags'] and not host['throttle_flags']:
+        observations.append(_idle_throttle_text(host))
 
     if 0 < dec['rate_warning_max'] <= RATE_WARNING_TRANSIENT_MAX:
         observations.append(
