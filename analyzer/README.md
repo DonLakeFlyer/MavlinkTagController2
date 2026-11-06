@@ -12,6 +12,7 @@ Tools in this folder:
 | `lock_ratio_replay.py` | rotation directories with spectrogram dumps | Replay a rotation's lock, per-heading measurements and bearing at several lock score ratios |
 | `capture_noise.sh` | live SDR | Capture baseline noise with `airspyhf_rx` (+10 kHz DC-spike offset, writes `.json` sidecar) and run `psd_spectrum.py` |
 | `psd_spectrum.py` | raw IQ capture or detector `_iq.npy` dump | Noise-floor PSD: Welch spectrum, flatness, spikiness, DC-spike height |
+| `power_log.sh` | live Pi | Log Pi supply undervoltage once a second |
 
 Detect a strong pulsed signal at a specific frequency and measure its **pulse width** (ms) and **repetition rate** (Hz / interval in seconds).
 
@@ -282,6 +283,16 @@ A directory that cannot be replayed (missing, no or incomplete spectrogram
 dumps, an older log layout, a detector geometry that no longer matches, a
 detector restarted or reconfigured mid-rotation) is reported and skipped;
 the remaining directories still run, and the exit status is 1.
+
+## power_log.sh
+
+Runs on the Pi. Once a second it prints whether the 5 V supply is in
+undervoltage (and whether it has been since boot), from `vcgencmd
+get_throttled`, and appends the same to `~/power_<label>_<date>_<time>.csv`.
+
+```bash
+analyzer/power_log.sh hover
+```
 
 ## psd_spectrum.py
 
