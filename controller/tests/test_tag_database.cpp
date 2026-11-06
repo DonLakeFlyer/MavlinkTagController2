@@ -200,6 +200,90 @@ void testEmptyDatabaseNoCollision()
     CHECK(!db.findPortCollision(false).has_value());
 }
 
+TagInfo_t makeNamedTag2()
+{
+    TagInfo_t tag = makeTag2();
+    std::strcpy(tag.name, "Tag Two");
+    std::strcpy(tag.rate1_name, "Moving");
+    std::strcpy(tag.rate2_name, "Resting");
+    return tag;
+}
+
+// Names are display-only: a rename re-upload is a retransmit, not a conflict.
+void testRenameIsRetransmit()
+{
+    TagDatabase db;
+    CHECK(db.addTag(makeNamedTag2()) == TagDatabase::AddResult::Added);
+
+    TagInfo_t renamed = makeNamedTag2();
+    std::strcpy(renamed.name, "Other");
+    CHECK(db.addTag(renamed) == TagDatabase::AddResult::Retransmit);
+    CHECK(db.size() == 1);
+    CHECK(std::strcmp(db[0].name, "Tag Two") == 0);
+}
+
+void testNameSuffix()
+{
+    TagDatabase db;
+    CHECK(db.addTag(makeNamedTag2()) == TagDatabase::AddResult::Added);
+
+    CHECK(db.nameSuffix(2) == " name:\"Tag Two\"");
+    CHECK(db.nameSuffix(3) == " name:\"Tag Two\" rate:\"Resting\"");   // uavrt secondary detector
+    CHECK(db.nameSuffix(9).empty());
+
+    TagDatabase unnamed;
+    CHECK(unnamed.addTag(makeTag2()) == TagDatabase::AddResult::Added);
+    CHECK(unnamed.nameSuffix(2).empty());
+    CHECK(unnamed.nameSuffix(3).empty());
+}
+
+// An exact id wins over another dual-rate tag's secondary id.
+void testNameSuffixPrefersExactId()
+{
+    TagDatabase db;
+    TagInfo_t tag3 = makeNamedTag2();
+    tag3.id = 3;
+    tag3.channelizer_channel_number = 2;
+    std::strcpy(tag3.name, "Tag Three");
+    CHECK(db.addTag(makeNamedTag2()) == TagDatabase::AddResult::Added);
+    CHECK(db.addTag(tag3) == TagDatabase::AddResult::Added);
+    CHECK(db.nameSuffix(3) == " name:\"Tag Three\"");
+}
+
+void testRateSuffix()
+{
+    using namespace TunnelProtocol;
+    TagDatabase db;
+    CHECK(db.addTag(makeNamedTag2()) == TagDatabase::AddResult::Added);
+
+    CHECK(db.rateSuffix(2, kRateStateA) == " rate:\"Moving\"");
+    CHECK(db.rateSuffix(2, kRateStateB) == " rate:\"Resting\"");
+    CHECK(db.rateSuffix(2, kRateStateAToB) == " rate:\"Moving>Resting\"");
+    CHECK(db.rateSuffix(2, kRateStateBToA) == " rate:\"Resting>Moving\"");
+    CHECK(db.rateSuffix(2, 9).empty());
+    CHECK(db.rateSuffix(7, kRateStateA).empty());
+
+    TagDatabase unnamed;
+    CHECK(unnamed.addTag(makeTag2()) == TagDatabase::AddResult::Added);
+    CHECK(unnamed.rateSuffix(2, kRateStateA).empty());
+    CHECK(unnamed.rateSuffix(2, kRateStateAToB).empty());
+}
+
+// The sender's NUL is not trusted, and log/JSON-hostile bytes are masked.
+void testWireText()
+{
+    char full[8];
+    std::memset(full, 'x', sizeof(full));            // no terminator
+    CHECK(wireText(full) == "xxxxxxxx");
+
+    char hostile[16] = {};
+    std::memcpy(hostile, "a\"b\\c\nd", 7);
+    CHECK(wireText(hostile) == "a?b?c?d");
+
+    char empty[8] = {};
+    CHECK(wireText(empty).empty());
+}
+
 } // namespace
 
 int main()
@@ -218,6 +302,11 @@ int main()
     testMiniModeSameChannelCollides();
     testMiniModeDistinctChannelsNoCollision();
     testEmptyDatabaseNoCollision();
+    testRenameIsRetransmit();
+    testNameSuffix();
+    testNameSuffixPrefersExactId();
+    testRateSuffix();
+    testWireText();
     std::printf("test_tag_database: all tests passed\n");
     return 0;
 }

@@ -293,6 +293,9 @@ bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetectio
         fprintf(fp, "%s    {\n", first ? "" : ",\n");
         first = false;
         fprintf(fp, "      \"id\": %u,\n", tag.id);
+        fprintf(fp, "      \"name\": \"%s\",\n", jsonEscape(wireText(tag.name)).c_str());
+        fprintf(fp, "      \"rate1_name\": \"%s\",\n", jsonEscape(wireText(tag.rate1_name)).c_str());
+        fprintf(fp, "      \"rate2_name\": \"%s\",\n", jsonEscape(wireText(tag.rate2_name)).c_str());
         fprintf(fp, "      \"frequency_hz\": %u,\n", tag.frequency_hz);
         fprintf(fp, "      \"pulse_width_msecs\": %u,\n", tag.pulse_width_msecs);
         fprintf(fp, "      \"intra_pulse1_msecs\": %u,\n", tag.intra_pulse1_msecs);
@@ -531,6 +534,10 @@ std::string CommandHandler::startDetectionPipeline(const StartDetectionInfo_t& r
 
     // Freeze before the log dir is named and before DETECTING is published, so a
     // concurrent stop cannot unfreeze and then be re-frozen by this start.
+    {
+        std::lock_guard<std::mutex> lock(_logTagsMutex);
+        _logTags = _tagDatabase;
+    }
     _mavlink->setVehicleTimeFrozen(true);
     logFileManager->detectorsStarted();
     _mavlink->logClockSyncSessionStart();
@@ -911,7 +918,8 @@ void CommandHandler::handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo)
                                    telemetry.position.latitude,
                                    telemetry.position.longitude,
                                    telemetry.attitudeEuler.yawDegrees,
-                                   telemetry.position.relativeAltitude);
+                                   telemetry.position.relativeAltitude)
+                     << _tagNameSuffix(pulseInfo.tag_id);
     } else {
         pulseInfo.start_time_seconds            = udpPulseInfo.start_time_seconds;
         pulseInfo.predict_next_start_seconds    = udpPulseInfo.predict_next_start_seconds;
@@ -943,6 +951,7 @@ void CommandHandler::handleUavrtPulse(const UDPPulseInfo_T& udpPulseInfo)
                                         telemetry.position.longitude,
                                         telemetry.attitudeEuler.yawDegrees,
                                         telemetry.position.relativeAltitude);
+        pulseStatus += _tagNameSuffix(pulseInfo.tag_id);
         // Unconfirmed pulses arrive every cycle; only confirmed ones are default-level.
         if (pulseInfo.confirmed_status) {
             logDebug() << pulseStatus;
@@ -963,6 +972,18 @@ void CommandHandler::_sendDetectorHeartbeat(uint32_t tagId, uint32_t detectionMo
     heartbeat.detection_mode = detectionMode;
 
     _mavlink->sendTunnelMessage(&heartbeat, sizeof(heartbeat));
+}
+
+std::string CommandHandler::_tagNameSuffix(uint32_t detectorId) const
+{
+    std::lock_guard<std::mutex> lock(_logTagsMutex);
+    return _logTags.nameSuffix(detectorId);
+}
+
+std::string CommandHandler::_tagRateSuffix(uint32_t tagId, uint8_t rateState) const
+{
+    std::lock_guard<std::mutex> lock(_logTagsMutex);
+    return _logTags.rateSuffix(tagId, rateState);
 }
 
 void CommandHandler::_storeDwellPose(uint32_t sliceId, uint32_t tagId)
@@ -1031,7 +1052,8 @@ void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header
                                    pulseInfo.latitude,
                                    pulseInfo.longitude,
                                    pulseInfo.yaw_deg,
-                                   pulseInfo.altitude_rel);
+                                   pulseInfo.altitude_rel)
+                     << _tagNameSuffix(pulseInfo.tag_id);
     } else {
         std::string pulseStatus = formatString("Conf: %u Id: %2u snr: %5.1f heading: %3.1f score_ratio: %.3f noise_psd: %5.1g freq: %9u seq: %u rate_state: %u lat/lon/yaw/alt: %3.6f %3.6f %4.0f %3.0f",
                                                pulseInfo.confirmed_status,
@@ -1047,6 +1069,7 @@ void CommandHandler::_handlePythonPulse(const TagTrackerDetectorProtocol::Header
                                                pulseInfo.longitude,
                                                pulseInfo.yaw_deg,
                                                pulseInfo.altitude_rel);
+        pulseStatus += _tagNameSuffix(pulseInfo.tag_id) + _tagRateSuffix(pulseInfo.tag_id, pulseInfo.rate_state);
         if (pulseInfo.confirmed_status) {
             logDebug() << pulseStatus;
         } else {
@@ -1411,7 +1434,7 @@ void CommandHandler::handlePythonDetectorMessage(
     if (messageType == MessageType::Failed) {
         logError() << "Python detector reported failure, collection:"
                    << header.collection_id << "slice:" << header.slice_id
-                   << "tag:" << header.tag_id << "error:" << errorCode;
+                   << "tag:" << header.tag_id << _tagNameSuffix(header.tag_id) << " error:" << errorCode;
         {
             std::lock_guard<std::mutex> lock(_rotationMutex);
             // A background analysis can fail after its slice was captured.
