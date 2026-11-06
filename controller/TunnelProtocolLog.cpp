@@ -1,5 +1,6 @@
 #include "TunnelProtocolLog.h"
 #include "TunnelProtocol.h"
+#include "WireText.h"
 #include "formatString.h"
 
 #include <cstring>
@@ -170,11 +171,13 @@ std::string fields(const void* payload, size_t length, uint32_t command)
         return formatString(" upload_id:%u tag_index:%u id:%u frequency_hz:%u pulse_width_msecs:%u"
                             " intra_pulse1_msecs:%u intra_pulse2_msecs:%u intra_pulse_uncertainty_msecs:%u"
                             " intra_pulse_jitter_msecs:%u k:%u false_alarm_probability:%g"
-                            " channelizer_channel_number:%u channelizer_channel_center_frequency_hz:%u",
+                            " channelizer_channel_number:%u channelizer_channel_center_frequency_hz:%u"
+                            " name:\"%s\" rate1_name:\"%s\" rate2_name:\"%s\"",
                             m.upload_id, m.tag_index, m.id, m.frequency_hz, m.pulse_width_msecs,
                             m.intra_pulse1_msecs, m.intra_pulse2_msecs, m.intra_pulse_uncertainty_msecs,
                             m.intra_pulse_jitter_msecs, m.k, m.false_alarm_probability,
-                            m.channelizer_channel_number, m.channelizer_channel_center_frequency_hz);
+                            m.channelizer_channel_number, m.channelizer_channel_center_frequency_hz,
+                            wireText(m.name).c_str(), wireText(m.rate1_name).c_str(), wireText(m.rate2_name).c_str());
     }
     case COMMAND_ID_START_DETECTION: {
         StartDetectionInfo_t m;

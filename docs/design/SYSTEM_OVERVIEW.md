@@ -57,6 +57,11 @@ replaces the SDR process on the same ZMQ endpoint and the decimator runs with
 2. **Tags.** The GCS sends `START_TAGS` (`upload_id`, `tag_count`), one `TAG`
    per tag definition (`tag_index`, frequency, `tp`, `tip`, optional secondary
    `tip`, K, `pf`, thresholds), then `END_TAGS` (`upload_id`, `tag_count`).
+   Each `TAG` also carries display names for the tag and its two rates
+   (`name[16]`, `rate1_name[8]`, `rate2_name[8]`, clipped by the sender). They
+   are for logs only: the controller prints them next to tag ids, writes them
+   to `session.json`, and does not treat them as tag identity, so a re-sent
+   `TAG` that differs only in name is a retransmit.
    `TagUploadCoordinator` (`Idle` → `Receiving` → `HasTags`, or `Empty` when
    the list was cleared) validates each command against the bracket state and
    fills `TagDatabase`. An accepted `START_TAGS` clears the previous list and

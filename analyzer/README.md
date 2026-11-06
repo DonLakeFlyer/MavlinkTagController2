@@ -7,7 +7,7 @@ Tools in this folder:
 | `signal_analyzer.py` (`run_analyzer.sh`) | live SDR | Characterize an unknown collar: pulse width, PRI, frequency offset |
 | `ipi_analyzer.py` (`run_ipi_analyzer.sh`) | live SDR | Observe rate-switch behaviour: log every inter-pulse gap and classify it as rate A / rate B / anomalous |
 | `flight_checks.py` | recorded logs | Run the [2026-04_FLIGHT_DATA_ANALYSIS.md](../docs/analysis/2026-04_FLIGHT_DATA_ANALYSIS.md) checks against flight logs (reads **both** the current and the legacy Apr-2026 log layouts) |
-| `post_flight_analysis.py` | one session directory | Markdown report per session: decimator/USB continuity, per-detector and per-heading detections, lock candidates, bearing fit, spectrograms. Run automatically by the controller at session stop |
+| `post_flight_analysis.py` | one session directory | Markdown report per session: decimator/USB continuity, per-detector and per-heading detections, lock candidates, bearing fit, spectrograms. Tag and rate names come from `session.json` when present. Run automatically by the controller at session stop |
 | `iq_replay.py` | raw IQ capture | Offline detector replay + fixed-offset amplitude (Check 6) |
 | `lock_ratio_replay.py` | rotation directories with spectrogram dumps | Replay a rotation's lock, per-heading measurements and bearing at several lock score ratios |
 | `capture_noise.sh` | live SDR | Capture baseline noise with `airspyhf_rx` (+10 kHz DC-spike offset, writes `.json` sidecar) and run `psd_spectrum.py` |

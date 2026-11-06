@@ -8,7 +8,7 @@ using namespace TunnelProtocol;
 
 int main()
 {
-    static_assert(TUNNEL_PROTOCOL_VERSION == 9);
+    static_assert(TUNNEL_PROTOCOL_VERSION == 10);
     static_assert(COMMAND_ID_OPERATION_PROGRESS == 21);
     static_assert(COMMAND_ID_SET_LOG_LEVEL == 22);
     static_assert(COMMAND_ID_DETECTOR_HEARTBEAT == 23);
@@ -27,6 +27,8 @@ int main()
     static_assert(offsetof(TagInfo_t, tag_index) == 12);
     static_assert(offsetof(TagInfo_t, id) == 16);
     static_assert(sizeof(TagInfo_t) <= MAVLINK_MSG_TUNNEL_FIELD_PAYLOAD_LEN);
+    static_assert(sizeof(TagInfo_t::name) == 16 && sizeof(TagInfo_t::rate1_name) == 8 && sizeof(TagInfo_t::rate2_name) == 8);
+    static_assert(offsetof(TagInfo_t, name) + sizeof(TagInfo_t::name) <= offsetof(TagInfo_t, rate1_name));
     static_assert(COMMAND_ID_START_COLLECTION == 15);
     static_assert(COMMAND_ID_START_COLLECTION_SLICE == 16);
     static_assert(COMMAND_ID_FINISH_COLLECTION == 17);
@@ -51,7 +53,7 @@ int main()
 
     Heartbeat_t heartbeat {};
     heartbeat.protocol_version = TUNNEL_PROTOCOL_VERSION;
-    CHECK(heartbeat.protocol_version == 9);
+    CHECK(heartbeat.protocol_version == 10);
 
     StartCollection_t collection {};
     collection.antenna_id = ANTENNA_ID_RA23K;

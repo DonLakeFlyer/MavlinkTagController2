@@ -1,5 +1,6 @@
 #include "TunnelCommandDispatcher.h"
 #include "TunnelProtocolLog.h"
+#include "WireText.h"
 #include "formatString.h"
 #include "logLevel.h"
 
@@ -235,8 +236,9 @@ TunnelCommandDispatcher::Outcome TunnelCommandDispatcher::_tag(const mavlink_tun
     }
     TagInfo_t tagInfo {};
     memcpy(&tagInfo, tunnel.payload, sizeof(tagInfo));
-    _log.debug(formatString("TAG id:%u index:%u upload_id:%u freq:%u ip1:%u", tagInfo.id, tagInfo.tag_index,
-                            tagInfo.upload_id, tagInfo.frequency_hz, tagInfo.intra_pulse1_msecs));
+    _log.debug(formatString("TAG id:%u index:%u upload_id:%u freq:%u ip1:%u name:\"%s\" rate1_name:\"%s\" rate2_name:\"%s\"",
+                            tagInfo.id, tagInfo.tag_index, tagInfo.upload_id, tagInfo.frequency_hz, tagInfo.intra_pulse1_msecs,
+                            wireText(tagInfo.name).c_str(), wireText(tagInfo.rate1_name).c_str(), wireText(tagInfo.rate2_name).c_str()));
 
     using R = TagUploadCoordinator::Result;
     switch (_tagUpload.addTag(tagInfo)) {

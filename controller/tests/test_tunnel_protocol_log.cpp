@@ -161,7 +161,7 @@ void testOperationProgressAndHeartbeats()
     h.status = HEARTBEAT_STATUS_HAS_TAGS;
     h.cpu_throttle_flags = CPU_THROTTLE_FLAG_THERMAL | CPU_THROTTLE_FLAG_UNDERVOLTAGE;
     text = describeStruct(h, "sent");
-    CHECK(contains(text, "protocol_version:9"));
+    CHECK(contains(text, "protocol_version:10"));
     CHECK(contains(text, "status:HAS_TAGS cpu_throttle_flags:THERMAL|UNDERVOLTAGE"));
     h.cpu_throttle_flags = 0;
     CHECK(contains(describeStruct(h, "sent"), "cpu_throttle_flags:NONE"));
@@ -263,10 +263,14 @@ void testTagUploadStartDetectionAndRawCapture()
     t.false_alarm_probability = 0.05;
     t.channelizer_channel_number = 6;
     t.channelizer_channel_center_frequency_hz = 146001000;
+    std::strcpy(t.name, "Tag Two");
+    std::strcpy(t.rate1_name, "Moving");
+    std::memset(t.rate2_name, 'R', sizeof(t.rate2_name));   // unterminated: must not overrun
     std::string text = describeStruct(t);
     CHECK(contains(text, "TAG received: request_id:0 upload_id:777 tag_index:2 id:4 frequency_hz:146000000 pulse_width_msecs:15"));
     CHECK(contains(text, " intra_pulse1_msecs:1333 intra_pulse2_msecs:2000 intra_pulse_uncertainty_msecs:60 intra_pulse_jitter_msecs:20"));
     CHECK(contains(text, " k:20 false_alarm_probability:0.05 channelizer_channel_number:6 channelizer_channel_center_frequency_hz:146001000"));
+    CHECK(contains(text, " name:\"Tag Two\" rate1_name:\"Moving\" rate2_name:\"RRRRRRRR\""));
 
     StartDetectionInfo_t sd {};
     sd.header.command = COMMAND_ID_START_DETECTION;

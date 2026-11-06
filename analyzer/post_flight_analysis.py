@@ -111,7 +111,8 @@ def generate_spectrogram_png(power_path: str, out_png: str,
 
     title = 'Spectrogram'
     if tag:
-        title += f' — tag {tag}'
+        # Unescaped $ pairs would be parsed as math text
+        title += f' — tag {tag.replace("$", chr(92) + "$")}'
     if heading:
         title += f' — heading {heading}°'
     if detections:
@@ -668,6 +669,61 @@ def parse_detector_jsonl(path: str, per_slice: bool = False) -> DetectorSummary:
     return det
 
 
+@dataclass
+class TagNames:
+    """Display names for one tag, from session.json."""
+    name: str = ''
+    rate1_name: str = ''
+    rate2_name: str = ''
+    dual_rate: bool = False
+
+
+def load_tag_names(log_dir: str) -> Dict[int, TagNames]:
+    """Tag display names from session.json, keyed by tag id.
+
+    Empty for sessions recorded before the controller sent names (protocol v10).
+    """
+    try:
+        with open(os.path.join(log_dir, 'session.json')) as f:
+            tags = json.load(f).get('tags') or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    names: Dict[int, TagNames] = {}
+    for tag in tags:
+        if not isinstance(tag, dict) or not isinstance(tag.get('id'), int):
+            continue
+        ip2 = tag.get('intra_pulse2_msecs')
+        names[tag['id']] = TagNames(
+            name=str(tag.get('name') or ''),
+            rate1_name=str(tag.get('rate1_name') or ''),
+            rate2_name=str(tag.get('rate2_name') or ''),
+            dual_rate=(isinstance(ip2, (int, float))
+                       and not isinstance(ip2, bool) and ip2 > 0),
+        )
+    return names
+
+
+def tag_ref(tag_names: Dict[int, TagNames], tag_id: Optional[int]) -> str:
+    """'2 (Name)' for a named tag, else the bare id.
+
+    The uavrt secondary detector (id+1 of a dual-rate tag) adds the second rate
+    name: '3 (Name, Resting)'.
+    """
+    if tag_id is None:
+        return str(tag_id)
+    entry = tag_names.get(tag_id)
+    rate = ''
+    if entry is None:
+        primary = tag_names.get(tag_id - 1)
+        if primary and primary.dual_rate:
+            entry = primary
+            rate = primary.rate2_name
+    if not entry or not entry.name:
+        return str(tag_id)
+    detail = f'{entry.name}, {rate}' if rate else entry.name
+    return f'{tag_id} ({detail})'
+
+
 def _heading_label(det: 'DetectorSummary') -> str:
     if det.revisit_slice is not None:
         return f'{det.heading}° (revisit, slice {det.revisit_slice})'
@@ -900,6 +956,15 @@ def generate_report(log_dir: str) -> str:
     def w(s: str = ''):
         lines.append(s)
 
+    tag_names = load_tag_names(log_dir)
+
+    def esc(text: str) -> str:
+        # | would split a markdown table cell
+        return text.replace('|', '\\|')
+
+    def ref(tag_id: Optional[int]) -> str:
+        return esc(tag_ref(tag_names, tag_id))
+
     # --- Discover files ---
     # For rotation sessions, files live in heading-NNN/ subdirectories.
     # For plain detection sessions, they're at the top level.
@@ -1049,7 +1114,11 @@ def generate_report(log_dir: str) -> str:
                     tip_str = f'tip={det.tip:.1f} s'
                     if det.tip_secondary is not None:
                         tip_str += f'/{det.tip_secondary:.1f} s'
-                    tag_strs.append(f'ID {tid}: {tip_str}')
+                    entry = tag_names.get(tid)
+                    if entry and entry.rate1_name and entry.rate2_name \
+                            and det.tip_secondary is not None:
+                        tip_str += f' ({esc(entry.rate1_name)}/{esc(entry.rate2_name)})'
+                    tag_strs.append(f'ID {ref(tid)}: {tip_str}')
                     break
         w(f'| Tags | {len(tag_ids)} ({", ".join(tag_strs)}) |')
 
@@ -1245,14 +1314,14 @@ def generate_report(log_dir: str) -> str:
             thr_str = f'{statistics.median(thr):.1f}' if thr else '—'
             total_gaps = det.gap_zerofill + det.gap_reset
             gap_str = str(total_gaps) if total_gaps else '0'
-            w(f'| {_heading_label(det)} | {det.tag_id} | {n_cyc} | {n_det} '
+            w(f'| {_heading_label(det)} | {ref(det.tag_id)} | {n_cyc} | {n_det} '
               f'| {snr_str} | {ratio_str} | {noise_str} | {rel_str} | {thr_str} | {gap_str} |')
         w()
         for tag, vals in sorted(tag_noise.items(), key=lambda kv: (kv[0] is None, kv[0])):
             if len(vals) < 2:
                 continue
             spread_db = 10.0 * math.log10(max(vals) / min(vals))
-            w(f'Tag {tag} noise floor spread across headings: {spread_db:.1f} dB '
+            w(f'Tag {ref(tag)} noise floor spread across headings: {spread_db:.1f} dB '
               f'(median {tag_median[tag]:.2e}). The threshold column is the '
               f'per-dwell permutation-null base threshold (score / noise units), '
               f'so it stays near constant while the floor moves.')
@@ -1287,7 +1356,7 @@ def generate_report(log_dir: str) -> str:
                         + f'_tag{tag_label}_cycle_{cycle_label}.png')
             png_path = os.path.join(log_dir, png_name)
             if generate_spectrogram_png(pf, png_path, heading=heading_label,
-                                        tag=tag_label):
+                                        tag=tag_ref(tag_names, int(tag_label)) if tag_label else ''):
                 alt = f'tag {tag_label} cycle {cycle_label}'
                 if heading_label:
                     alt = f'heading {heading_label}° ' + alt
@@ -1303,7 +1372,7 @@ def generate_report(log_dir: str) -> str:
         if not det.cycles and det.total_cycles == 0:
             continue
 
-        tag_label = (f'Tag {det.tag_id}' if det.tag_id is not None
+        tag_label = (f'Tag {ref(det.tag_id)}' if det.tag_id is not None
                      else f'Port {det.port}')
         if det.heading is not None:
             tag_label += f' @ heading {_heading_label(det)}'
@@ -1573,7 +1642,7 @@ def generate_report(log_dir: str) -> str:
                 bearing_str = 'none (heard, below confidence floor)'
             sighted_str = ('n/a' if b.n_sighted_slices is None
                            else str(b.n_sighted_slices))
-            w(f'| {b.tag_id} | {bearing_str} | '
+            w(f'| {ref(b.tag_id)} | {bearing_str} | '
               f'{b.r_squared:.3f}{quality} | {b.n_valid_slices} | {sighted_str} '
               f'| {b.best_snr:.1f} |')
         w()
@@ -1597,7 +1666,7 @@ def generate_report(log_dir: str) -> str:
             bearing_str = f'{c.bearing_deg:.1f}' if math.isfinite(c.bearing_deg) else 'n/a'
             sighted_str = ('n/a' if c.n_sighted_slices is None
                            else str(c.n_sighted_slices))
-            w(f'| {c.tag_id} | {c.candidate_id} | {bearing_str} | '
+            w(f'| {ref(c.tag_id)} | {c.candidate_id} | {bearing_str} | '
               f'{c.confidence:.3f} | {c.n_valid_slices} | {sighted_str} | {c.best_snr:.1f} '
               f'| {outcome} |')
         w()
@@ -1625,7 +1694,7 @@ def generate_report(log_dir: str) -> str:
         cut_short = _null_cut_short_text(agg['n_perm'], agg['requested'],
                                          agg['budget_s'])
         if cut_short:
-            anomalies.append(f'Tag {tag_id}: {cut_short}')
+            anomalies.append(f'Tag {ref(tag_id)}: {cut_short}')
 
     for det in detectors:
         for c in det.cycles:
@@ -1635,7 +1704,7 @@ def generate_report(log_dir: str) -> str:
                     and det.confidence_ratio > 0
                     and c.score_ratio < det.confidence_ratio * 1.5):
                 anomalies.append(
-                    f'Cycle {c.cycle} (tag {det.tag_id}): '
+                    f'Cycle {c.cycle} (tag {ref(det.tag_id)}): '
                     f'score_ratio {c.score_ratio:.3f} is close to '
                     f'threshold ({det.confidence_ratio:.1f})')
 
@@ -1646,7 +1715,7 @@ def generate_report(log_dir: str) -> str:
             if pct > 20:
                 where = f' @ {_heading_label(det)}' if det.heading else ''
                 anomalies.append(
-                    f'Tag {det.tag_id}{where}: analysis took {worst_s:.1f} s '
+                    f'Tag {ref(det.tag_id)}{where}: analysis took {worst_s:.1f} s '
                     f'for a {det.segment_seconds:.1f} s recording '
                     f'({pct:.0f}% of the time available; over 100% falls '
                     f'behind)')
@@ -1654,7 +1723,7 @@ def generate_report(log_dir: str) -> str:
     for det in detectors:
         if det.noise_elevated_events > 5:
             anomalies.append(
-                f'Tag {det.tag_id}: '
+                f'Tag {ref(det.tag_id)}: '
                 f'{det.noise_elevated_events} elevated noise events '
                 f'\u2014 possible sustained RFI')
 
@@ -1664,7 +1733,7 @@ def generate_report(log_dir: str) -> str:
             pct = 100 * det.gap_reset / total
             if pct > 10:
                 anomalies.append(
-                    f'Tag {det.tag_id}: {det.gap_reset} gap resets '
+                    f'Tag {ref(det.tag_id)}: {det.gap_reset} gap resets '
                     f'({pct:.0f}% of cycles) \u2014 possible USB or '
                     f'scheduling issue')
 
@@ -1673,7 +1742,7 @@ def generate_report(log_dir: str) -> str:
                     if c.confidence == 'DOMINANT_FOLD')
         if n_dom > 0:
             anomalies.append(
-                f'Tag {det.tag_id}: {n_dom} detection(s) with '
+                f'Tag {ref(det.tag_id)}: {n_dom} detection(s) with '
                 f'DOMINANT_FOLD \u2014 likely transient interference')
 
     # Counters can come from event lines even when no perf line was logged.
@@ -1707,7 +1776,7 @@ def generate_report(log_dir: str) -> str:
     for b in bearings:
         if b.r_squared < 0.5:
             anomalies.append(
-                f'Tag {b.tag_id}: bearing R\u00b2={b.r_squared:.3f} '
+                f'Tag {ref(b.tag_id)}: bearing R\u00b2={b.r_squared:.3f} '
                 f'\u2014 result may be unreliable')
 
     for det in detectors:
@@ -1718,7 +1787,7 @@ def generate_report(log_dir: str) -> str:
         if switch_cycles:
             labels = ', '.join(sorted({c.hyp_label for c in switch_cycles}))
             anomalies.append(
-                f'Tag {det.tag_id}: rate switch within the dwell in '
+                f'Tag {ref(det.tag_id)}: rate switch within the dwell in '
                 f'{len(switch_cycles)} cycle(s) ({labels})')
 
     w('## Anomalies & Warnings')
@@ -1754,7 +1823,7 @@ def generate_report(log_dir: str) -> str:
             1 for c in det.cycles if c.detected)
         if n >= 5 and nd / max(n, 1) < 0.1:
             observations.append(
-                f'Tag {det.tag_id}: very low detection rate '
+                f'Tag {ref(det.tag_id)}: very low detection rate '
                 f'({nd}/{n} = {100 * nd / max(n, 1):.0f}%). '
                 f'Check tag parameters, antenna, and noise floor.')
 

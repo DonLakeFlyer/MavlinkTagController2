@@ -140,6 +140,8 @@ private:
     TelemetryCache::TelemetryCacheEntry_t _pulsePose(const TagTrackerDetectorProtocol::Header& header, double startTimeSeconds);
     void _storeDwellPose        (uint32_t sliceId, uint32_t tagId);    // _rotationMutex held
     void _sendDetectorHeartbeat (uint32_t tagId, uint32_t detectionMode);
+    std::string _tagNameSuffix  (uint32_t detectorId) const;
+    std::string _tagRateSuffix  (uint32_t tagId, uint8_t rateState) const;
     void _startDetector         (LogFileManager* logFileManager, const TunnelProtocol::TagInfo_t& tagInfo, bool secondaryChannel);
     // Adds a started pipeline process and reports it as one start-detection step.
     void _trackProcess          (std::shared_ptr<MonitoredProcess> process);
@@ -181,6 +183,9 @@ private:
     int                             _detectorSampleRate { 0 };          // --fs the detectors were launched with; SLICE_PROGRESS must agree
     TunnelCommandDispatcher         _dispatcher;
     const TagDatabase&              _tagDatabase            = _dispatcher.tags();
+    // Copy taken when detection starts so pulse threads never read the live list that START_TAGS rewrites.
+    mutable std::mutex              _logTagsMutex;
+    TagDatabase                     _logTags;
     const char*                     _homePath               = nullptr;
     std::vector<std::shared_ptr<MonitoredProcess>> _processes;
     bp::pipe*                       _airspyPipe             = nullptr;

@@ -16,8 +16,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from post_flight_analysis import (  # noqa: E402
     RATE_WARNING_TRANSIENT_MAX, correlate_holes_with_gaps, generate_report,
-    parse_bearing_candidates_log, parse_bearing_log, parse_controller_log,
-    parse_decimator_log, parse_detector_jsonl, parse_rx_log,
+    load_tag_names, parse_bearing_candidates_log, parse_bearing_log,
+    parse_controller_log, parse_decimator_log, parse_detector_jsonl,
+    parse_rx_log, tag_ref,
 )
 
 
@@ -355,6 +356,73 @@ class TestPlainSession:
         _decimator_log(tmp_path / 'airspyhf_decimator.log')
         md = generate_report(str(tmp_path))
         assert 'Tag 3: rate switch within the dwell in 1 cycle(s) (A_to_B_c13)' in md
+
+    def test_names_from_session_json_label_the_report(self, tmp_path):
+        entries = _detector_entries(3, 2, 24.0)
+        entries[0]['tip_secondary'] = 3.0
+        [e for e in entries if e['type'] == 'detection'][0]['hyp_label'] = 'A_to_B_c13'
+        _jsonl(tmp_path / 'detector_3.jsonl', entries)
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        (tmp_path / 'session.json').write_text(json.dumps({'tags': [{
+            'id': 3, 'name': 'Tag Three', 'rate1_name': 'Moving',
+            'rate2_name': 'Resting', 'intra_pulse2_msecs': 3000}]}))
+        md = generate_report(str(tmp_path))
+        assert 'ID 3 (Tag Three): tip=2.0 s/3.0 s (Moving/Resting)' in md
+        assert 'Tag 3 (Tag Three): rate switch within the dwell' in md
+        assert '## Detector: Tag 3 (Tag Three)' in md
+
+    def test_pipe_in_a_name_cannot_split_a_table_cell(self, tmp_path):
+        entries = _detector_entries(3, 2, 24.0)
+        entries[0]['tip_secondary'] = 3.0
+        _jsonl(tmp_path / 'detector_3.jsonl', entries)
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        (tmp_path / 'session.json').write_text(json.dumps({'tags': [{
+            'id': 3, 'name': 'A|B', 'rate1_name': 'M|x', 'rate2_name': 'R|y',
+            'intra_pulse2_msecs': 3000}]}))
+        md = generate_report(str(tmp_path))
+        assert 'ID 3 (A\\|B): tip=2.0 s/3.0 s (M\\|x/R\\|y)' in md
+        assert 'A|B' not in md
+
+    def test_session_without_names_is_unchanged(self, tmp_path):
+        # Sessions recorded before protocol v10 have no name keys.
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 2, 24.0))
+        _decimator_log(tmp_path / 'airspyhf_decimator.log')
+        (tmp_path / 'session.json').write_text(json.dumps({'tags': [{'id': 3}]}))
+        md = generate_report(str(tmp_path))
+        assert '## Detector: Tag 3\n' in md
+        assert '(Tag' not in md
+
+
+class TestTagNames:
+    def test_missing_or_corrupt_session_json_gives_no_names(self, tmp_path):
+        assert load_tag_names(str(tmp_path)) == {}
+        (tmp_path / 'session.json').write_text('{not json')
+        assert load_tag_names(str(tmp_path)) == {}
+        (tmp_path / 'session.json').write_text('[1, 2]')
+        assert load_tag_names(str(tmp_path)) == {}
+
+    def test_secondary_uavrt_detector_names_the_second_rate(self, tmp_path):
+        (tmp_path / 'session.json').write_text(json.dumps({'tags': [
+            {'id': 2, 'name': 'Tag Two', 'rate1_name': 'Moving',
+             'rate2_name': 'Resting', 'intra_pulse2_msecs': 2000},
+            {'id': 7, 'name': 'Single', 'intra_pulse2_msecs': 0}]}))
+        names = load_tag_names(str(tmp_path))
+        assert tag_ref(names, 2) == '2 (Tag Two)'
+        assert tag_ref(names, 3) == '3 (Tag Two, Resting)'
+        assert tag_ref(names, 8) == '8'        # single-rate: id+1 is not a detector
+        assert tag_ref(names, 99) == '99'
+        assert tag_ref(names, None) == 'None'
+
+    @pytest.mark.parametrize('ip2', ['0', '2000', True, None, [], 0])
+    def test_only_a_positive_number_marks_dual_rate(self, tmp_path, ip2):
+        (tmp_path / 'session.json').write_text(json.dumps({'tags': [
+            {'id': 2, 'name': 'Tag Two', 'rate2_name': 'Resting',
+             'intra_pulse2_msecs': ip2}]}))
+        assert tag_ref(load_tag_names(str(tmp_path)), 3) == '3'
+
+    def test_unnamed_tag_is_bare_id(self, tmp_path):
+        (tmp_path / 'session.json').write_text(json.dumps({'tags': [{'id': 4, 'name': ''}]}))
+        assert tag_ref(load_tag_names(str(tmp_path)), 4) == '4'
 
     @pytest.mark.parametrize('n_perm, flagged', [
         (40, False),
