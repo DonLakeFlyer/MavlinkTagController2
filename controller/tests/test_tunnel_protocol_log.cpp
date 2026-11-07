@@ -160,11 +160,13 @@ void testOperationProgressAndHeartbeats()
     h.system_id = HEARTBEAT_SYSTEM_ID_MAVLINKCONTROLLER;
     h.status = HEARTBEAT_STATUS_HAS_TAGS;
     h.cpu_throttle_flags = CPU_THROTTLE_FLAG_THERMAL | CPU_THROTTLE_FLAG_UNDERVOLTAGE;
+    h.cpu_throttle_since_boot_flags = CPU_THROTTLE_FLAG_UNDERVOLTAGE;
     text = describeStruct(h, "sent");
-    CHECK(contains(text, "protocol_version:10"));
-    CHECK(contains(text, "status:HAS_TAGS cpu_throttle_flags:THERMAL|UNDERVOLTAGE"));
+    CHECK(contains(text, "protocol_version:11"));
+    CHECK(contains(text, "status:HAS_TAGS cpu_throttle_flags:THERMAL|UNDERVOLTAGE cpu_throttle_since_boot_flags:UNDERVOLTAGE"));
     h.cpu_throttle_flags = 0;
-    CHECK(contains(describeStruct(h, "sent"), "cpu_throttle_flags:NONE"));
+    h.cpu_throttle_since_boot_flags = 0;
+    CHECK(contains(describeStruct(h, "sent"), "cpu_throttle_flags:NONE cpu_throttle_since_boot_flags:NONE"));
     h.cpu_throttle_flags = CPU_THROTTLE_FLAG_UNDERVOLTAGE;
     CHECK(contains(describeStruct(h, "sent"), "cpu_throttle_flags:UNDERVOLTAGE"));
 

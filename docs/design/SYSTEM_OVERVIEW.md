@@ -218,11 +218,15 @@ failed or timed-out poll keeps nonzero flags for two more polls (logged at `E`)
 so a transient error does not read as recovery, then reports 0 on the third
 consecutive failure. Each change is logged at `E` with the raw firmware bits and the CPU
 temperature, and TagTracker shows it on the controller indicator. The
-firmware's sticky "has occurred since boot" bits (16–19) are not in the
-flags; each one is logged at `E` once, when the poll first sees it set
+firmware's sticky "has occurred since boot" bits (16–19) go through the
+same thermal / under-voltage mapping into `cpu_throttle_since_boot_flags`,
+together with every flag the controller has reported this run. That field
+only ever gains bits, so a failed poll does not clear it. TagTracker shows it
+on the controller indicator too (yellow when
+nothing is throttled now), so a dip shorter than the 5 s poll is not missed.
+Each sticky bit is also logged at `E` once, when the poll first sees it set
 (`CPU throttle sticky bits set: under-voltage …`, or `already set at first
-poll (since boot)` if it latched before the controller started), so a dip
-shorter than the 5 s poll still shows in the log. With
+poll (since boot)` if it latched before the controller started). With
 `--simulator`, `--sim-cpu-throttle` replaces the poll with a scripted 0 → flags
 → 0 transition for exercising that UI; heartbeat log lines then end the flags
 with `(simulated)` so a post-flight report does not blame the Pi.

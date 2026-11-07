@@ -37,7 +37,11 @@ frequency, sideband folding, the null-refinement train test, the simulator
 rate-switch option and its tests, and TagTracker's spectrogram setting
 defaulting on; see `design/COLLECTION_FLOW.md`) and removed. S16–S19 (receiver
 exit on a lost Airspy, IQ-stall warnings, post-flight IQ-stop checks, sticky
-throttle bits) were implemented 2026-11-07 and removed. Numbers in
+throttle bits) were implemented 2026-11-07 and removed. S13 (vehicle time
+in logs) was superseded by `ClockSync` and removed; issue 11 tracks its field
+check. S15 (TagTracker unit test for an error after takeoff) was done
+2026-11-07; see issue 15. S20 (settle the heading before arming a slice) was
+implemented 2026-11-07; see issue 12. Numbers in
 brackets are the issues below that each remaining change addresses.
 
 ### Field data collection
@@ -45,7 +49,6 @@ brackets are the issues below that each remaining change addresses.
 | # | Change | Addresses |
 | --- | --- | --- |
 | S9 | Archive rotation log folders with the raw captures in `/Volumes/Media/PDC Testing/` after every outing (done for 10-13 and 10-14). | — |
-| S13 | Put vehicle (GPS) time on detector and controller log lines, or at least log the RPi-clock-to-vehicle-time offset at session start and on every change. | 11 |
 
 ### RF noise / hardware tests
 
@@ -57,11 +60,7 @@ brackets are the issues below that each remaining change addresses.
 
 ### Controller / TagTracker / analyzer
 
-In priority order.
-
-| # | Change | Addresses |
-| --- | --- | --- |
-| S15 | TagTracker: unit test for "Auto rotation errors after takeoff → RTL" (stall in `PythonWaitForDetectionResultState` while airborne), then fix what it exposes. | 15 |
+None open.
 
 ---
 
@@ -154,10 +153,21 @@ dropout in the field shows these.
 (issue 13) and Tracker sent the cancel, but the vehicle held at ≈400 ft
 instead of returning. `CustomStateMachine::setError` switches to RTL when the
 vehicle is airborne and `RTLOnError` is set, which `autoDetection` does after
-`takeoffComplete`; by reading the code this case should have returned. No
-TagTracker unit test covers an error after takeoff in Auto detection (only
-"cancel does not RTL"). Tracker's log, or the voice announcement ("Returning"
-vs "User is in control of vehicle"), would show which branch ran.
+`takeoffComplete`; by reading the code this case should have returned.
+
+2026-11-07: TagTracker `CustomStateMachineTest::_stallAfterTakeoffReturns`
+runs that path (PX4 MockLink airborne, `RTLOnError` as after takeoff, a
+`START_COLLECTION` operation stalling in `PythonWaitForDetectionResultState`)
+and the vehicle does switch to Return, so the cause is outside it. Candidates:
+- `Vehicle::airborne()` was false. It comes only from `EXTENDED_SYS_STATE`
+  `landed_state`; if that message was not reaching Tracker, `setError` skips
+  the RTL silently (voice: "Auto Detection failed", with neither "Returning"
+  nor "User is in control of vehicle").
+- The machine had already been cancelled (pilot mode change or Pause), so the
+  stall error was ignored (voice: "cancelled. User is in control of vehicle").
+- PX4 rejected the mode change.
+
+Tracker's log or the voice announcement would tell these apart.
 
 ---
 
@@ -214,3 +224,10 @@ overshoots by up to ≈8° and settles within ≈1.5–2 s. The segment starts
 Effect here ≈0.1 dB per heading (mean dwell yaw within 0.1° of commanded);
 it grows with faster yaw rates or fewer pulses per dwell. Fix belongs in
 TagTracker: arm once yaw error and yaw rate have both been small for ≈1 s.
+
+**Fixed 2026-11-07 in TagTracker, not yet field-verified (S20):** after the
+heading first comes within 1°, `HeadingSettleState` waits for it to stay within
+±3° for 1 s before `START_COLLECTION_SLICE`. It gives up after 4 s and arms
+anyway (warning `Heading did not settle`), so gusts cost a less steady slice,
+never the rotation. Remove this item once a flight's ULog shows yaw within ±3°
+at each ARM.
