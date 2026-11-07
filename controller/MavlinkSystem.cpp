@@ -251,6 +251,7 @@ void MavlinkSystem::_cpuThrottlePollLoop()
     const auto startTime    = std::chrono::steady_clock::now();
     CpuThrottleHold hold;
     std::optional<uint8_t> lastFlags;
+    std::optional<uint32_t> lastSticky;
     bool unavailableLogged = false;
 
     while (true) {
@@ -273,6 +274,14 @@ void MavlinkSystem::_cpuThrottlePollLoop()
             if (firmwareBits) {
                 polled = cpuThrottleFlags(*firmwareBits);
                 source = formatString("firmware_bits:0x%x", *firmwareBits);
+                // The sticky bits latch a dip shorter than the poll interval, which the current-state bits miss.
+                const std::string newSticky = newStickyThrottleBits(lastSticky.value_or(0), *firmwareBits);
+                if (!newSticky.empty()) {
+                    logError() << formatString("CPU throttle sticky bits %s: %s %s cpu_temp_c:%.1f",
+                                               lastSticky ? "set" : "already set at first poll (since boot)",
+                                               newSticky.c_str(), source.c_str(), _cpuTemp());
+                }
+                lastSticky = *firmwareBits & kFwThrottleStickyMask;
             } else {
                 source = "poll_failed";
             }

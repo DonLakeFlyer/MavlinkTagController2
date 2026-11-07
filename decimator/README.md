@@ -46,6 +46,7 @@ and redirects stderr to `airspyhf_decimator.log` in the session log directory.
 | Input | ZeroMQ PUB messages with the header in [shared/README.md](../shared/README.md#zeromq-iq-packet-format) |
 | Output | UDP datagram of `complex64` samples. The first sample is a timestamp header, not IQ: its real lane holds `uint32` seconds and its imaginary lane `uint32` nanoseconds, bit-cast into the two `float32`s (`TimestampEncoder::headerForSample`; decoded by `pulse_detector.py::decode_timestamp`) |
 | Diagnostics (stderr, 1 Hz) | `perf zmq_Bps= zmq_complex_sps= in_sps= out_sps= frames_per_s= cpu_duty_pct= buffer_samples= zmq_packets= malformed= dropped= out_of_order= queue_depth= queue_drops=` and `zmq_timestamp_rate_sps= first_ts_us= last_ts_us=` |
+| Diagnostics (stderr, on change) | `IQ_STALL no_zmq_packets_s= since= stalls=` (`since` is `start` or `last_packet`) after 5 s without a valid ZMQ packet (`perf` stops with the input), `IQ_RESUMED stalled_s= stalls=` when packets return |
 
 `malformed`, `dropped`, `out_of_order` and `queue_drops` are the continuity
 counters `analyzer/post_flight_analysis.py` reads.

@@ -8,8 +8,9 @@
 
 using namespace TunnelProtocol;
 
-RotationProgress::RotationProgress(OperationProgressReporter& reporter)
+RotationProgress::RotationProgress(OperationProgressReporter& reporter, std::function<Clock::time_point()> now)
     : _reporter(reporter)
+    , _now(std::move(now))
 {
 }
 
@@ -32,6 +33,7 @@ bool RotationProgress::begin(uint32_t requestId, uint32_t sliceCount, uint32_t d
     _slicesArmed       = 0;
     _slicesComplete    = 0;
     _sliceProgressByTag.clear();
+    _iqStallReported = false;
     _completedExtraSteps = 0;
     _sliceText.clear();
     _sliceHeadings.clear();
@@ -105,6 +107,8 @@ void RotationProgress::sliceArmed(uint32_t sliceId, float headingDeg)
     _currentHeadingDeg = headingDeg;
     _sliceHeadings[sliceId] = headingDeg;
     _sliceProgressByTag.clear();
+    _lastSliceProgress = _now();
+    _iqStallReported = false;
     ++_slicesArmed;
     if (_slicesArmed > _sliceCount) {
         _sliceCount = _slicesArmed;   // unannounced extra slice: grow rather than clamp
@@ -120,6 +124,8 @@ RotationProgress::ProgressResult RotationProgress::sliceProgress(uint32_t sliceI
         || sampleRateHz == 0 || samplesNeeded == 0) {
         return ProgressResult::Ignored;
     }
+    _lastSliceProgress = _now();
+    _iqStallReported = false;
     // Ceil divisions written to avoid uint32 wrap on absurd wire values (samplesNeeded != 0 checked above).
     const uint32_t segmentSeconds = (samplesNeeded - 1) / sampleRateHz + 1;
     const auto it = _sliceProgressByTag.find(tagId);
@@ -272,6 +278,21 @@ std::vector<std::string> RotationProgress::computeTick()
     ++_analysisWaitTicks;
     _publishLocked("");
     return stalls;
+}
+
+std::optional<std::string> RotationProgress::iqTick()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_active || _phase != Phase::Slice || !_currentSliceId) {
+        return std::nullopt;
+    }
+    const double silentS = std::chrono::duration<double>(_now() - _lastSliceProgress).count();
+    if (silentS <= kIqStallSeconds || _iqStallReported) {
+        return std::nullopt;
+    }
+    _iqStallReported = true;
+    return formatString("IQ_STALL no SLICE_PROGRESS for %.1f s (reported after more than %u s), slice %u %03.0f deg: SDR stopped streaming?",
+                        silentS, kIqStallSeconds, *_currentSliceId, _currentHeadingDeg);
 }
 
 void RotationProgress::revisitRequested(float headingDeg)

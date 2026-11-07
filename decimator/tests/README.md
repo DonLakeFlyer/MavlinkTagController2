@@ -38,12 +38,19 @@ Includes the decimator `main.cpp` via `#define main` redirection so all internal
 | `testParseZmqFrameValid` | A well-formed ZMQ frame parses with correct field values |
 | `testParseZmqFrameMalformed` | Bad magic, bad version, short header, and payload-size mismatch are rejected |
 | `testZmqReceiverMalformedFrameAccounting` | Malformed frames increment the malformed-packet counter |
+| `testIqStallMonitor` | `IqStallMonitor` reports one stall after 5 s without a packet (from start or from the last packet), reports the resume with the stall length, and counts stalls |
 
 #### Decimation Pipeline
 
 | Test | Description |
 |------|-------------|
 | `testFirDecimatorOutputCount` | Decimate-by-4 on 20 samples produces exactly 5 outputs |
+| `testFirDecimatorResetMatchesFreshInstance` | `reset()` clears filter history: output after reset equals a fresh instance |
+| `testFrequencyShifterAdvanceMatchesMixing` | `advance(n)` leaves the mixer phase where mixing n samples would |
+| `testFrameAssemblerEmitsFullFramesWithContiguousTimestamps` | Full frames are header + payload, one payload duration apart; the remainder stays pending |
+| `testFrameAssemblerFlushEmitsShortFrameAndSkipAdvancesTime` | `flush()` emits pending samples as a short frame; `skip()` moves the next timestamp past a hole |
+| `testHoleOutputSamplesRounds` | Dropped input packets map to rounded output-sample counts |
+| `testSequenceGapBecomesUdpTimestampGap` | End to end: a ZMQ sequence gap flushes a short frame and appears as exactly one UDP timestamp gap |
 | `testTimestampEncoderMonotonicStep` | Timestamp delta for 1000 samples at 1 kHz equals ~1 second |
 | `testTimestampMatchesUavrtDetectionFormat` | Encoded timestamps have nanoseconds <1e9 and correct step sizes |
 | `testPulseSurvivesShiftAndDecimation` | Clean pulsed tone at 146 MHz survives 3-stage 8×5×5 decimation with correct pulse spacing |

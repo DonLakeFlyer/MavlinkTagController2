@@ -338,6 +338,7 @@ void CommandHandler::_startSdrFrontEnd(LogFileManager* logFileManager, AirSpyDev
     std::string airspyChannelizeExecutable;
     std::string airspyReceiverProcessName;
     const double centerFrequencyMhz = (double)radioCenterFrequencyHz / 1000000.0;
+    _sdrStopAnnounced = false;
 
     std::string sdrPathStatus;
     if (deviceType == AirSpyDeviceType::SIMULATOR) {
@@ -399,7 +400,10 @@ void CommandHandler::_startSdrFrontEnd(LogFileManager* logFileManager, AirSpyDev
                                                 commandStr.c_str(),
                                                 logPath.c_str(),
                                                 MonitoredProcess::NoPipe,
-                                                nullptr);
+                                                nullptr,
+                                                false,
+                                                [this](int) { _announceSdrStopped(); });
+        airspyProc->setFailureReportedByCallback();
         airspyProc->start();
         _trackProcess(airspyProc);
 
@@ -1238,6 +1242,17 @@ void CommandHandler::heartbeatTick()
     _progress.resendIfRunning();
     for (const std::string& stall : _rotationProgress.computeTick()) {
         logError() << stall;
+    }
+    if (const auto iqStall = _rotationProgress.iqTick()) {
+        logError() << *iqStall;
+        _announceSdrStopped();
+    }
+}
+
+void CommandHandler::_announceSdrStopped()
+{
+    if (!_sdrStopAnnounced.exchange(true)) {
+        _mavlink->sendStatusText("#VHF stopped streaming. Check USB connection", MAV_SEVERITY_ERROR);
     }
 }
 

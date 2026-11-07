@@ -56,5 +56,6 @@ endif()
 
 LIST(APPEND TOOLS_LINK_LIBS -lm)
 
-target_link_libraries(airspyhf_zeromq_rx ${TOOLS_LINK_LIBS})
+find_package(Threads REQUIRED)
+target_link_libraries(airspyhf_zeromq_rx ${TOOLS_LINK_LIBS} Threads::Threads)
 target_link_libraries(airspyhf_zeromq_rx PkgConfig::PC_ZMQ)

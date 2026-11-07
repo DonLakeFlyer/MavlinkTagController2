@@ -5,7 +5,9 @@
 #include "test_check.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,10 +18,16 @@ namespace {
 
 struct Sink {
     std::vector<OperationProgress_t> frames;
+    RotationProgress::Clock::time_point now {};
     OperationProgressReporter reporter { [this](const OperationProgress_t& f) { frames.push_back(f); } };
-    RotationProgress rotation { reporter };
+    RotationProgress rotation { reporter, [this] { return now; } };
     const OperationProgress_t& last() const { return frames.back(); }
     std::string message() const { return last().message; }
+    std::optional<std::string> iqTick(std::chrono::seconds elapsed = std::chrono::seconds(1))
+    {
+        now += elapsed;
+        return rotation.iqTick();
+    }
 };
 
 uint16_t stage(ComputeStage value) { return static_cast<uint16_t>(value); }
@@ -519,6 +527,59 @@ void testFailureAndBusyGate()
     CHECK(!s.reporter.busy());
 }
 
+// A slice that stops getting SLICE_PROGRESS (no IQ reaching any detector) is reported
+// once; progress resets it, and a later stall in the same slice is reported again.
+void testIqStall()
+{
+    Sink s;
+    constexpr uint32_t tag = 7, fs = 1000, needed = 20 * fs;
+    constexpr uint32_t limit = RotationProgress::kIqStallSeconds;
+    CHECK(s.rotation.begin(1, 2, 1, 2, 20));
+    s.rotation.detectorReady(1);
+    for (uint32_t i = 0; i < 2 * limit; ++i) {
+        CHECK(!s.iqTick());                                     // not capturing yet
+    }
+
+    s.rotation.sliceArmed(1, 90.0f);
+    for (uint32_t i = 1; i <= limit; ++i) {
+        CHECK(!s.iqTick());
+    }
+    s.rotation.sliceProgress(1, tag, fs, needed, fs);           // IQ arriving: timer restarts
+    for (uint32_t i = 1; i <= limit; ++i) {
+        CHECK(!s.iqTick());
+    }
+    const auto stall = s.iqTick();
+    CHECK(stall.has_value());
+    CHECK(stall->find("IQ_STALL") == 0);
+    CHECK(stall->find("for 6.0 s") != std::string::npos);
+    CHECK(stall->find("slice 1 090 deg") != std::string::npos);
+    CHECK(!s.iqTick());                                         // reported once per stall
+    CHECK(s.rotation.sliceProgress(9, tag, 2 * fs, needed, fs) == RotationProgress::ProgressResult::Ignored);
+    CHECK(!s.iqTick());                                         // another slice's report is not this slice's IQ
+
+    s.rotation.sliceProgress(1, tag, 2 * fs, needed, fs);
+    for (uint32_t i = 1; i <= limit; ++i) {
+        CHECK(!s.iqTick());
+    }
+    CHECK(s.iqTick().has_value());                              // stalled again
+
+    s.rotation.sliceComplete(1);
+    for (uint32_t i = 0; i < 2 * limit; ++i) {
+        CHECK(!s.iqTick());                                     // between slices nothing is captured
+    }
+    s.rotation.sliceArmed(2, 180.0f);
+    for (uint32_t i = 1; i <= limit; ++i) {
+        CHECK(!s.iqTick());                                     // a new slice starts a fresh timer
+    }
+    CHECK(s.iqTick().has_value());
+
+    // A late heartbeat (2 s cadence) still reports after elapsed time, not after a tick count.
+    s.rotation.sliceProgress(2, tag, fs, needed, fs);
+    CHECK(!s.iqTick(std::chrono::seconds(2)));
+    CHECK(!s.iqTick(std::chrono::seconds(2)));
+    CHECK(s.iqTick(std::chrono::seconds(2)).has_value());
+}
+
 } // namespace
 
 int main()
@@ -537,6 +598,7 @@ int main()
     testComputeStageText();
     testAnalysisTextClearedBetweenSlices();
     testFailureAndBusyGate();
+    testIqStall();
     std::printf("test_rotation_progress: all tests passed\n");
     return 0;
 }

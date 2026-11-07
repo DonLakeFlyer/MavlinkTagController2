@@ -8,7 +8,10 @@ the vehicle went back to PWM; see
 [analysis/2026-10_DSHOT_VS_PWM_NOISE.md](analysis/2026-10_DSHOT_VS_PWM_NOISE.md).
 The 10-14 pulse-pose problems (telemetry cache pruned before K=20 results
 arrived; rotation pose taken at ARM, mid-turn) were fixed the same day; see
-`design/RATE_SWITCH_DETECTOR.md`.
+`design/RATE_SWITCH_DETECTOR.md`. Item 17 (sticky under-voltage bits not
+read) was fixed 2026-11-07; see `design/SYSTEM_OVERVIEW.md`. Item 16
+(post-flight report called an Airspy dropout "Healthy") was fixed 2026-11-07
+in `analyzer/post_flight_analysis.py`.
 
 Sources, unless stated otherwise: 60-acres flight, 2026-10-13, ~122 m AGL.
 
@@ -32,7 +35,9 @@ Open suggestions. S1–S8 were implemented 2026-10 (per-heading results with
 no cross-heading projection, frequency-only re-search, candidate identity by
 frequency, sideband folding, the null-refinement train test, the simulator
 rate-switch option and its tests, and TagTracker's spectrogram setting
-defaulting on; see `design/COLLECTION_FLOW.md`) and removed. Numbers in
+defaulting on; see `design/COLLECTION_FLOW.md`) and removed. S16–S19 (receiver
+exit on a lost Airspy, IQ-stall warnings, post-flight IQ-stop checks, sticky
+throttle bits) were implemented 2026-11-07 and removed. Numbers in
 brackets are the issues below that each remaining change addresses.
 
 ### Field data collection
@@ -57,10 +62,6 @@ In priority order.
 | # | Change | Addresses |
 | --- | --- | --- |
 | S15 | TagTracker: unit test for "Auto rotation errors after takeoff → RTL" (stall in `PythonWaitForDetectionResultState` while airborne), then fix what it exposes. | 15 |
-| S16 | `airspyhf_zeromq_rx`: when streaming stops without a user stop, exit at once with a non-zero code instead of hanging in `airspyhf_stop` / `airspyhf_close` / `zmq_ctx_term`, so `MonitoredProcess` reports a failure. | 14 |
-| S17 | Decimator or controller: warn when no IQ has arrived for N s (stable log key + STATUSTEXT such as "SDR stopped streaming"), so TagTracker shows the cause instead of "Rotation stalled". | 14 |
-| S18 | `analyzer/post_flight_analysis.py`: flag a receiver log ending in `Exiting...` without `User cancel`, and a decimator log that ends well before teardown. | 16 |
-| S19 | Controller throttle poll: also read the sticky bits (16 under-voltage occurred, …) and log when one first sets. | 17 |
 
 ---
 
@@ -139,6 +140,14 @@ so `MonitoredProcess` reports nothing; the decimator just stops logging. The
 only thing that ended the rotation was TagTracker's 10 s stall timeout, with
 the generic message "Rotation stalled at slice N".
 
+**Fixed 2026-11-07, not yet field-verified (S16, S17):** the receiver now
+exits with status 1 when streaming stops without a user stop. Whether or not
+it exits, a slice with no `SLICE_PROGRESS` for more than 5 s makes the
+controller log `IQ_STALL`. Either one sends the operator
+`#VHF stopped streaming. Check USB connection` (once per session), and the
+decimator logs `IQ_STALL` after 5 s without packets. Remove this item once a
+dropout in the field shows these.
+
 ### 15. Auto rotation failure after takeoff did not RTL
 
 2026-11-06 14:24 UTC: an Auto rotation (Tracker takeoff) stalled at slice 6
@@ -205,16 +214,3 @@ overshoots by up to ≈8° and settles within ≈1.5–2 s. The segment starts
 Effect here ≈0.1 dB per heading (mean dwell yaw within 0.1° of commanded);
 it grows with faster yaw rates or fewer pulses per dwell. Fix belongs in
 TagTracker: arm once yaw error and yaw rate have both been small for ≈1 s.
-
-### 16. Post-flight report calls an Airspy dropout "Healthy"
-
-`analyzer/post_flight_analysis.py` judges decimator health only from drops,
-malformed and out-of-order packets, so both 2026-11-06 afternoon sessions
-report "Healthy — no drops" although the IQ stopped minutes before teardown.
-
-### 17. Under-voltage check sees only the current state every 5 s
-
-The controller polls `vcgencmd get_throttled` every 5 s and uses only the
-current-state bits, so a dip shorter than the poll interval is never seen.
-The sticky bits (bit 16: under-voltage occurred since boot) latch any dip.
-Low priority: the 2026-11-06 kernel log showed no under-voltage.

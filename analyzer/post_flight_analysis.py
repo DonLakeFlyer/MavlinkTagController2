@@ -32,6 +32,11 @@ from log_schema import (read_jsonl, entries_by_type,
 # Decimator rate warnings beyond this count are treated as a sustained mismatch
 # rather than a startup transient (measured-rate check runs ~1/s).
 RATE_WARNING_TRANSIENT_MAX = 10
+# Perf lines are 1 s apart while IQ flows, and teardown SIGKILLs every pipeline
+# process at once (so the decimator logs no final line); the last perf line is
+# normally within ~2 s of the controller's terminate line (1 s resolution).
+# Matches the decimator's own IQ_STALL limit.
+IQ_END_GAP_MAX_S = 5.0
 # Heartbeat statuses during which the SDR pipeline is running.
 ACTIVE_HEARTBEAT_STATUSES = ('DETECTING', 'CAPTURE', 'RECORDING')
 
@@ -277,6 +282,10 @@ class BearingCandidate:
 # Parsers
 # ---------------------------------------------------------------------------
 
+def _seconds_of_day(h: str, m: str, s: str, ms: str = '0') -> float:
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+
 def parse_decimator_log(path: str) -> dict:
     """Parse airspyhf_decimator.log (light regex, stable key=value format)."""
     perfs: List[DecimatorPerf] = []
@@ -310,11 +319,32 @@ def parse_decimator_log(path: str) -> dict:
         r'missing_input_samples=(\d+)\s+skipped_output_samples=(\d+)')
     queue_drop_pat = re.compile(
         r'queue full.*?total_queue_drops=(\d+)')
+    stamp_pat = re.compile(r'^(\d{2}):(\d{2}):(\d{2})\.(\d{3}) ')
     holes: List[dict] = []
+    iq_stalls = 0
+    stalled_at_end = False
+    # A slow first packet (e.g. simulator start-up) that then arrives is not a stall.
+    open_stall_at_start = False
+    last_perf_time: Optional[float] = None
+    last_perf_stamp = ''
+    last_line_time: Optional[float] = None
 
     try:
         with open(path) as f:
             for line in f:
+                sm = stamp_pat.match(line)
+                if sm:
+                    last_line_time = _seconds_of_day(*sm.groups())
+
+                if 'IQ_STALL' in line:
+                    stalled_at_end = True
+                    open_stall_at_start = 'since=start' in line
+                    if not open_stall_at_start:
+                        iq_stalls += 1
+                elif 'IQ_RESUMED' in line:
+                    stalled_at_end = False
+                    open_stall_at_start = False
+
                 lm = lock_pat.search(line)
                 if lm:
                     input_rate = float(lm.group(1))
@@ -335,6 +365,9 @@ def parse_decimator_log(path: str) -> dict:
                         p.dropped = int(p2m.group(3))
                         p.out_of_order = int(p2m.group(4))
                     perfs.append(p)
+                    if sm:
+                        last_perf_time = last_line_time
+                        last_perf_stamp = line[:8]
 
                 rw = rate_warn_pat.search(line)
                 if rw:
@@ -369,6 +402,8 @@ def parse_decimator_log(path: str) -> dict:
                                             int(qm.group(1)))
     except FileNotFoundError:
         pass
+    if open_stall_at_start:
+        iq_stalls += 1
 
     last = perfs[-1] if perfs else DecimatorPerf()
     return {
@@ -385,14 +420,27 @@ def parse_decimator_log(path: str) -> dict:
         'lost_input_samples': sum(h['missing_input_samples'] for h in holes),
         'input_rate': input_rate,
         'output_rate': output_rate,
+        'iq_stalls': iq_stalls,
+        'iq_stalled_at_end': stalled_at_end,
+        'last_perf_time': last_perf_time,
+        'last_line_time': last_line_time,
+        'last_perf_stamp': last_perf_stamp,
     }
 
 
 def parse_rx_log(path: str) -> dict:
-    """Parse airspyhf_zeromq_rx.log for USB-level sample loss."""
+    """Parse airspyhf_zeromq_rx.log for USB-level sample loss and how it ended.
+
+    ``Exiting...`` without ``User cancel`` means streaming stopped on its own
+    (the Airspy dropped off USB, or the output failed) instead of on teardown.
+    Only ``-Z`` pipeline logs are parsed here; a ``-n`` raw capture (which also
+    prints ``Exiting...`` when done) logs to ``airspy-hf.N.log``.
+    """
     pat = re.compile(r'USB dropped_samples=(\d+)')
     total = 0
     events = 0
+    exited = False
+    user_cancel = False
     try:
         with open(path) as f:
             for line in f:
@@ -400,9 +448,14 @@ def parse_rx_log(path: str) -> dict:
                 if m:
                     total += int(m.group(1))
                     events += 1
+                elif line.strip() == 'Exiting...':
+                    exited = True
+                elif 'User cancel' in line:
+                    user_cancel = True
     except FileNotFoundError:
         pass
-    return {'usb_dropped_samples': total, 'usb_drop_events': events}
+    return {'usb_dropped_samples': total, 'usb_drop_events': events,
+            'stream_lost': exited and not user_cancel}
 
 
 def parse_controller_log(path: str) -> dict:
@@ -416,7 +469,8 @@ def parse_controller_log(path: str) -> dict:
     capturing or recording (a transition takes the status of the heartbeat
     before it) go in ``throttle_flags``; flags seen only while idle go in
     ``idle_throttle_flags``. ``simulated`` is set by a ``simulated`` marker on
-    either kind of line (``--sim-cpu-throttle``).
+    either kind of line (``--sim-cpu-throttle``). ``decimator_terminate_time``
+    is the seconds-of-day of the last teardown of the decimator process.
     """
     hb_pat = re.compile(r'HEARTBEAT sent:.*?status:\s*([A-Z_]+).*'
                         r'cpu_throttle_flags:\s*([A-Z_|]+)( \(simulated\))?')
@@ -424,6 +478,9 @@ def parse_controller_log(path: str) -> dict:
         r'CPU throttle flags changed: \S+ -> ([A-Z_|]+)'
         r'(?: firmware_bits:(0x[0-9a-fA-F]+)| (simulated))?'
         r'(?:.*cpu_temp_c:([-\d.]+))?')
+    terminate_pat = re.compile(
+        r'^\[(\d{2}):(\d{2}):(\d{2})\|.\]\s+MonitoredProcess::terminate .*\bairspyhf_decimator\b')
+    terminate_time: Optional[float] = None
     reports = 0
     active = 0
     active_throttled = 0
@@ -446,6 +503,10 @@ def parse_controller_log(path: str) -> dict:
     try:
         with open(path, errors='replace') as f:
             for line in f:
+                m = terminate_pat.match(line)
+                if m:
+                    terminate_time = _seconds_of_day(*m.groups())
+                    continue
                 m = hb_pat.search(line)
                 if m:
                     reports += 1
@@ -476,7 +537,8 @@ def parse_controller_log(path: str) -> dict:
             'throttle_flags': sorted(flags),
             'idle_throttle_flags': sorted(idle_flags - flags),
             'firmware_bits': firmware_bits,
-            'max_cpu_temp_c': max_temp, 'simulated': simulated}
+            'max_cpu_temp_c': max_temp, 'simulated': simulated,
+            'decimator_terminate_time': terminate_time}
 
 
 def correlate_holes_with_gaps(holes: List[dict], gap_events: List[dict],
@@ -1016,7 +1078,9 @@ def generate_report(log_dir: str) -> str:
                  'output_rate': 0.0,
                  'dropped': 0, 'malformed': 0, 'queue_drops': 0,
                  'out_of_order': 0, 'rate_warning_count': 0,
-                 'rate_warning_max': 0, 'lost_input_samples': 0}
+                 'rate_warning_max': 0, 'lost_input_samples': 0,
+                 'iq_stalls': 0, 'iq_logs_ended_stalled': 0,
+                 'iq_ends': []}
     for dp in dec_paths:
         d = parse_decimator_log(dp)
         dec['perfs'].extend(d['perfs'])
@@ -1034,6 +1098,10 @@ def generate_report(log_dir: str) -> str:
         dec['malformed'] += d['malformed']
         dec['queue_drops'] += d['queue_drops']
         dec['out_of_order'] += d['out_of_order']
+        dec['iq_stalls'] += d['iq_stalls']
+        dec['iq_logs_ended_stalled'] += int(d['iq_stalled_at_end'])
+        if d['last_perf_time'] is not None:
+            dec['iq_ends'].append(d)
         if d['input_rate'] > 0:
             dec['input_rate'] = d['input_rate']
         if d['output_rate'] > 0:
@@ -1058,13 +1126,41 @@ def generate_report(log_dir: str) -> str:
     # Same discovery rule as the decimator log: root first, else per heading.
     rx_paths = [os.path.join(os.path.dirname(dp), 'airspyhf_zeromq_rx.log')
                 for dp in dec_paths]
-    rx = {'usb_dropped_samples': 0, 'usb_drop_events': 0}
+    rx = {'usb_dropped_samples': 0, 'usb_drop_events': 0, 'stream_lost': False}
     for rp in rx_paths:
         r = parse_rx_log(rp)
         rx['usb_dropped_samples'] += r['usb_dropped_samples']
         rx['usb_drop_events'] += r['usb_drop_events']
+        rx['stream_lost'] = rx['stream_lost'] or r['stream_lost']
 
     host = parse_controller_log(os.path.join(log_dir, 'MavlinkTagController.log'))
+
+    iq_stop_issues = []
+    if rx['stream_lost']:
+        iq_stop_issues.append('Airspy receiver stopped streaming without a user stop '
+                              '(`Exiting...` without `User cancel`): device lost from USB?')
+    # One root decimator log ends at the controller's teardown; legacy per-heading
+    # logs (and sessions without a controller log) only have their own last line.
+    teardown = host['decimator_terminate_time'] if len(dec_paths) == 1 else None
+    for d in dec['iq_ends']:
+        end = teardown if teardown is not None else d['last_line_time']
+        gap_s = end - d['last_perf_time']
+        if gap_s < -43200.0:
+            gap_s += 86400.0   # crossed midnight UTC
+        elif gap_s > 43200.0:
+            gap_s -= 86400.0   # last perf line just after a teardown logged before midnight
+        if gap_s > IQ_END_GAP_MAX_S:
+            iq_stop_issues.append(f'IQ stopped {gap_s:.0f} s before teardown '
+                                  f'(last decimator perf line {d["last_perf_stamp"]})')
+    if dec['iq_stalls']:
+        ended = dec['iq_logs_ended_stalled']
+        if not ended:
+            suffix = ''
+        elif len(dec_paths) == 1:
+            suffix = ', still stalled at the end'
+        else:   # legacy per-heading logs: a pipeline that ended stalled is not the session end
+            suffix = f', {ended} of {len(dec_paths)} decimator logs ended stalled'
+        iq_stop_issues.append(f'{dec["iq_stalls"]} IQ stall(s) logged by the decimator{suffix}')
 
     # Continuity cross-check: every upstream hole must show up downstream.
     all_gap_events = [ev for det in detectors for ev in det.gap_events]
@@ -1205,10 +1301,11 @@ def generate_report(log_dir: str) -> str:
 
         if (total_drops == 0 and total_malformed == 0
                 and total_queue_drops == 0 and total_ooo == 0
-                and not rate_sustained):
+                and not rate_sustained and not iq_stop_issues):
             w('- **Status:** Healthy — no drops, no malformed packets')
         else:
             issues = []
+            issues.extend(iq_stop_issues)
             if total_drops:
                 issues.append(f'{total_drops} ZMQ drops')
             if total_malformed:
@@ -1746,6 +1843,7 @@ def generate_report(log_dir: str) -> str:
                 f'DOMINANT_FOLD \u2014 likely transient interference')
 
     # Counters can come from event lines even when no perf line was logged.
+    anomalies.extend(iq_stop_issues)
     if dec_paths:
         if dec['dropped'] > 0:
             anomalies.append(

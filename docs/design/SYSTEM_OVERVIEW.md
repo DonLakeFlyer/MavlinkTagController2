@@ -204,7 +204,12 @@ temperature limit, or frequency-capped / throttled with no under-voltage
 failed or timed-out poll keeps nonzero flags for two more polls (logged at `E`)
 so a transient error does not read as recovery, then reports 0 on the third
 consecutive failure. Each change is logged at `E` with the raw firmware bits and the CPU
-temperature, and TagTracker shows it on the controller indicator. With
+temperature, and TagTracker shows it on the controller indicator. The
+firmware's sticky "has occurred since boot" bits (16–19) are not in the
+flags; each one is logged at `E` once, when the poll first sees it set
+(`CPU throttle sticky bits set: under-voltage …`, or `already set at first
+poll (since boot)` if it latched before the controller started), so a dip
+shorter than the 5 s poll still shows in the log. With
 `--simulator`, `--sim-cpu-throttle` replaces the poll with a scripted 0 → flags
 → 0 transition for exercising that UI; heartbeat log lines then end the flags
 with `(simulated)` so a post-flight report does not blame the Pi.
@@ -271,7 +276,10 @@ step and a failure are also sent to the GCS as status text.
 | Anomaly | Where detected | Action |
 | --- | --- | --- |
 | USB sample loss | `airspyhf_zeromq_rx` | `sequence` skips ahead; logged |
+| Streaming stops without a user stop (Airspy dropped off USB, or a ZMQ/file write failed) | `airspyhf_zeromq_rx` | logs `streaming stopped unexpectedly` and exits at once with status 1, skipping device and ZMQ teardown (which hangs on a lost device); the controller's `MonitoredProcess` logs `Process fail: 1 airspyhf_zeromq_rx` and the GCS gets `#VHF stopped streaming. Check USB connection` (error; sent once per pipeline start, shared with the IQ-stall row below) |
 | Malformed / out-of-order / dropped ZMQ packet | decimator | counted in `perf`; stream continues |
+| No valid ZMQ packet for 5 s (SDR stopped or stalled, receiver still running) | decimator | `IQ_STALL` logged once per stall, `IQ_RESUMED` when packets return; stream continues |
+| No `SLICE_PROGRESS` from any detector for more than 5 s while a slice is captured | controller `RotationProgress::iqTick` (1 Hz heartbeat) | `IQ_STALL` logged once per stall and `#VHF stopped streaming. Check USB connection` sent to the GCS (error) unless the receiver exit already sent it; 5 s is half the GCS's 10 s stall timeout so the cause arrives before its cancel. The rotation is not failed by the controller |
 | Sample-rate mismatch beyond `--rate-tol-ppm` (packet header or measured rate) | decimator | warning; with `--strict-input-rate` the process exits on the **first** such mismatch |
 | UDP gap < 2·tp | detector `iq_stream` | zero-fill, segment flagged |
 | UDP gap ≥ 2·tp | detector `iq_stream` | barrier; segment restarts after the hole |

@@ -13,6 +13,26 @@ constexpr uint32_t kFwThrottleUnderVoltage  = 1u << 0;
 constexpr uint32_t kFwThrottleFreqCapped    = 1u << 1;
 constexpr uint32_t kFwThrottleThrottled     = 1u << 2;
 constexpr uint32_t kFwThrottleSoftTempLimit = 1u << 3;
+// Sticky "has occurred since boot" copies of the four bits above.
+constexpr uint32_t kFwThrottleStickyShift   = 16;
+constexpr uint32_t kFwThrottleStickyMask    = 0xFu << kFwThrottleStickyShift;
+
+// Comma-separated names of the sticky bits set in `now` but not in `before`; empty if none.
+inline std::string newStickyThrottleBits(uint32_t before, uint32_t now)
+{
+    static const char* const kNames[] = { "under-voltage", "freq-capped", "throttled", "soft-temp-limit" };
+    const uint32_t added = (now & ~before & kFwThrottleStickyMask) >> kFwThrottleStickyShift;
+    std::string names;
+    for (uint32_t bit = 0; bit < 4; ++bit) {
+        if (added & (1u << bit)) {
+            if (!names.empty()) {
+                names += ',';
+            }
+            names += kNames[bit];
+        }
+    }
+    return names;
+}
 
 // Under-voltage also sets the frequency-capped and throttled bits, so those count as heat only when it is clear.
 inline uint8_t cpuThrottleFlags(uint32_t firmwareBits)

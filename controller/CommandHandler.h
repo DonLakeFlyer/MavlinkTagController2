@@ -172,6 +172,8 @@ private:
     AirSpyDeviceType _connectedAirSpyType(std::string* errorMessage = nullptr);
     std::string _sdrPathStatusText(AirSpyDeviceType deviceType, double frequencyMhz) const;
     std::string _checkForAirSpy  (void);
+    // Tells the operator the SDR stopped streaming, once per pipeline start.
+    void _announceSdrStopped     (void);
 
 
     std::string _simulatorCommand(uint32_t radioCenterFrequencyHz);
@@ -211,6 +213,7 @@ private:
     std::map<uint32_t, int>                     _detectorControlPorts;
     bool                                        _inRotation             = false;
     std::atomic<bool>                           _rotationTeardown       { false };  // stopDetectionPipeline runs on behalf of a collection
+    std::atomic<bool>                           _sdrStopAnnounced       { false };  // receiver exit and rotation IQ stall share one announcement
     uint32_t                                    _antennaId              = 0;        // StartCollection_t::antenna_id
     uint32_t                                    _collectionNSlices      = 0;        // StartCollection_t::n_slices, for session.json
     bool                                        _revisitRequested       = false;    // one confirmation revisit per collection

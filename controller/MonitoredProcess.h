@@ -32,6 +32,9 @@ public:
         std::function<void(int)> failureCallback = {});
 
 	void start 	(void);
+	/// Call before start(): an unrequested exit is only logged and the failure callback tells the operator;
+	/// a failed start keeps its own status text and skips the callback.
+	void setFailureReportedByCallback(void) { _failureReportedByCallback = true; }
 	/// terminate() then waitForExit(); the exit is logged before this returns.
 	void stop	(std::chrono::milliseconds timeout = std::chrono::seconds(5));
 	/// Asks the child to exit without waiting. Pair with waitForExit().
@@ -62,4 +65,5 @@ private:
 	bp::pipe*						_intermediatePipe;
 	bool							_rawCaptureProcess;
     std::function<void(int)> _failureCallback;
+    bool                     _failureReportedByCallback = false;
 };

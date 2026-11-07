@@ -182,8 +182,8 @@ Inputs it reads from the directory:
 
 | File | Section of the report |
 |------|-----------------------|
-| `airspyhf_decimator.log` (root, or per `heading-NNN/` for older sessions) | ZMQ/UDP continuity: `dropped`, `malformed`, `out_of_order`, `queue_drops`, rate |
-| `airspyhf_zeromq_rx.log` | USB-level sample loss |
+| `airspyhf_decimator.log` (root, or per `heading-NNN/` for older sessions) | ZMQ/UDP continuity: `dropped`, `malformed`, `out_of_order`, `queue_drops`, rate; `IQ_STALL` lines and IQ that stopped before teardown (last `perf` line vs. the controller log's decimator terminate, else the log's last line) |
+| `airspyhf_zeromq_rx.log` | USB-level sample loss; `Exiting...` without `User cancel` (streaming stopped on its own) |
 | `MavlinkTagController.log` | Host CPU: Raspberry Pi undervoltage/thermal throttling from heartbeat `cpu_throttle_flags` |
 | `detector*.jsonl` (root, or `heading-NNN/`, `heading-NNN-sSS/`) | Per-detector cycles, detections, no-detections, lock candidates, per-slice measurements (retro-measured records are re-filed to the heading they were measured at), timing, permutation-null counts vs. the requested count and time limit, `SESSION_END` |
 | `bearing_result.log`, `bearing_candidates.log` | Bearing fit and candidate table |
