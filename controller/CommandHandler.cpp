@@ -46,6 +46,16 @@ extern char **environ;
 
 using namespace TunnelProtocol;
 
+namespace {
+
+// NaN and infinity are not valid JSON numbers.
+std::string jsonNumber(double value, const char* format = "%.15g")
+{
+    return std::isfinite(value) ? formatString(format, value) : std::string("null");
+}
+
+} // namespace
+
 CommandHandler::CommandHandler(MavlinkSystem* mavlink, TelemetryCache* telemetryCache, bool simulatorMode, const std::string& simulatorPreset, bool debugDetector, double simulatorSnrDb,
                                double simulatorTxBearingDeg, double simulatorInterfererSnrDb,
                                const std::string& simulatorAntenna, double simulatorPriPpm,
@@ -253,9 +263,6 @@ bool CommandHandler::_writeSessionInfo(const StartDetectionInfo_t& startDetectio
         return false;
     }
 
-    auto jsonNumber = [](double value) {
-        return std::isfinite(value) ? formatString("%.15g", value) : std::string("null");
-    };
     const char* sdr = deviceType == AirSpyDeviceType::HF ? "airspyhf"
                     : deviceType == AirSpyDeviceType::MINI ? "airspy_mini"
                     : deviceType == AirSpyDeviceType::SIMULATOR ? "simulator" : "none";
@@ -2355,6 +2362,20 @@ std::string CommandHandler::rawCapture(const mavlink_tunnel_t& tunnel)
             std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&tt));
 
             std::string metaPath = captureDataPath.substr(0, captureDataPath.size() - 4) + ".json";
+            const auto pose = _telemetryCache->telemetryForTime(secondsSinceEpoch());
+            std::string vehicle = "null";
+            if (pose) {
+                vehicle = formatString("{ \"latitude_deg\": %s, \"longitude_deg\": %s, \"relative_altitude_m\": %s, "
+                                       "\"heading_deg\": %s, \"roll_deg\": %s, \"pitch_deg\": %s }",
+                                       jsonNumber(pose->position.latitude, "%.7f").c_str(),
+                                       jsonNumber(pose->position.longitude, "%.7f").c_str(),
+                                       jsonNumber(pose->position.relativeAltitude, "%.1f").c_str(),
+                                       jsonNumber(std::fmod(pose->attitudeEuler.yawDegrees + 360.0, 360.0), "%.1f").c_str(),
+                                       jsonNumber(pose->attitudeEuler.rollDegrees, "%.1f").c_str(),
+                                       jsonNumber(pose->attitudeEuler.pitchDegrees, "%.1f").c_str());
+            } else {
+                logError() << "RAW_CAPTURE - no vehicle telemetry within 1 s of capture start; metadata vehicle is null";
+            }
             std::ofstream metaFile(metaPath);
             if (metaFile.is_open()) {
                 metaFile << "{\n";
@@ -2370,6 +2391,7 @@ std::string CommandHandler::rawCapture(const mavlink_tunnel_t& tunnel)
                 metaFile << formatString("  \"capture_utc\": \"%s\",\n", timeBuf);
                 metaFile << formatString("  \"capture_epoch\": %lld,\n", (long long)epoch_s);
                 metaFile << formatString("  \"clock_sync\": \"%s\",\n", jsonEscape(clockSync).c_str());
+                metaFile << formatString("  \"vehicle\": %s,\n", vehicle.c_str());
                 metaFile << formatString("  \"data_file\": \"%s\"\n", jsonEscape(captureDataPath).c_str());
                 metaFile << "}\n";
                 metaFile.close();
