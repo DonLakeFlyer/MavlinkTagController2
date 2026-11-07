@@ -25,6 +25,19 @@ void testFlagMapping()
     CHECK(cpuThrottleFlags(0x50005) == kUnder);
 }
 
+void testSinceBootFlagMapping()
+{
+    CHECK(cpuThrottleSinceBootFlags(0x0) == 0);
+    CHECK(cpuThrottleSinceBootFlags(0xF) == 0);                      // current-state bits only
+    CHECK(cpuThrottleSinceBootFlags(0x10000) == kUnder);
+    CHECK(cpuThrottleSinceBootFlags(0x50000) == kUnder);             // under-voltage also sets throttled
+    CHECK(cpuThrottleSinceBootFlags(0x40000) == kThermal);
+    CHECK(cpuThrottleSinceBootFlags(0x80000) == kThermal);           // soft temperature limit
+    CHECK(cpuThrottleSinceBootFlags(0xF0000) == (kThermal | kUnder));
+    CHECK(cpuThrottleSinceBootFlags(0x50005) == kUnder);
+    CHECK(cpuThrottleSinceBootFlags(0x100000) == 0);                 // undocumented high bits ignored
+}
+
 void testParse()
 {
     CHECK(parseFirmwareThrottled("throttled=0x50005\n") == 0x50005u);
@@ -97,6 +110,7 @@ void testNewStickyBits()
 int main()
 {
     testFlagMapping();
+    testSinceBootFlagMapping();
     testParse();
     testSimulatedSchedule();
     testHoldThroughFailedPolls();

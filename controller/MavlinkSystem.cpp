@@ -252,6 +252,7 @@ void MavlinkSystem::_cpuThrottlePollLoop()
     CpuThrottleHold hold;
     std::optional<uint8_t> lastFlags;
     std::optional<uint32_t> lastSticky;
+    uint8_t sinceBoot = 0;
     bool unavailableLogged = false;
 
     while (true) {
@@ -282,12 +283,17 @@ void MavlinkSystem::_cpuThrottlePollLoop()
                                                newSticky.c_str(), source.c_str(), _cpuTemp());
                 }
                 lastSticky = *firmwareBits & kFwThrottleStickyMask;
+                sinceBoot |= cpuThrottleSinceBootFlags(*firmwareBits);
             } else {
                 source = "poll_failed";
             }
         }
 
         const uint8_t flags = hold.update(polled);
+        // Also covers simulation, which has no sticky bits. Stored first so a heartbeat
+        // that sees the new current flags also sees them in the since-boot flags.
+        sinceBoot |= flags;
+        _cpuThrottleSinceBootFlags.store(sinceBoot);
         _cpuThrottleFlags.store(flags);
 
         if (polled) {
@@ -341,14 +347,16 @@ void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
             heartbeat.system_id         = HEARTBEAT_SYSTEM_ID_MAVLINKCONTROLLER;
             heartbeat.status            = _heartbeatStatus;
             heartbeat.cpu_throttle_flags = _cpuThrottleFlags.load();
+            heartbeat.cpu_throttle_since_boot_flags = _cpuThrottleSinceBootFlags.load();
             // Marked on every line so a session log that opens mid-throttle still shows the source.
             const std::string throttleName = TunnelProtocolLog::cpuThrottleFlagsName(heartbeat.cpu_throttle_flags)
                                            + (_simulatedCpuThrottle ? " (simulated)" : "");
+            const std::string sinceBootName = TunnelProtocolLog::cpuThrottleFlagsName(heartbeat.cpu_throttle_since_boot_flags);
 
             if (!lastStatus || *lastStatus != heartbeat.status) {
                 logDebug() << "HEARTBEAT sent: status:" << TunnelProtocolLog::heartbeatStatusName(heartbeat.status)
                           << (lastStatus ? "(was " + TunnelProtocolLog::heartbeatStatusName(*lastStatus) + ")" : std::string("(first)"))
-                          << "cpu_throttle_flags:" << throttleName;
+                          << "cpu_throttle_flags:" << throttleName << "cpu_throttle_since_boot_flags:" << sinceBootName;
                 lastStatus = heartbeat.status;
             }
 
@@ -375,10 +383,10 @@ void MavlinkSystem::startTunnelHeartbeatSender(std::function<void()> tick)
 
             if (++heartbeatCount >= kSummaryEvery) {
                 const float windowS = std::chrono::duration<float>(clock::now() - windowStart).count();
-                logDebug() << formatString("HEARTBEAT sent: x%d in %.1f s (worst gap %.2f s, %d late) status: %s cpu_throttle_flags: %s",
+                logDebug() << formatString("HEARTBEAT sent: x%d in %.1f s (worst gap %.2f s, %d late) status: %s cpu_throttle_flags: %s cpu_throttle_since_boot_flags: %s",
                                            heartbeatCount, windowS, worstGapS, lateBeats,
                                            TunnelProtocolLog::heartbeatStatusName(heartbeat.status).c_str(),
-                                           throttleName.c_str());
+                                           throttleName.c_str(), sinceBootName.c_str());
                 heartbeatCount = 0;
                 worstGapS = 0.0f;
                 lateBeats = 0;

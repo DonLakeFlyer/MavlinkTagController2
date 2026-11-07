@@ -307,6 +307,10 @@ class TestControllerLogParsing:
         # Throttle already on before the session log opened: only heartbeats carry the marker.
         '[10:05:37|D]  HEARTBEAT sent: x60 in 64.6 s (worst gap 1.28 s, 0 late) '
         'status: DETECTING cpu_throttle_flags: UNDERVOLTAGE (simulated)  (MavlinkSystem.cpp:366)\n',
+        # Protocol v11 lines end with the since-boot flags.
+        '[10:05:37|D]  HEARTBEAT sent: x60 in 64.6 s (worst gap 1.28 s, 0 late) '
+        'status: DETECTING cpu_throttle_flags: UNDERVOLTAGE (simulated) '
+        'cpu_throttle_since_boot_flags: UNDERVOLTAGE  (MavlinkSystem.cpp:385)\n',
     ])
     def test_simulated_throttle_is_marked(self, tmp_path, line):
         log = tmp_path / 'MavlinkTagController.log'

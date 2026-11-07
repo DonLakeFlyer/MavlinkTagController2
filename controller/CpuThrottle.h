@@ -50,6 +50,12 @@ inline uint8_t cpuThrottleFlags(uint32_t firmwareBits)
     return flags;
 }
 
+// The sticky copies mapped the same way; the conditions may have occurred at different times.
+inline uint8_t cpuThrottleSinceBootFlags(uint32_t firmwareBits)
+{
+    return cpuThrottleFlags((firmwareBits & kFwThrottleStickyMask) >> kFwThrottleStickyShift);
+}
+
 // Parses "throttled=0x50005" (vcgencmd) or a bare hex value; nullopt for anything else.
 inline std::optional<uint32_t> parseFirmwareThrottled(const std::string& text)
 {

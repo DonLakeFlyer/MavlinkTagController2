@@ -87,6 +87,7 @@ private:
 	Telemetry 					_telemetry;
 	std::atomic<uint16_t>		_heartbeatStatus { HEARTBEAT_STATUS_IDLE };
 	std::atomic<uint8_t>		_cpuThrottleFlags { 0 };	// CPU_THROTTLE_FLAG_*; written by the poll thread
+	std::atomic<uint8_t>		_cpuThrottleSinceBootFlags { 0 };	// CPU_THROTTLE_FLAG_*, only ever set; written by the poll thread
 	std::optional<SimulatedCpuThrottle> _simulatedCpuThrottle {};
 	std::atomic<uint32_t>		_detectionMode { DETECTION_MODE_UAVRT };
 	std::atomic<bool>			_vehicleTimeReceived { false };
