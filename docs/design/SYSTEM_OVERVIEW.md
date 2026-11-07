@@ -178,8 +178,21 @@ Detector bins are ~33 Hz wide. The simulator has no spur, hence
 | Spectrogram dumps | `heading-NNN/tag<T>_cycle_NNNN_{power.npy,iq.npy,meta.json}` when the GCS sets `dump_spectrogram` (~0.9 MB/cycle/tag at K=5, ~3.7 MB at K=20; scales with K) | detector |
 | Bearing CSVs | `<rotation>/bearing_result.log`, `bearing_candidates.log` | controller |
 | Post-flight report | `<session>/analysis.md` | `analyzer/post_flight_analysis.py` |
+| Raw captures | `Logs-RawCapture-<UTC>/airspy-{hf,mini}.N.{dat,log,json}`, one directory per controller run (13 s of complex float32 IQ, the capture process output, the metadata JSON below) | controller (`RAW_CAPTURE`) |
 
 The GCS can fetch any of these over MAVLink FTP (`MavlinkFtpServer`).
+
+### Raw capture metadata
+
+Written next to each `.dat` when the capture starts: `sdr`,
+`requested_freq_mhz`, `tune_freq_mhz` (HF+ tunes `dc_offset_hz` = 10 kHz
+above the request), `sample_rate_hz`, `bandwidth_hz`, `duration_seconds`,
+`gain` (Mini; 0 on HF+), `format`, `capture_utc` and `capture_epoch` (Pi clock),
+`clock_sync` (see [Time base](#time-base)), `vehicle` and `data_file`.
+`vehicle` is the pose at capture start (`latitude_deg`, `longitude_deg`,
+`relative_altitude_m`, `heading_deg` 0–360, `roll_deg`, `pitch_deg`), or
+`null` when no telemetry is within 1 s of the start; a field is `null` if its
+value is not finite.
 
 ### Controller log levels
 
