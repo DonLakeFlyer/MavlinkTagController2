@@ -123,16 +123,17 @@ def _detector_entries(tag_id, cycles, elapsed_s):
     return out
 
 
+def _perf_line(dropped=0):
+    return (f'airspyhf_decimator: perf zmq_Bps=1 zmq_complex_sps=768000 '
+            f'malformed=0 dropped={dropped} out_of_order=0 '
+            f'out_sps=3840 cpu_duty_pct=20 queue_depth=1 queue_drops=0\n')
+
+
 def _decimator_log(path: Path, rate_warnings=0, dropped=0):
-    lines = []
-    for i in range(1, rate_warnings + 1):
-        lines.append(f'airspyhf_decimator: bad incoming measured sample '
-                     f'rate=767000 expected=768000 error_ppm=1302 '
-                     f'warnings={i}')
-    lines.append(f'airspyhf_decimator: perf zmq_Bps=1 zmq_complex_sps=768000 '
-                 f'malformed=0 dropped={dropped} out_of_order=0 '
-                 f'out_sps=3840 cpu_duty_pct=20 queue_depth=1 queue_drops=0')
-    path.write_text('\n'.join(lines) + '\n')
+    warnings = ''.join(f'airspyhf_decimator: bad incoming measured sample '
+                       f'rate=767000 expected=768000 error_ppm=1302 '
+                       f'warnings={i}\n' for i in range(1, rate_warnings + 1))
+    path.write_text(warnings + _perf_line(dropped))
 
 
 def _dump(dir_: Path, tag, cycle):
@@ -197,6 +198,52 @@ class TestDecimatorParsing:
         ]
         assert d['lost_input_samples'] == 28672
 
+    def test_iq_end_times(self, tmp_path):
+        log = tmp_path / 'airspyhf_decimator.log'
+        log.write_text(
+            f'14:28:39.100 {_perf_line()}'
+            f'14:28:40.100 {_perf_line()}'
+            '14:28:45.200 airspyhf_decimator: IQ_STALL no_zmq_packets_s=5.1 '
+            'since=last_packet stalls=1\n')
+        d = parse_decimator_log(str(log))
+        assert d['last_perf_time'] == pytest.approx(14 * 3600 + 28 * 60 + 40.1)
+        assert d['last_line_time'] == pytest.approx(14 * 3600 + 28 * 60 + 45.2)
+        assert d['last_perf_stamp'] == '14:28:40'
+        assert d['iq_stalls'] == 1 and d['iq_stalled_at_end'] is True
+
+    def test_resumed_stall_is_not_stalled_at_end(self, tmp_path):
+        log = tmp_path / 'airspyhf_decimator.log'
+        log.write_text(
+            f'10:00:01.000 {_perf_line()}'
+            '10:00:06.000 airspyhf_decimator: IQ_STALL no_zmq_packets_s=5.0 '
+            'since=last_packet stalls=1\n'
+            '10:00:07.000 airspyhf_decimator: IQ_RESUMED stalled_s=6.0 stalls=1\n'
+            f'10:00:08.000 {_perf_line()}')
+        d = parse_decimator_log(str(log))
+        assert d['iq_stalls'] == 1 and d['iq_stalled_at_end'] is False
+
+    def test_slow_first_packet_is_not_a_stall(self, tmp_path):
+        log = tmp_path / 'airspyhf_decimator.log'
+        log.write_text(
+            '10:00:05.000 airspyhf_decimator: IQ_STALL no_zmq_packets_s=5.0 '
+            'since=start stalls=1\n'
+            '10:00:06.000 airspyhf_decimator: IQ_RESUMED stalled_s=6.0 stalls=1\n'
+            f'10:00:07.000 {_perf_line()}')
+        d = parse_decimator_log(str(log))
+        assert d['iq_stalls'] == 0 and d['iq_stalled_at_end'] is False
+
+    def test_no_packet_ever_is_a_stall(self, tmp_path):
+        log = tmp_path / 'airspyhf_decimator.log'
+        log.write_text('10:00:05.000 airspyhf_decimator: IQ_STALL no_zmq_packets_s=5.0 '
+                       'since=start stalls=1\n')
+        d = parse_decimator_log(str(log))
+        assert d['iq_stalls'] == 1 and d['iq_stalled_at_end'] is True
+
+    def test_untimed_log_has_no_end_time(self, tmp_path):
+        log = tmp_path / 'airspyhf_decimator.log'
+        log.write_text(_perf_line())
+        assert parse_decimator_log(str(log))['last_perf_time'] is None
+
 
 class TestRxLogParsing:
     def test_usb_drops_are_summed(self, tmp_path):
@@ -211,7 +258,20 @@ class TestRxLogParsing:
 
     def test_missing_log_is_zero(self, tmp_path):
         d = parse_rx_log(str(tmp_path / 'nope.log'))
-        assert d == {'usb_dropped_samples': 0, 'usb_drop_events': 0}
+        assert d == {'usb_dropped_samples': 0, 'usb_drop_events': 0,
+                     'stream_lost': False}
+
+    def test_exit_without_user_cancel_is_stream_lost(self, tmp_path):
+        log = tmp_path / 'airspyhf_zeromq_rx.log'
+        log.write_text('Stop with Ctrl-C\n\nExiting...\nTotal time: 812.1 s\n'
+                       'airspyhf_stop() failed\n')
+        assert parse_rx_log(str(log))['stream_lost'] is True
+
+    def test_user_cancel_is_normal_teardown(self, tmp_path):
+        log = tmp_path / 'airspyhf_zeromq_rx.log'
+        log.write_text('Stop with Ctrl-C\nCaught signal 15\n\n'
+                       'User cancel, exiting...\nTotal time: 812.1 s\ndone\n')
+        assert parse_rx_log(str(log))['stream_lost'] is False
 
 
 class TestControllerLogParsing:
@@ -337,6 +397,82 @@ class TestPlainSession:
         md = generate_report(str(tmp_path))
         assert 'Decimator: 1 dropped ZMQ packets' in md
         assert 'No anomalies detected' not in md
+
+    def test_airspy_dropout_is_not_healthy(self, tmp_path):
+        # Shaped like Nov-6 Afternoon 1: the decimator log just stops (teardown
+        # SIGKILLs it, so it has no final line) and TagTracker cancelled ~10 s later.
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 1, 12.0))
+        (tmp_path / 'airspyhf_decimator.log').write_text(
+            f'14:28:38.689 {_perf_line()}14:28:39.692 {_perf_line()}')
+        (tmp_path / 'airspyhf_zeromq_rx.log').write_text(
+            'Stop with Ctrl-C\n\nExiting...\nTotal time: 246.9546 s\n'
+            'airspyhf_stop() failed\n')
+        (tmp_path / 'MavlinkTagController.log').write_text(
+            '[14:28:49|D]  MonitoredProcess::terminate _name _childProcess:_childProcess.running '
+            'airspyhf_zeromq_rx 0x7f680014c0 1  (MonitoredProcess.cpp:47)\n'
+            '[14:28:49|D]  MonitoredProcess::terminate _name _childProcess:_childProcess.running '
+            'airspyhf_decimator 0x7f740014c0 1  (MonitoredProcess.cpp:47)\n')
+        md = generate_report(str(tmp_path))
+        assert 'Healthy' not in md
+        assert 'IQ stopped 9 s before teardown (last decimator perf line 14:28:39)' in md
+        assert '- **Airspy receiver stopped streaming without a user stop' in md
+
+    def test_prompt_teardown_is_healthy(self, tmp_path):
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 1, 12.0))
+        (tmp_path / 'airspyhf_decimator.log').write_text(f'14:28:40.900 {_perf_line()}')
+        (tmp_path / 'airspyhf_zeromq_rx.log').write_text('Stop with Ctrl-C\n')   # killed
+        # The controller's 1 s timestamps can read earlier than the last perf line.
+        (tmp_path / 'MavlinkTagController.log').write_text(
+            '[14:28:40|D]  MonitoredProcess::terminate _name _childProcess:_childProcess.running '
+            'airspyhf_decimator 0x7f740014c0 1  (MonitoredProcess.cpp:47)\n')
+        md = generate_report(str(tmp_path))
+        assert '**Status:** Healthy' in md
+        assert 'IQ stopped' not in md
+
+    def test_prompt_teardown_across_midnight_is_healthy(self, tmp_path):
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 1, 12.0))
+        (tmp_path / 'airspyhf_decimator.log').write_text(f'00:00:00.100 {_perf_line()}')
+        (tmp_path / 'airspyhf_zeromq_rx.log').write_text('Stop with Ctrl-C\n')   # killed
+        (tmp_path / 'MavlinkTagController.log').write_text(
+            '[23:59:59|D]  MonitoredProcess::terminate _name _childProcess:_childProcess.running '
+            'airspyhf_decimator 0x7f740014c0 1  (MonitoredProcess.cpp:47)\n')
+        md = generate_report(str(tmp_path))
+        assert '**Status:** Healthy' in md
+        assert 'IQ stopped' not in md
+
+    def test_slow_simulator_start_is_healthy(self, tmp_path):
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 1, 12.0))
+        (tmp_path / 'airspyhf_decimator.log').write_text(
+            '14:28:05.000 airspyhf_decimator: IQ_STALL no_zmq_packets_s=5.0 '
+            'since=start stalls=1\n'
+            '14:28:07.000 airspyhf_decimator: IQ_RESUMED stalled_s=7.0 stalls=1\n'
+            f'14:28:40.900 {_perf_line()}')
+        md = generate_report(str(tmp_path))
+        assert '**Status:** Healthy' in md
+        assert 'IQ stopped' not in md
+
+    def test_without_controller_log_the_decimator_log_end_is_teardown(self, tmp_path):
+        _jsonl(tmp_path / 'detector_3.jsonl', _detector_entries(3, 1, 12.0))
+        (tmp_path / 'airspyhf_decimator.log').write_text(
+            f'23:59:50.000 {_perf_line()}'
+            '00:00:10.000 airspyhf_decimator: IQ_STALL no_zmq_packets_s=20 '
+            'since=last_packet stalls=1\n')
+        md = generate_report(str(tmp_path))
+        assert 'IQ stopped 20 s before teardown (last decimator perf line 23:59:50)' in md
+        assert '1 IQ stall(s) logged by the decimator, still stalled at the end' in md
+
+    def test_legacy_heading_log_ending_stalled_is_not_session_end(self, tmp_path):
+        stall = ('14:00:20.000 airspyhf_decimator: IQ_STALL no_zmq_packets_s=5.0 '
+                 'since=last_packet stalls=1\n')
+        for heading, log in (('000', f'14:00:15.000 {_perf_line()}{stall}'),
+                             ('045', f'14:01:15.000 {_perf_line()}')):
+            d = tmp_path / f'heading-{heading}'
+            d.mkdir()
+            _jsonl(d / 'detector_3.jsonl', _detector_entries(3, 1, 12.0))
+            (d / 'airspyhf_decimator.log').write_text(log)
+        md = generate_report(str(tmp_path))
+        assert '1 IQ stall(s) logged by the decimator, 1 of 2 decimator logs ended stalled' in md
+        assert 'still stalled at the end' not in md
 
     def test_either_configured_rate_is_normal(self, tmp_path):
         # Rate A and rate B are just the tag's first and second configured rates.

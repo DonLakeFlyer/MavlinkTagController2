@@ -796,6 +796,50 @@ class RateWindow {
 
 volatile std::sig_atomic_t gShouldStop = 0;
 
+// No valid ZMQ packet for kStall: the receiver sends one every few ms while
+// streaming, so this means the SDR has stopped (perf lines stop with the input).
+class IqStallMonitor {
+  public:
+    using Clock = std::chrono::steady_clock;
+    static constexpr std::chrono::seconds kStall{5};
+
+    explicit IqStallMonitor(Clock::time_point start) : last_(start) {}
+
+    // True once per stall, when the silence first exceeds kStall.
+    bool onIdle(Clock::time_point now) {
+        if (stalled_ || now - last_ < kStall) {
+            return false;
+        }
+        stalled_ = true;
+        ++stalls_;
+        return true;
+    }
+
+    // The stall length when this packet ends a reported stall.
+    std::optional<double> onPacket(Clock::time_point now) {
+        std::optional<double> resumedAfter;
+        if (stalled_) {
+            resumedAfter = std::chrono::duration<double>(now - last_).count();
+            stalled_ = false;
+        }
+        last_ = now;
+        havePacket_ = true;
+        return resumedAfter;
+    }
+
+    double silentSeconds(Clock::time_point now) const {
+        return std::chrono::duration<double>(now - last_).count();
+    }
+    bool havePacket() const { return havePacket_; }
+    uint64_t stalls() const { return stalls_; }
+
+  private:
+    Clock::time_point last_;
+    bool stalled_ = false;
+    bool havePacket_ = false;
+    uint64_t stalls_ = 0;
+};
+
 void handleTerminationSignal(int) { gShouldStop = 1; }
 
 } // namespace
@@ -855,10 +899,18 @@ int main(int argc, char **argv) {
         // Reader thread: receives ZMQ packets and pushes them to the queue.
         std::thread readerThread([&]() {
             try {
+                IqStallMonitor stallMonitor(std::chrono::steady_clock::now());
                 while (gShouldStop == 0) {
                     ZmqPacket pkt;
                     bool timedOut = false;
                     if (!receiver.receive(pkt, timedOut)) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (stallMonitor.onIdle(now)) {
+                            std::cerr << utcStamp() << "airspyhf_decimator: IQ_STALL no_zmq_packets_s="
+                                      << stallMonitor.silentSeconds(now)
+                                      << " since=" << (stallMonitor.havePacket() ? "last_packet" : "start")
+                                      << " stalls=" << stallMonitor.stalls() << "\n";
+                        }
                         if (timedOut) {
                             continue;
                         }
@@ -868,6 +920,10 @@ int main(int argc, char **argv) {
                                       << receiver.malformedPackets() << "\n";
                         }
                         continue;
+                    }
+                    if (const auto resumedAfter = stallMonitor.onPacket(std::chrono::steady_clock::now())) {
+                        std::cerr << utcStamp() << "airspyhf_decimator: IQ_RESUMED stalled_s="
+                                  << *resumedAfter << " stalls=" << stallMonitor.stalls() << "\n";
                     }
                     if (!queue.push(std::move(pkt))) {
                         auto drops = queue.dropped();

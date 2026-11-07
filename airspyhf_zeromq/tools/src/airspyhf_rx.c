@@ -34,6 +34,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 
 #include <airspyhf.h>
 #include <zmq.h>
@@ -175,6 +176,9 @@ typedef struct
 volatile bool do_exit = false;
 
 FILE* fd = NULL;
+// Guards fd between rx_callback and the failure exit, which cannot join the libusb threads.
+pthread_mutex_t fd_mutex = PTHREAD_MUTEX_INITIALIZER;
+bool fd_closed = false;
 
 bool verbose = false;
 bool receive = false;
@@ -408,7 +412,9 @@ int rx_callback(airspyhf_transfer_t* transfer)
 				expected_bytes_written = (ssize_t)total_message_size;
 				zmq_msg_close(&msg);
 			} else {
-				bytes_written = fwrite(pt_rx_buffer, 1, bytes_to_write, fd);
+				pthread_mutex_lock(&fd_mutex);
+				bytes_written = fd_closed ? -1 : (ssize_t)fwrite(pt_rx_buffer, 1, bytes_to_write, fd);
+				pthread_mutex_unlock(&fd_mutex);
 				expected_bytes_written = (ssize_t)bytes_to_write;
 			}
 		} else {
@@ -463,6 +469,26 @@ static void usage(void)
 	);
 }
 
+static void finalize_wav(FILE* f, uint32_t sample_rate)
+{
+	/* Get size of file */
+	const uint32_t file_pos = ftell(f);
+	/* Wav Header */
+	wave_file_hdr.hdr.size = file_pos - 8;
+	/* Wav Format Chunk */
+	wave_file_hdr.fmt_chunk.wFormatTag = 3;  // 3=Float32
+	wave_file_hdr.fmt_chunk.wChannels = 2;   // I + Q
+	wave_file_hdr.fmt_chunk.dwSamplesPerSec = sample_rate;
+	wave_file_hdr.fmt_chunk.dwAvgBytesPerSec = wave_file_hdr.fmt_chunk.dwSamplesPerSec * 4;
+	wave_file_hdr.fmt_chunk.wBlockAlign = 2 * (32 / 8);
+	wave_file_hdr.fmt_chunk.wBitsPerSample = 32;
+	/* Wav Data Chunk */
+	wave_file_hdr.data_chunk.chunkSize = file_pos - sizeof(t_wav_file_hdr);
+	/* Overwrite header with updated data */
+	rewind(f);
+	fwrite(&wave_file_hdr, 1, sizeof(t_wav_file_hdr), f);
+}
+
 
 #ifdef _MSC_VER
 BOOL WINAPI
@@ -493,7 +519,6 @@ int main(int argc, char** argv)
 	int result;
 
 	struct timeval t_end;
-	uint32_t file_pos;
 	uint32_t wav_sample_per_sec;
 	uint32_t nsrates;
 	uint32_t *supported_samplerates;
@@ -907,6 +932,17 @@ int main(int argc, char** argv)
 		fprintf(stderr, "\nUser cancel, exiting...\n");
 	} else {
 		fprintf(stderr,"\nExiting...\n");
+		if (!((limit_num_samples == true) && (bytes_to_xfer == 0))) {
+			// Teardown hangs in libusb/zmq once the device has dropped off USB; let the OS release it.
+			fprintf(stderr, "airspyhf_rx: streaming stopped unexpectedly (device lost or output failed), exiting with failure\n");
+			pthread_mutex_lock(&fd_mutex);
+			if (fd && receive_wav) finalize_wav(fd, wav_sample_per_sec);
+			if (fd && fd != stdout) fclose(fd);
+			fd_closed = true;
+			pthread_mutex_unlock(&fd_mutex);
+			fflush(NULL);
+			_exit(EXIT_FAILURE);
+		}
 	}
 	// print time elapsed
 	{
@@ -929,24 +965,7 @@ int main(int argc, char** argv)
 		}
 	}
 
-	if (fd && receive_wav ) {
-			/* Get size of file */
-			file_pos = ftell(fd);
-			/* Wav Header */
-			wave_file_hdr.hdr.size = file_pos - 8;
-			/* Wav Format Chunk */
-			wave_file_hdr.fmt_chunk.wFormatTag = 3;  // 3=Float32
-			wave_file_hdr.fmt_chunk.wChannels = 2;   // I + Q
-			wave_file_hdr.fmt_chunk.dwSamplesPerSec = wav_sample_per_sec;
-			wave_file_hdr.fmt_chunk.dwAvgBytesPerSec = wave_file_hdr.fmt_chunk.dwSamplesPerSec * 4;
-			wave_file_hdr.fmt_chunk.wBlockAlign = 2 * (32 / 8);
-			wave_file_hdr.fmt_chunk.wBitsPerSample = 32;
-			/* Wav Data Chunk */
-			wave_file_hdr.data_chunk.chunkSize = file_pos - sizeof(t_wav_file_hdr);
-			/* Overwrite header with updated data */
-			rewind(fd);
-			fwrite(&wave_file_hdr, 1, sizeof(t_wav_file_hdr), fd);
-	}
+	if (fd && receive_wav) finalize_wav(fd, wav_sample_per_sec);
 	if (fd && fd != stdout) fclose(fd);
 	if (zmq_pub_socket) zmq_close(zmq_pub_socket);
 	if (zmq_context) zmq_ctx_term(zmq_context);

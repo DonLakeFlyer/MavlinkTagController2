@@ -101,7 +101,7 @@ void MonitoredProcess::_run(void)
             << "\tcommand: " << _command;
 		auto statusStr = formatString("#Process start failed: %s", _name.c_str());
 		_mavlink->sendStatusText(statusStr, MAV_SEVERITY_ERROR);
-        if (_failureCallback) {
+        if (_failureCallback && !_failureReportedByCallback) {
             _failureCallback(255);
         }
 		_signalExited(255);
@@ -140,7 +140,9 @@ void MonitoredProcess::_run(void)
 	} else {
 		logError() << statusStr;
 	}
-	_mavlink->sendStatusText(statusStr, expectedExit ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
+	if (expectedExit || !_failureReportedByCallback || !_failureCallback) {
+		_mavlink->sendStatusText(statusStr, expectedExit ? MAV_SEVERITY_INFO : MAV_SEVERITY_ERROR);
+	}
 
     // A persistent detector must not exit on its own, even cleanly (e.g. an
     // external SIGTERM it handled gracefully); only a controller-requested

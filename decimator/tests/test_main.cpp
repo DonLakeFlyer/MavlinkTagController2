@@ -1049,6 +1049,41 @@ void testNoisyPulseSurvivesShiftAndDecimation() {
     }
 }
 
+void testIqStallMonitor() {
+    using namespace std::chrono_literals;
+    const auto t0 = IqStallMonitor::Clock::time_point{} + 100s;
+    IqStallMonitor monitor(t0);
+    const auto stall = IqStallMonitor::kStall;
+
+    if (monitor.onIdle(t0 + stall - 1ms)) {
+        throw std::runtime_error("stall reported before the limit");
+    }
+    if (!monitor.onIdle(t0 + stall) || monitor.havePacket() || monitor.stalls() != 1) {
+        throw std::runtime_error("no packet since start not reported");
+    }
+    if (monitor.onIdle(t0 + stall + 10s)) {
+        throw std::runtime_error("stall reported twice");
+    }
+    const auto resumed = monitor.onPacket(t0 + 12s);
+    if (!resumed || std::fabs(*resumed - 12.0) > 1e-9) {
+        throw std::runtime_error("resume after a stall not reported");
+    }
+
+    auto t = t0 + 12s;
+    for (int i = 0; i < 100; ++i) {
+        t += 10ms;
+        if (monitor.onPacket(t) || monitor.onIdle(t)) {
+            throw std::runtime_error("steady stream reported as a stall");
+        }
+    }
+    if (monitor.onIdle(t + stall - 1ms) || !monitor.onIdle(t + stall)) {
+        throw std::runtime_error("stall after packets not timed from the last packet");
+    }
+    if (!monitor.havePacket() || monitor.stalls() != 2) {
+        throw std::runtime_error("second stall not counted");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1084,6 +1119,7 @@ int main() {
          testPulseSurvivesShiftAndDecimation},
         {"Noisy pulse survives shift and decimation",
          testNoisyPulseSurvivesShiftAndDecimation},
+        {"IqStallMonitor stall and resume", testIqStallMonitor},
     };
 
     int failures = 0;

@@ -3,7 +3,9 @@
 #include "OperationProgress.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -45,8 +47,13 @@ public:
     // A samples_have drop larger than this is a segment restart; a reordered
     // datagram (reports are <= 1 Hz) regresses by at most about one second.
     static constexpr uint32_t kRestartToleranceSeconds = 2;
+    // Seconds a slice being captured may go without any SLICE_PROGRESS
+    // (sent ~1 Hz while IQ arrives) before the IQ is reported stopped. Half the
+    // GCS's 10 s stall timeout, so the cause reaches the operator before the cancel.
+    static constexpr uint32_t kIqStallSeconds = 5;
 
-    explicit RotationProgress(OperationProgressReporter& reporter);
+    using Clock = std::chrono::steady_clock;
+    explicit RotationProgress(OperationProgressReporter& reporter, std::function<Clock::time_point()> now = Clock::now);
 
     /// Claims the reporter. Returns false if another operation is running.
     bool begin(uint32_t requestId, uint32_t sliceCount, uint32_t detectorCount,
@@ -75,6 +82,9 @@ public:
     /// 1 Hz from the heartbeat: ages running analyses and advances the analysis wait.
     /// Returns one diagnostic per analysis that has just become stalled.
     std::vector<std::string> computeTick();
+    /// ~1 Hz from the heartbeat: returns a diagnostic once when the slice being captured
+    /// has had no SLICE_PROGRESS from any detector for more than kIqStallSeconds of elapsed time.
+    std::optional<std::string> iqTick();
     /// One more slice will be flown; grows step_count.
     void revisitRequested(float headingDeg);
 
@@ -104,6 +114,7 @@ private:
     void     _publishLocked(const std::string& message);
 
     OperationProgressReporter&  _reporter;
+    std::function<Clock::time_point()> _now;
     mutable std::mutex          _mutex;
     bool                        _active            = false;
     Phase                       _phase             = Phase::Startup;
@@ -126,6 +137,8 @@ private:
     uint32_t                    _slicesArmed       = 0;     // index of the current slice is _slicesArmed - 1
     uint32_t                    _slicesComplete    = 0;
     std::map<uint32_t, TagProgress> _sliceProgressByTag;    // per detector, for the current slice
+    Clock::time_point           _lastSliceProgress {};      // ARM or last SLICE_PROGRESS for the current slice
+    bool                        _iqStallReported   = false;
     uint32_t                    _completedExtraSteps = 0;   // restart seconds of completed slices (max per slice across detectors)
     float                       _currentHeadingDeg = 0.0f;
     std::string                 _sliceText;                 // "3/8 090 deg" for the slice being flown

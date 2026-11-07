@@ -80,6 +80,18 @@ void testSimulatedSchedule()
     CHECK(simulatedCpuThrottleFlags(sim, 0.0) == (kThermal | kUnder));
 }
 
+void testNewStickyBits()
+{
+    CHECK(newStickyThrottleBits(0, 0x0).empty());
+    CHECK(newStickyThrottleBits(0, 0x5).empty());                       // current-state bits are not sticky
+    CHECK(newStickyThrottleBits(0, 0x10000) == "under-voltage");
+    CHECK(newStickyThrottleBits(0, 0x50005) == "under-voltage,throttled");
+    CHECK(newStickyThrottleBits(0, 0xF0000) == "under-voltage,freq-capped,throttled,soft-temp-limit");
+    CHECK(newStickyThrottleBits(0x50000, 0x50000).empty());             // already reported
+    CHECK(newStickyThrottleBits(0x10000, 0x50000) == "throttled");      // only the newly set one
+    CHECK(newStickyThrottleBits(0, 0x100000).empty());                  // undocumented high bits ignored
+}
+
 } // namespace
 
 int main()
@@ -88,5 +100,6 @@ int main()
     testParse();
     testSimulatedSchedule();
     testHoldThroughFailedPolls();
+    testNewStickyBits();
     return 0;
 }
