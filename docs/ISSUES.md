@@ -48,6 +48,19 @@ brackets are the issues below that each remaining change addresses.
 | --- | --- | --- |
 | S11 | Discovery on the desktop: 50 Ω terminator at 147.980 MHz, then antenna at 147.900 MHz. | 9 |
 | S12 | Office capture with only the GR01 power lead unplugged; if the bumps vanish, go beyond the existing 2-turn clamp-on (stacked cores, antenna-lead ferrites, filtered supply). | 10 |
+| S14 | Replace the Airspy USB cable with a short, strain-relieved one; check both sockets; try another hub port if it continues. Bench test: `dmesg -w` while streaming, wiggle the cable, run motors (props off). | 13 |
+
+### Controller / TagTracker / analyzer
+
+In priority order.
+
+| # | Change | Addresses |
+| --- | --- | --- |
+| S15 | TagTracker: unit test for "Auto rotation errors after takeoff → RTL" (stall in `PythonWaitForDetectionResultState` while airborne), then fix what it exposes. | 15 |
+| S16 | `airspyhf_zeromq_rx`: when streaming stops without a user stop, exit at once with a non-zero code instead of hanging in `airspyhf_stop` / `airspyhf_close` / `zmq_ctx_term`, so `MonitoredProcess` reports a failure. | 14 |
+| S17 | Decimator or controller: warn when no IQ has arrived for N s (stable log key + STATUSTEXT such as "SDR stopped streaming"), so TagTracker shows the cause instead of "Rotation stalled". | 14 |
+| S18 | `analyzer/post_flight_analysis.py`: flag a receiver log ending in `Exiting...` without `User cancel`, and a decimator log that ends well before teardown. | 16 |
+| S19 | Controller throttle poll: also read the sticky bits (16 under-voltage occurred, …) and log when one first sets. | 17 |
 
 ---
 
@@ -91,6 +104,51 @@ nothing, the next steps would be:
 The office ambient at 147.98 MHz on 10-13 (−121.5) was ≈7 dB above the
 September office baselines at 146.000 MHz, so the office cannot currently
 resolve vehicle noise below that level.
+
+### 13. Airspy drops off USB in flight
+
+Source: 2026-11-06 afternoon, Whizzy (tag 4, 146.788 MHz), 400 ft. Archived
+in `PDC Testing Nov/Nov-6 Afternoon 1 - Whizzy Rotation` and
+`Nov-6 Afternoon 2 - Whizzy Rotation` (with the 14:31 raw capture), each with
+a `Whizzy_analysis.md`.
+
+Both rotations that afternoon died mid-slice. The Pi kernel log (boot of
+07:09–14:33 UTC) has `usb 1-1.2: USB disconnect` (Airspy HF+, on port 2 of the
+baseboard's SMSC 2514 hub) at 14:28:40.603 and 14:30:58.843, within 1 s of the
+IQ stopping in each session log. It reconnected each time within ≈0.3 s. From
+14:32:37 to power-off at 14:33:34 there were ≈25 more disconnects, 12 ×
+`error -71`, and 7 × `Cannot enable. Maybe the USB cable is bad?`. No kernel
+under-voltage message in any boot, and `throttled=0x0` afterwards, so the Pi
+supply was fine. The next boot had no disconnects. Points to the USB cable or
+connector (vibration), not the Airspy or the Pi supply.
+
+The raw capture between the failures (14:31:50, pointing at the dog, 3.18 km)
+is clean and contains the collar at −289 Hz on its 2.0 s rate, but ≈9 dB
+weaker than the Nov-4 rotation's facing headings at ≈2.5–2.8 km.
+
+---
+
+## Pipeline / TagTracker
+
+### 14. The controller does not notice the Airspy stopping
+
+When the Airspy drops off, `airspyhf_zeromq_rx` leaves its main loop
+(`Exiting...`, not `User cancel`), `airspyhf_stop() failed` follows, and the
+process then hangs in teardown without printing `done`. It is still running,
+so `MonitoredProcess` reports nothing; the decimator just stops logging. The
+only thing that ended the rotation was TagTracker's 10 s stall timeout, with
+the generic message "Rotation stalled at slice N".
+
+### 15. Auto rotation failure after takeoff did not RTL
+
+2026-11-06 14:24 UTC: an Auto rotation (Tracker takeoff) stalled at slice 6
+(issue 13) and Tracker sent the cancel, but the vehicle held at ≈400 ft
+instead of returning. `CustomStateMachine::setError` switches to RTL when the
+vehicle is airborne and `RTLOnError` is set, which `autoDetection` does after
+`takeoffComplete`; by reading the code this case should have returned. No
+TagTracker unit test covers an error after takeoff in Auto detection (only
+"cancel does not RTL"). Tracker's log, or the voice announcement ("Returning"
+vs "User is in control of vehicle"), would show which branch ran.
 
 ---
 
@@ -147,3 +205,16 @@ overshoots by up to ≈8° and settles within ≈1.5–2 s. The segment starts
 Effect here ≈0.1 dB per heading (mean dwell yaw within 0.1° of commanded);
 it grows with faster yaw rates or fewer pulses per dwell. Fix belongs in
 TagTracker: arm once yaw error and yaw rate have both been small for ≈1 s.
+
+### 16. Post-flight report calls an Airspy dropout "Healthy"
+
+`analyzer/post_flight_analysis.py` judges decimator health only from drops,
+malformed and out-of-order packets, so both 2026-11-06 afternoon sessions
+report "Healthy — no drops" although the IQ stopped minutes before teardown.
+
+### 17. Under-voltage check sees only the current state every 5 s
+
+The controller polls `vcgencmd get_throttled` every 5 s and uses only the
+current-state bits, so a dip shorter than the poll interval is never seen.
+The sticky bits (bit 16: under-voltage occurred since boot) latch any dip.
+Low priority: the 2026-11-06 kernel log showed no under-voltage.
