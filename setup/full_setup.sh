@@ -75,10 +75,26 @@ if command -v raspi-config >/dev/null 2>&1; then
     sudo systemctl enable mavlink-tag-controller
 
     echo "*** Enable VNC (wayvnc) for remote desktop; desktop autologin so the session exists headless"
-    # Best-effort: no desktop (Lite image) or an older raspi-config must not fail the whole setup
-    sudo raspi-config nonint do_boot_behaviour B4 || echo "*** WARNING: desktop autologin not available; skipping"
-    sudo raspi-config nonint do_vnc 0 || echo "*** WARNING: VNC enable failed; skipping"
-    sudo raspi-config nonint do_vnc_resolution 1920x1080 || echo "*** WARNING: VNC resolution not supported; skipping"
+    # Best-effort: no desktop (Lite image) or an older raspi-config must not fail the whole setup.
+    # Each step is skipped when already configured: do_vnc always restarts wayvnc, which would drop
+    # the VNC session of anyone re-running this script from a VNC terminal to update.
+    # get_boot_cli prints 1 when booting to the desktop; get_autologin prints 0 when autologin is on.
+    if [ "$(sudo raspi-config nonint get_boot_cli 2>/dev/null)" = 1 ] \
+        && [ "$(sudo raspi-config nonint get_autologin 2>/dev/null)" = 0 ]; then
+        echo "*** Desktop autologin already enabled; leaving unchanged"
+    else
+        sudo raspi-config nonint do_boot_behaviour B4 || echo "*** WARNING: desktop autologin not available; skipping"
+    fi
+    if systemctl is-active --quiet wayvnc.service && systemctl is-enabled --quiet wayvnc.service; then
+        echo "*** VNC already running and enabled; leaving it alone"
+    else
+        sudo raspi-config nonint do_vnc 0 || echo "*** WARNING: VNC enable failed; skipping"
+    fi
+    if [ "$(sudo raspi-config nonint get_vnc_resolution 2>/dev/null)" = 1920x1080 ]; then
+        echo "*** VNC resolution already 1920x1080; leaving unchanged"
+    else
+        sudo raspi-config nonint do_vnc_resolution 1920x1080 || echo "*** WARNING: VNC resolution not supported; skipping"
+    fi
 
     echo "*** Setup complete. Reboot to apply serial port and VNC changes and start mavlink-router and the controller service."
 fi

@@ -8,7 +8,7 @@ companion computer.
 | Script | What it does |
 | --- | --- |
 | `install.sh` | Stable bootstrap. Installs git, clones or updates `~/repos/MavlinkTagController2`, then runs `full_setup.sh` **from the checkout** so the steps are never stale. Safe to re-run to update. |
-| `full_setup.sh` | `apt install` build deps, `make` all components, `./setup_venv.sh`. On a Pi additionally: timezone → UTC, hardware serial enabled with no login shell, system journal kept across reboots (capped at 100 MB, overriding Raspberry Pi OS's RAM-only default), mavlink-router built from a pinned commit in `~/repos/mavlink-router` and enabled as the `mavlink-router` systemd service (always restarted, 1 s apart, no start limit), the `mavlink-tag-controller` systemd service (removes the `@reboot` crontab entry of older setups), VNC (`wayvnc`) with desktop autologin at 1920×1080. Reboot afterwards. |
+| `full_setup.sh` | `apt install` build deps, `make` all components, `./setup_venv.sh`. On a Pi additionally: timezone → UTC, hardware serial enabled with no login shell, system journal kept across reboots (capped at 100 MB, overriding Raspberry Pi OS's RAM-only default), mavlink-router built from a pinned commit in `~/repos/mavlink-router` and enabled as the `mavlink-router` systemd service (always restarted, 1 s apart, no start limit), the `mavlink-tag-controller` systemd service (removes the `@reboot` crontab entry of older setups), VNC (`wayvnc`) with desktop autologin at 1920×1080 (each skipped when already set, so re-running from a VNC session does not restart `wayvnc`). Reboot afterwards. |
 | `mavlink-router.conf` | Installed to `/etc/mavlink-router/main.conf`. Routes `/dev/serial0` at 921600 to the controller (UDP `127.0.0.1:14540`) and to a WiFi GCS (UDP server on port 14550). TCP server disabled. |
 | `mavlink-tag-controller.service` | Installed to `/etc/systemd/system`. Runs `start-controller.sh` as `pi` at boot with `CAP_SYS_TIME`, so the controller can set the clock to GPS time. Not restarted if it exits: a restarted controller would have lost its uploaded tags. |
 | `start-controller.sh` | The service's `ExecStart`. Rotates `~/MavlinkTagController.log` to `.1` … `.20` (one file per run, so per boot; nothing truncated), sends its own and the controller's output there, activates the venv, then `exec`s `MavlinkTagController2 udp://127.0.0.1:14540` when the `mavlink-router` service is enabled, otherwise `serial:///dev/serial0:921600`. |
@@ -27,6 +27,8 @@ Update an existing install:
 ```bash
 bash ~/repos/MavlinkTagController2/setup/install.sh
 ```
+
+This is safe to run from a terminal inside a VNC session: `wayvnc` is only (re)started when it is not already running and enabled.
 
 Do not download and run `full_setup.sh` directly — always go through `install.sh`.
 
