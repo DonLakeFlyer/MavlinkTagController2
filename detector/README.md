@@ -42,7 +42,7 @@ else `python3`.
 | `--impulse-blank-factor` | `0` (off) | Zero IQ bursts shorter than a quarter pulse whose magnitude exceeds this multiple of the segment median |
 | `--detection-margin` | `1.0` | Multiplier on the threshold; lower = more sensitive |
 | `--confidence-ratio` | `1.3` | `score/threshold` at or above → HIGH (`confirmed_status = 1`), unless one fold carries > 80 % of the score (dominant-fold gate → LOW) |
-| `--lock-score-ratio` | `3.0` | Minimum `score/threshold` for a lock candidate |
+| `--lock-score-ratio` | `2.0` | Minimum `score/threshold` for a lock candidate |
 | `--warmup-seconds` | `5.0` | IQ discarded before the first cycle |
 | `--tag-id` | `0` | Tag id carried in reports |
 | `--pulse-port` | `0` | UDP port for TTDP reports (`0` = none) |

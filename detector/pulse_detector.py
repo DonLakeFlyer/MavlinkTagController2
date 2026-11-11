@@ -82,6 +82,8 @@ MAX_PENDING_ANALYSES = 4
 MAX_LOCK_CANDIDATES = 4
 # Half-width of the frequency search band around the expected tag offset.
 ACQUISITION_SEARCH_HZ = 2000.0
+# ~2x the highest V2 noise peak (1.07), ~50σ above the null; see COLLECTION_FLOW.md "Lock candidates" (#200).
+LOCK_SCORE_RATIO_DEFAULT = 2.0
 # Candidate identity: a sighting within this of a banked candidate's
 # frequency, at either configured rate, is that candidate. Timing plays no
 # part: a dual-rate collar restarts its train whenever it switches rate.
@@ -1892,8 +1894,9 @@ def main():
                     help='Threshold multiplier, lower = more sensitive (default: 1.0)')
     ap.add_argument('--confidence-ratio', type=float, default=1.3,
                     help='Score/threshold ratio for confirmed status (default: 1.3)')
-    ap.add_argument('--lock-score-ratio', type=float, default=3.0,
-                    help='Minimum score/threshold ratio for a lock candidate (default: 3.0)')
+    ap.add_argument('--lock-score-ratio', type=float, default=LOCK_SCORE_RATIO_DEFAULT,
+                    help='Minimum score/threshold ratio for a lock candidate '
+                         f'(default: {LOCK_SCORE_RATIO_DEFAULT})')
     ap.add_argument('--k', type=int, default=5,
                     help='Number of pulses to fold per detection cycle (default: 5)')
     ap.add_argument('--tip-secondary', type=float, default=None,
