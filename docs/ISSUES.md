@@ -56,7 +56,7 @@ brackets are the issues below that each remaining change addresses.
 | --- | --- | --- |
 | S11 | Discovery on the desktop: 50 Ω terminator at 147.980 MHz, then antenna at 147.900 MHz. | 9 |
 | S12 | Office capture with only the GR01 power lead unplugged; if the bumps vanish, go beyond the existing 2-turn clamp-on (stacked cores, antenna-lead ferrites, filtered supply). | 10 |
-| S14 | Replace the Airspy USB cable with a short, strain-relieved one; check both sockets; try another hub port if it continues. Bench test: `dmesg -w` while streaming, wiggle the cable, run motors (props off). | 13 |
+| S14 | Replace the Airspy USB cable with a short, strain-relieved one; check both sockets; try another hub port if it continues. Bench test: `analyzer/usb_dropout_log.py` while streaming, wiggle the cable, run motors (props off). | 13 |
 
 ### Controller / TagTracker / analyzer
 
