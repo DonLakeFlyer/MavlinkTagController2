@@ -85,7 +85,7 @@ int main(int argc, char** argv)
             // Signal levels are SNR at the 768 kHz simulator output. The 200x
             // decimator adds ~23 dB of processing gain before the detector, so
             // detector-side SNR is ~23 dB higher than the number here.
-            // Chosen around the K=20 lock ratio of 3.0 (see simulator/README.md):
+            // Chosen when the K=20 lock ratio was 3.0, now 2.0 (see COLLECTION_FLOW.md "Simulator levels"):
             //   strong          20 dB (~43 dB at detector)  -> sighted on every heading, confirmed;
             //                  bench-level, strong enough to show spectral sidebands, which the
             //                  detector folds into the carrier (#148)
@@ -93,8 +93,10 @@ int main(int argc, char** argv)
             //                  no sidebands; long-range realistic level
             //   marginal       -27 dB (~-4 dB at detector)  -> one sighting, revisit requested
             //                  (-21 dB gave three sightings, ratios 21/8/8, on 2026-09-12)
-            //   below-marginal -33 dB (~-10 dB at detector) -> never locks; sub-lock hits at the tag
-            //                  frequency on 2-3 headings -> "heard, no bearing"
+            //   below-marginal -34 dB (~-11 dB at detector), tx at 112.5, halfway between the 90 and 135
+            //                  headings -> never locks; sub-lock hits on both -> "heard, no bearing".
+            //                  On a heading's boresight there was no stable level at lock ratio 2.0:
+            //                  -33 dB gave one hit (1.44), -32 dB locked (2.19), 2026-11-11.
             //   silent         no tag at all (iq_simulator noise-only preset) -> "nothing heard";
             //                  checks that pf false alarms do not become "heard"
             //   competing      -18 dB tag + flat -18 dB interferer +1 kHz:
@@ -121,7 +123,8 @@ int main(int argc, char** argv)
                 } else if (simulatorPreset == "marginal") {
                     simulatorSnrDb = -27.0;
                 } else if (simulatorPreset == "below-marginal") {
-                    simulatorSnrDb = -33.0;
+                    simulatorSnrDb = -34.0;
+                    simulatorTxBearingDeg = 112.5;
                 } else if (simulatorPreset == "competing") {
                     simulatorSnrDb = -18.0;
                     simulatorInterfererSnrDb = -18.0;

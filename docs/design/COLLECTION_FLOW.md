@@ -90,11 +90,11 @@ stateDiagram-v2
     Reporting --> [*] : CYCLE_COMPLETE
 
     note right of Locked
-        Qualifying peak: score_ratio ≥ 3.0, no dominant fold, within ±2 kHz,
+        Qualifying peak: score_ratio ≥ 2.0, no dominant fold, within ±2 kHz,
         not a sideband of a ≥ 20 dB stronger peak with the same pulse windows.
         Same emitter as a banked candidate (±200 Hz, PRI either configured rate) → sighting.
         New and bank < 4 → admitted; every earlier heading re-searched at its frequency.
-        New and bank full → dropped. Below 3.0 → not reported after lock.
+        New and bank full → dropped. Below 2.0 → not reported after lock.
     end note
     note right of Thresholding
         No cache: threshold is per dwell, per heading.
@@ -228,7 +228,7 @@ shows such components 30–35 dB down at about ±975 Hz with exactly its pulse
 timing; they are logged (`LOCK_CANDIDATE` `sideband`) and never banked. Every
 emitter peak that satisfies all of
 
-- `score_ratio ≥ --lock-score-ratio` (default **3.0**),
+- `score_ratio ≥ --lock-score-ratio` (default **2.0**),
 - no dominant fold (`fold_info['dominant_fold']`),
 - `|freq − expected_offset| ≤ ACQUISITION_SEARCH_HZ`
 
@@ -249,14 +249,27 @@ Ids are reported to the controller, so entries are never renumbered or
 evicted — the bank is append-only. Sightings are kept in lockstep with the
 bank.
 
-On a later heading a peak at `1.0 ≤ score_ratio < 3.0` that is not a banked
+On a later heading a peak at `1.0 ≤ score_ratio < 2.0` that is not a banked
 candidate (it would have been a status 0/1 report before lock) is **not
 reported**; it stays in the `.jsonl` `DETECTION`/`FOLDS` entries for
 post-flight analysis. So if the provisional lock is a false peak, a real tag
-that only reaches `score_ratio` 1.3–2.9 is never banked and is invisible live;
-the rotation ends with a rejected or low-`r_squared` bearing. Raising
-`score_ratio ≥ 3.0` at K=20 makes a false provisional lock unlikely (none of
-the 69 Apr-11 noise detections exceeded 2.55) but the asymmetry is by design.
+that only reaches `score_ratio` 1.3–1.9 is never banked and is invisible live;
+the rotation ends with a rejected or low-`r_squared` bearing; the asymmetry is
+by design.
+
+Why 2.0 makes a false provisional lock unlikely at K=20: a dwell's permutation
+null (maxima of the noise-normalised fold score) is typically Gumbel
+location μ ≈ 69, scale σ ≈ 1.6, with the threshold at `pf` ≈ 74, so
+`score_ratio` 2.0 is a score of ≈ 148, about 50σ above μ. Thermal noise
+cannot reach it; only structured interference that folds coherently
+(ESC/motor noise, a CW carrier, a periodic power-line source) can. A replay of
+every V2-build rotation with spectrogram dumps (15 rotations, 103 headings,
+2026-11-04 to 11-09, `analyzer/lock_ratio_replay.py`) found no non-collar peak
+above 1.07. That bounds the per-heading rate only to about 1% and includes no
+flight near known interference. The earlier 3.0 was set against the V1 build's
+interference (69 Apr-11 noise detections, max 2.55). On the 2026-11-09 range
+series 2.0 turns the 5.92 km *heard, no bearing* rotation (lock heading 2.79)
+into an unconfirmed 57.8° bearing (true 60.8°).
 
 ## Locked cycles
 
@@ -410,7 +423,7 @@ not tear the collection down on its own — the GCS decides whether to cancel.
      `best_snr`, `confirmed = n_sighted_slices ≥ kConfirmedSightings (2)`.
    - *Heard, no bearing*: `bearing_deg` NaN, `r_squared` 0, `n_valid_slices`
      > 0. Either the selected lock fell below the confidence floor, or the
-     tag **never locked** and its acquisition hits (`score_ratio` 1–3,
+     tag **never locked** and its acquisition hits (`score_ratio` 1–2,
      `detection_status` 0/1) agree in frequency: at least
      `kHeardMinAgreeingHits` = 2 within `kHeardFrequencyToleranceHz` = 200 Hz
      of one another. Acquisition hits alone never produce a bearing: each is
@@ -458,13 +471,14 @@ count, nothing extra is carried on the wire.
 
 `--simulator <level>` with a configured tag drives this flow end to end
 (levels and SNRs: [simulator/README.md](../../simulator/README.md#controller-signal-levels)).
-The SNRs were chosen around the detector's `--lock-score-ratio` of 3.0 at
-K=20; the per-dwell permutation-null threshold
+The SNRs were chosen when the detector's `--lock-score-ratio` was 3.0 at
+K=20 (now 2.0); the per-dwell permutation-null threshold
 ([DETECTOR_PIPELINE.md](DETECTOR_PIPELINE.md)) moves the exact `score_ratio`
 each level produces, so the outcomes below are the intent to verify, not a
 guarantee. The transmitter sits at 135°; with TagTracker's clockwise sweep
 from 0° that is the fourth heading, so the first three headings are always
-re-searched at the candidate's frequency once a lock exists.
+re-searched at the candidate's frequency once a lock exists (`below-marginal`
+places it at 112.5°, between two headings; see below).
 
 - **`strong`** (20 dB): locks on the first heading that sees the tag (0° is
   45° off-axis, still tens of dB up); sighted on every heading → *confirmed*,
@@ -475,17 +489,23 @@ re-searched at the candidate's frequency once a lock exists.
   still ≈ 20 dB over noise) → *confirmed*, bearing ≈ 135°, one candidate, no
   sidebands.
 - **`marginal`** (−27 dB): sighted on one heading only (135°, `score_ratio`
-  ≈ 5 against the lock ratio 3; ±45° ≈ 2, below it). The frequency-only
+  ≈ 4.5; at 2.0 on 2026-11-11 the ±45° headings stayed just below the lock
+  ratio: 90° full search 1.55, 180° re-search 1.94, so an occasional run may
+  sight one and confirm without a revisit). The frequency-only
   re-search may still find the ±45° headings, which then enter the fit but
   are not sightings. `FINISH_COLLECTION`
   returns `COLLECTION_STATUS_REVISIT_REQUESTED`, the GCS flies that heading
   again, then *confirmed* if the revisit sights it, otherwise *unconfirmed*.
   −21 dB gave three sightings and a confirm without a revisit.
-- **`below-marginal`** (−33 dB): never locks (best `score_ratio` ≈ 1.6 at
-  135°) but the tag's bin clears the `pf` threshold on the two or three
-  headings nearest 135°. No bearing is fitted from such hits; because they
-  agree in frequency the result is *heard, no bearing* (`bearing_deg` NaN,
-  `n_valid_slices` > 0).
+- **`below-marginal`** (−34 dB, transmitter at 112.5°): halfway between the
+  90° and 135° headings, each 22.5° off boresight (≈ 0.25 dB down on RA-2A),
+  so both should clear the `pf` threshold at about the same `score_ratio`
+  without reaching the lock ratio (2026-11-11: 90° 1.13, 135° 1.26); 45° and 180° are
+  ≈ 15.5 dB down. No bearing is fitted from such hits; because they agree in
+  frequency the result is *heard, no bearing* (`bearing_deg` NaN,
+  `n_valid_slices` > 0). With the transmitter on a heading's boresight there
+  was no stable level at lock ratio 2.0: on 2026-11-11 −33 dB gave a single
+  hit (1.44, *nothing heard*) and −32 dB locked (2.19).
 - **`silent`**: `noise-only` preset. No lock, `mu` ≈ 68 on every heading
   (`refined: true` on some — the strongest noise bin passing the train gate —
   without moving `threshold`), at most a few scattered `pf` hits (≈ 0.4 per

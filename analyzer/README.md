@@ -240,7 +240,7 @@ at the locked (bin, phase).
 
 Replays a rotation recorded with spectrogram dumping on
 (`heading-NNN/tag<T>_cycle_NNNN_{power.npy,meta.json}`) at several lock
-score ratios (the detector's `--lock-score-ratio`, 3.0 in flight). The
+score ratios (the detector's `--lock-score-ratio`, 2.0 by default). The
 full-band fold search is re-run once per heading on the dumped spectrogram,
 then for each ratio the detector's candidate bank and per-heading
 measurements and the controller's bearing fit are replayed. Use it on

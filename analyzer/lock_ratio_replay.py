@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "detector"))
 import pulse_detector as pd  # noqa: E402
 
 DEFAULT_LOCK_RATIOS = (1.5, 2.0, 2.5, 3.0)
-# pulse_detector --lock-score-ratio default, for startup records written before it was logged.
+# pulse_detector --lock-score-ratio default when startup records did not yet log it (before #200).
 DEFAULT_FLOWN_LOCK_RATIO = 3.0
 
 # controller/AntennaPattern.cpp, dB relative to boresight, 0..180 deg in 10 deg steps.

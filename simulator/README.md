@@ -58,14 +58,14 @@ level only sets its SNR. SNR is specified at the 768 kHz simulator output; the
 SNRs are set in `controller/main.cpp`.
 
 The simulated transmitter sits at bearing 135° by default for every level
-(`--sim-tx-bearing-deg` overrides).
+except `below-marginal` (112.5°) (`--sim-tx-bearing-deg` overrides).
 
 | Level | Simulator SNR | ≈ Detector SNR | Interferer | Exercises |
 |---|---|---|---|---|
 | `strong` (default) | 20 dB | 43 dB | — | Bench-level tag: lock on first heading, sighted everywhere → **confirmed** |
 | `moderate` | −8 dB | 15 dB | — | Long-range realistic tag: sighted on every heading → **confirmed**, single candidate |
 | `marginal` | −27 dB | −4 dB | — | Single-heading sighting → revisit requested → **confirmed** or **unconfirmed** |
-| `below-marginal` | −33 dB | −10 dB | — | Never locks; frequency-agreeing acquisition hits → **heard, no bearing** |
+| `below-marginal` | −34 dB | −11 dB | — | Transmitter at 112.5°, between two headings. Never locks; frequency-agreeing acquisition hits → **heard, no bearing** |
 | `silent` | no tag | — | — | `noise-only` preset regardless of configured tags → **nothing heard** |
 | `competing` | −18 dB | 5 dB | flat −18 dB tone at tag +1 kHz (`kSimulatorInterfererOffsetHz`) | Interferer takes the provisional lock; finish-time fit must select the pattern-shaped tag |
 | `power-line` | −8 dB | 15 dB | directional Gaussian noise source, +15 dB at boresight, bearing 270° | Heading-dependent noise floor and fit down-weighting; add `--sim-noise-source-impulsive` for a heavy-tailed source |

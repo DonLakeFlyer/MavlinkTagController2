@@ -14,6 +14,8 @@ import numpy as np
 import pytest
 
 from pulse_detector import (
+    LOCK_SCORE_RATIO_DEFAULT,
+    Detection,
     RotationCandidates,
     build_hypothesis_indices,
     build_weighting_matrix,
@@ -90,7 +92,7 @@ def _run(headings, hide_from_full_search=()):
     {slice_id: CandidateReport} for candidate 0 and the bank, failing if any
     (slice, candidate) result is produced twice.
     """
-    candidates = RotationCandidates(TIP_A, TIP_B, N_WS, FS, lock_score_ratio=3.0)
+    candidates = RotationCandidates(TIP_A, TIP_B, N_WS, FS, LOCK_SCORE_RATIO_DEFAULT)
     buffered, results = [], {}
     for slice_id, (times, amplitude) in enumerate(headings, start=1):
         power = _power(times, amplitude, seed=slice_id)
@@ -113,6 +115,23 @@ def _run(headings, hide_from_full_search=()):
 
 def _db(x):
     return 10.0 * np.log10(x)
+
+
+@pytest.mark.parametrize('score_ratio, offset_hz, qualifies', [
+    (2.0, 0.0, True),
+    (1.9, 0.0, False),
+    # A collar far off its marked frequency must still be able to lock (#202).
+    (2.0, 1700.0, True),
+])
+def test_lock_qualification_at_default_ratio(score_ratio, offset_hz, qualifies):
+    candidates = RotationCandidates(TIP_A, TIP_B, N_WS, FS, LOCK_SCORE_RATIO_DEFAULT,
+                                    expected_offset_hz=0.0)
+    detection = Detection(
+        freq_hz=offset_hz, snr_db=10.0, signal_power=1.0, offset=0, noise_psd=1e-10,
+        stft_score=1.0, score_ratio=score_ratio, hyp_label='A',
+        fold_info={'max_fold_fraction': 0.1, 'dominant_fold': False,
+                   'fold_snrs': [], 'fold_windows': []})
+    assert candidates.qualifies(detection) is qualifies
 
 
 def test_rate_switches_between_and_inside_dwells_keep_each_headings_power():

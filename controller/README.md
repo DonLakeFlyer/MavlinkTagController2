@@ -34,7 +34,7 @@ make controller           # or: cmake --preset controller && cmake --build --pre
 | --- | --- | --- |
 | `connection_url` | `udp://0.0.0.0:14540` | MAVLink connection, e.g. `serial:///dev/serial0:921600` |
 | `--simulator [level\|preset]` | off | Replace the SDR with `simulator/iq_simulator.py`. Level (`strong`, `moderate`, `marginal`, `below-marginal`, `silent`, `competing`, `power-line`) sets the SNR of the configured tag; any other word is an `iq_simulator` preset used only when no tag is configured |
-| `--sim-tx-bearing-deg <deg>` | `135` | True bearing of the simulated transmitter from the first vehicle pose |
+| `--sim-tx-bearing-deg <deg>` | `135` (`112.5` for `below-marginal`) | True bearing of the simulated transmitter from the first vehicle pose |
 | `--sim-antenna ra2a\|ra23k` | `ra2a` | Gain pattern applied to the simulated tag (independent of the GCS `antenna_id`) |
 | `--sim-pri-ppm <ppm>` | `43` | Collar crystal offset; `0` = perfect crystal |
 | `--sim-rate-switch <s>` | off | Dual-rate tags: switch to the secondary rate this many seconds after the simulator starts (the rotation's `START_DETECTION`) instead of the per-start 4-phase pattern |
