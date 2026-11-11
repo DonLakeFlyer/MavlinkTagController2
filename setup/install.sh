@@ -1,4 +1,12 @@
 #!/bin/bash
+
+# When sourced, "set -e" and the final "exec" would apply to the caller's interactive shell and close
+# the terminal; run in a child bash instead. ${BASH_SOURCE:-} (not [0]) so sh/dash does not choke.
+if [ -n "${BASH_SOURCE:-}" ] && [ "$BASH_SOURCE" != "$0" ]; then
+    bash "$BASH_SOURCE" "$@"
+    return
+fi
+
 set -euo pipefail
 
 # Stable entry point: clones/updates the repo, then runs the *current* setup/full_setup.sh from it.
