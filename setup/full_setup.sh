@@ -32,8 +32,9 @@ if command -v raspi-config >/dev/null 2>&1; then
 
     echo "*** Keep the system journal across reboots (kernel under-voltage events), capped at 100 MB"
     # Raspberry Pi OS ships 40-rpi-volatile-storage.conf (Storage=volatile); a later-sorting drop-in overrides it
+    # SyncIntervalSec: the vehicle is powered off without shutdown; the 5 min default lost the end of flights
     sudo mkdir -p /etc/systemd/journald.conf.d
-    printf '[Journal]\nStorage=persistent\nSystemMaxUse=100M\n' \
+    printf '[Journal]\nStorage=persistent\nSystemMaxUse=100M\nSyncIntervalSec=5s\n' \
         | sudo tee /etc/systemd/journald.conf.d/50-persistent.conf >/dev/null
     sudo systemctl restart systemd-journald
     # Move this boot's RAM-only entries to disk so they survive the reboot after setup

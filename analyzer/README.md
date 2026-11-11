@@ -13,6 +13,7 @@ Tools in this folder:
 | `capture_noise.sh` | live SDR | Capture baseline noise with `airspyhf_rx` (+10 kHz DC-spike offset, writes `.json` sidecar) and run `psd_spectrum.py` |
 | `psd_spectrum.py` | raw IQ capture or detector `_iq.npy` dump | Noise-floor PSD: Welch spectrum, flatness, spikiness, DC-spike height |
 | `power_log.sh` | live Pi | Log Pi supply undervoltage once a second |
+| `usb_dropout_log.py` | live SDR + Pi | Bench repro for Airspy USB dropouts: streams with `airspyhf_rx`, logs kernel USB disconnects/errors, Airspy re-enumeration, hub-port over-current, Pi undervoltage and sample rate |
 
 Detect a strong pulsed signal at a specific frequency and measure its **pulse width** (ms) and **repetition rate** (Hz / interval in seconds).
 
@@ -293,6 +294,31 @@ get_throttled`, and appends the same to `~/power_<label>_<date>_<time>.csv`.
 ```bash
 analyzer/power_log.sh hover
 ```
+
+## usb_dropout_log.py
+
+Runs on the Pi, with no controller session using the Airspy. Streams the
+Airspy with `airspyhf_rx` and logs kernel USB messages (disconnect,
+`error -71`, ...), Airspy re-enumeration, hub-port over-current, Pi
+undervoltage and the sample rate. Type a note and Enter to put a `MARK` in
+the log (e.g. `motors 50%`); Ctrl-C prints a summary.
+
+```bash
+python3 analyzer/usb_dropout_log.py motors-test --freq 146.788
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `label` | `bench` | Name used in the output file names |
+| `--freq` | 146.0 | Tune frequency in MHz |
+| `--out-dir` | `~` | Output directory |
+
+Outputs `usbdrop_<label>_<date>_<time>.log` (events, UTC timestamps that
+line up with `journalctl`) and `.csv` (one row per second).
+
+Needs `airspyhf_rx` and `journalctl` on `PATH` and read access to the
+kernel journal (user in the `adm` group, as `pi` is by default); it exits at
+startup if any is missing. Without `vcgencmd` the power columns stay empty.
 
 ## psd_spectrum.py
 
